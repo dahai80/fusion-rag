@@ -109,7 +109,8 @@ class VectorStore:
     def keyword_search(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
         query_lower = query.lower()
         try:
-            all_rows = self.table.to_list()
+            zero_vec = [0.0] * self.dimension
+            all_rows = self.table.search(zero_vec).limit(10000).to_list()
         except Exception:
             return []
         scored = []
