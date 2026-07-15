@@ -1,0 +1,20 @@
+Metadata-Version: 2.4
+Name: fusion-kb
+Version: 0.1.0
+Summary: Fusion-KB — Apple Silicon native offline vector knowledge base backend
+Requires-Python: >=3.12
+Requires-Dist: httpx>=0.27.0
+Requires-Dist: fastapi>=0.115.0
+Requires-Dist: uvicorn>=0.30.0
+Requires-Dist: pydantic>=2.0.0
+Requires-Dist: lancedb>=0.10.0
+Requires-Dist: pyarrow>=15.0.0
+Requires-Dist: PyMuPDF>=1.24.0
+Requires-Dist: python-docx>=1.1.0
+Requires-Dist: markdownify>=0.12.0
+Requires-Dist: aiofiles>=23.0.0
+Provides-Extra: test
+Requires-Dist: pytest>=8.0.0; extra == "test"
+Requires-Dist: pytest-asyncio>=0.23.0; extra == "test"
+Requires-Dist: pytest-cov>=5.0.0; extra == "test"
+Requires-Dist: pytest-mock>=3.14.0; extra == "test"
