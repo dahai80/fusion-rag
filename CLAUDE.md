@@ -27,6 +27,17 @@ python -m pytest tests/ --cov=fusion_rag --cov-report=term-missing  # With cover
 
 Known test failures: All 164 tests passing (LanceDB DeleteResult bug fixed).
 
+### Benchmark
+
+```bash
+source .venv/bin/activate
+python scripts/benchmark.py   # PRD metrics: BM25 <100ms, cache >90%, RRF fusion
+```
+
+### Known Limitations
+
+- **No MLX embedding model**: fusion-mlx currently has no MLX-format embedding model (BGE-M3 uses pytorch_model.bin, not safetensors). Server runs but embedding/RAG endpoints return errors until an MLX embedding model is available upstream.
+
 ## Architecture
 
 ```
