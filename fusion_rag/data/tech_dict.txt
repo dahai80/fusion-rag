@@ -1,0 +1,80 @@
+# Fusion-RAG 技术领域自定义词典
+# 格式: 词语 词频 词性(可选)
+# 编程语言与框架
+Python 1000 n
+JavaScript 1000 n
+TypeScript 1000 n
+Rust 800 n
+Golang 800 n
+SwiftUI 800 n
+FastAPI 800 n
+PyTorch 800 n
+TensorFlow 800 n
+LangChain 600 n
+LlamaIndex 600 n
+Flask 600 n
+Django 600 n
+React 600 n
+Vue 600 n
+NextJS 500 n
+WebAssembly 500 n
+# AI/ML 术语
+大语言模型 1000 n
+向量数据库 800 n
+知识图谱 800 n
+嵌入模型 800 n
+语义搜索 600 n
+检索增强 600 n
+生成式 600 n
+上下文窗口 600 n
+提示词 800 n
+微调 600 n
+量化 600 n
+推理引擎 600 n
+向量检索 600 n
+混合检索 600 n
+重排序 600 n
+语义分块 600 n
+上下文化 600 n
+实体抽取 600 n
+关系抽取 600 n
+图检索 600 n
+交叉编码器 600 n
+双向编码器 600 n
+# 数据库与存储
+向量存储 600 n
+元数据 600 n
+倒排索引 600 n
+全文检索 600 n
+持久化 600 n
+# 协议与架构
+JSONRPC 500 n
+RESTful 500 n
+微服务 600 n
+单进程 500 n
+跨进程 500 n
+# Apple 生态
+Apple Silicon 800 n
+Metal 600 n
+MLX 800 n
+神经网络引擎 600 n
+统一内存 600 n
+# 编程术语
+异步编程 600 n
+并发控制 600 n
+内存管理 600 n
+垃圾回收 500 n
+类型推断 500 n
+装饰器 500 n
+生成器 500 n
+协程 500 n
+上下文管理 500 n
+依赖注入 500 n
+中间件 600 n
+反向代理 500 n
+负载均衡 500 n
+# 文档格式
+Markdown 800 n
+PDF 600 n
+DOCX 500 n
+HTML 600 n

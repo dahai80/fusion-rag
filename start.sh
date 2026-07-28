@@ -50,11 +50,9 @@ start() {
     echo "  Embedding model: $EMBED_MODEL"
     echo ""
 
+    FUSION_RAG_PORT="$PORT" FUSION_RAG_HOST="$HOST" \
+    FUSION_MLX_URL="$MLX_URL" FUSION_RAG_EMBED="$EMBED_MODEL" \
     nohup python3 -m fusion_rag.api.server \
-        --host "$HOST" \
-        --port "$PORT" \
-        --mlx-url "$MLX_URL" \
-        --embed-model "$EMBED_MODEL" \
         >> "$STDOUT_LOG" 2>> "$STDERR_LOG" &
 
     PID=$!

@@ -18,10 +18,20 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# callers: VectorStore (vector_store.py:115-117), HybridSearch
+# API: BM25Index — public class unchanged, only _tokenize() enhanced
+# data: tech_dict.txt — jieba user dict format: "词语 词频 词性"
+# user instruction: "完成所有待办任务"
 _JIEBA_AVAILABLE = False
+_JIEBA_DICT_LOADED = False
 try:
     import jieba
     _JIEBA_AVAILABLE = True
+    _dict_path = Path(__file__).parent.parent / "data" / "tech_dict.txt"
+    if _dict_path.exists():
+        jieba.load_userdict(str(_dict_path))
+        _JIEBA_DICT_LOADED = True
+        logger.debug("Loaded tech dict: %s", _dict_path)
 except ImportError:
     pass
 

@@ -70,3 +70,18 @@ def run_server(
         embedding_model=embedding_model,
     )
     uvicorn.run(app, host=host, port=port, log_level=log_level.lower())
+
+if __name__ == "__main__":
+    import os
+    host = os.environ.get("FUSION_RAG_HOST", "127.0.0.1")
+    port = int(os.environ.get("FUSION_RAG_PORT", "11436"))
+    mlx_url = os.environ.get("FUSION_MLX_URL", "http://localhost:11434/v1")
+    embed_model = os.environ.get("FUSION_RAG_EMBED", "BGE-M3")
+    log_level = os.environ.get("FUSION_RAG_LOG_LEVEL", "INFO")
+    run_server(
+        host=host,
+        port=port,
+        mlx_base_url=mlx_url,
+        embedding_model=embed_model,
+        log_level=log_level,
+    )
