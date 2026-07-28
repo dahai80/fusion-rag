@@ -1,5 +1,5 @@
 #!/bin/bash
-# Fusion-KB — Start/Stop script
+# Fusion-RAG — Start/Stop script
 # Usage: ./start.sh [start|stop|restart|status]
 
 set -e
@@ -8,11 +8,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # Config
-PORT=${FUSION_KB_PORT:-11436}
-HOST=${FUSION_KB_HOST:-"127.0.0.1"}
+PORT=${FUSION_RAG_PORT:-11436}
+HOST=${FUSION_RAG_HOST:-"127.0.0.1"}
 MLX_URL=${FUSION_MLX_URL:-"http://localhost:11434/v1"}
-EMBED_MODEL=${FUSION_KB_EMBED:-"BGE-M3"}
-PID_FILE="$SCRIPT_DIR/.fusion-kb.pid"
+EMBED_MODEL=${FUSION_RAG_EMBED:-"BGE-M3"}
+PID_FILE="$SCRIPT_DIR/.fusion-rag.pid"
 LOG_DIR="$SCRIPT_DIR/logs"
 STDOUT_LOG="$LOG_DIR/stdout.log"
 STDERR_LOG="$LOG_DIR/stderr.log"
@@ -39,18 +39,18 @@ is_running() {
 
 start() {
     if is_running; then
-        echo "Fusion-KB is already running (PID $(get_pid))"
+        echo "Fusion-RAG is already running (PID $(get_pid))"
         exit 1
     fi
 
     ensure_log_dir
 
-    echo "Starting Fusion-KB on $HOST:$PORT ..."
+    echo "Starting Fusion-RAG on $HOST:$PORT ..."
     echo "  MLX URL: $MLX_URL"
     echo "  Embedding model: $EMBED_MODEL"
     echo ""
 
-    nohup python3 -m fusion_kb.api.server \
+    nohup python3 -m fusion_rag.api.server \
         --host "$HOST" \
         --port "$PORT" \
         --mlx-url "$MLX_URL" \
@@ -64,7 +64,7 @@ start() {
     # Wait for startup
     sleep 1
     if is_running; then
-        echo "Fusion-KB is running on http://$HOST:$PORT"
+        echo "Fusion-RAG is running on http://$HOST:$PORT"
     else
         echo "Failed to start. Check logs: $STDERR_LOG"
         cat "$STDERR_LOG" | tail -10
@@ -75,11 +75,11 @@ start() {
 stop() {
     local pid=$(get_pid)
     if [ -z "$pid" ]; then
-        echo "Fusion-KB is not running"
+        echo "Fusion-RAG is not running"
         return
     fi
 
-    echo "Stopping Fusion-KB (PID $pid) ..."
+    echo "Stopping Fusion-RAG (PID $pid) ..."
     kill "$pid" 2>/dev/null || true
     rm -f "$PID_FILE"
 
@@ -109,7 +109,7 @@ restart() {
 status() {
     if is_running; then
         local pid=$(get_pid)
-        echo "Fusion-KB is running (PID $pid)"
+        echo "Fusion-RAG is running (PID $pid)"
         echo "  URL: http://$HOST:$PORT"
 
         # Check if responding
@@ -121,7 +121,7 @@ status() {
             fi
         fi
     else
-        echo "Fusion-KB is not running"
+        echo "Fusion-RAG is not running"
     fi
 }
 
@@ -142,10 +142,10 @@ case "${1:-status}" in
         echo "Usage: $0 {start|stop|restart|status}"
         echo ""
         echo "Environment variables:"
-        echo "  FUSION_KB_PORT     Port (default: 11436)"
-        echo "  FUSION_KB_HOST     Host (default: 127.0.0.1)"
+        echo "  FUSION_RAG_PORT     Port (default: 11436)"
+        echo "  FUSION_RAG_HOST     Host (default: 127.0.0.1)"
         echo "  FUSION_MLX_URL     fusion-mlx URL (default: http://localhost:11434/v1)"
-        echo "  FUSION_KB_EMBED    Embedding model (default: BGE-M3)"
+        echo "  FUSION_RAG_EMBED    Embedding model (default: BGE-M3)"
         exit 1
         ;;
 esac

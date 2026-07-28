@@ -89,7 +89,7 @@ class ResultCache:
     def __init__(self, db_path: str = ""):
         from pathlib import Path
         if not db_path:
-            db_path = str(Path.home() / ".fusion-kb" / "cache.db")
+            db_path = str(Path.home() / ".fusion-rag" / "cache.db")
         self.db_path = db_path
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()

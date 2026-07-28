@@ -1,6 +1,6 @@
 <div align="center">
 
-# Fusion-KB
+# Fusion-RAG
 
 **Apple Silicon Native Offline Vector Knowledge Base Backend**
 
@@ -16,9 +16,9 @@ Local vector knowledge base service for the Fusion-MLX ecosystem — 100% offlin
 
 ---
 
-## Why Fusion-KB?
+## Why Fusion-RAG?
 
-| Feature | Fusion-KB | Dify RAG | LangChain RAG |
+| Feature | Fusion-RAG | Dify RAG | LangChain RAG |
 |---------|-----------|----------|---------------|
 | **MLX native** | ✅ fusion-mlx API | ❌ Ollama/Cloud | ❌ Cloud API |
 | **Apple Silicon optimized** | ✅ LanceDB + MLX | ❌ | ❌ |
@@ -27,7 +27,7 @@ Local vector knowledge base service for the Fusion-MLX ecosystem — 100% offlin
 | **Local offline** | ✅ 100% | ⚠️ Partial | ❌ |
 | **Zero API cost** | ✅ | ❌ | ❌ |
 
-**One sentence:** Fusion-KB is a unified local vector knowledge base backend for the Fusion-MLX ecosystem — all Embedding goes through fusion-mlx HTTP API, no direct MLX imports.
+**One sentence:** Fusion-RAG is a unified local vector knowledge base backend for the Fusion-MLX ecosystem — all Embedding goes through fusion-mlx HTTP API, no direct MLX imports.
 
 ---
 
@@ -42,8 +42,8 @@ Local vector knowledge base service for the Fusion-MLX ecosystem — 100% offlin
 ### Install
 
 ```bash
-git clone https://github.com/dahai80/fusion-kb.git
-cd fusion-kb
+git clone https://github.com/dahai80/fusion-rag.git
+cd fusion-rag
 pip install -e ".[test]"
 ```
 
@@ -51,16 +51,16 @@ pip install -e ".[test]"
 
 ```bash
 ./start.sh start
-# Fusion-KB running on http://127.0.0.1:11436
+# Fusion-RAG running on http://127.0.0.1:11436
 ```
 
 ### Minimal Example
 
 ```python
 import asyncio
-from fusion_kb import KnowledgeBase, DocumentParser, Chunker
-from fusion_kb.embed.client import EmbeddingClient
-from fusion_kb.store.vector_store import VectorStore
+from fusion_rag import KnowledgeBase, DocumentParser, Chunker
+from fusion_rag.embed.client import EmbeddingClient
+from fusion_rag.store.vector_store import VectorStore
 
 async def main():
     # 1. Parse a document
@@ -85,7 +85,7 @@ asyncio.run(main())
 
 ## API Reference
 
-Fusion-KB provides a REST API at `/kb/*` for knowledge base operations.
+Fusion-RAG provides a REST API at `/kb/*` for knowledge base operations.
 
 ### Knowledge Base Management
 
@@ -124,7 +124,7 @@ Fusion-KB provides a REST API at `/kb/*` for knowledge base operations.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Fusion-KB HTTP API (FastAPI)                   │
+│                    Fusion-RAG HTTP API (FastAPI)                   │
 │  /kb/bases  /kb/bases/{id}/documents  /kb/bases/{id}/search     │
 │  /kb/bases/{id}/ask  /kb/status  /health                        │
 └───────────────────────────┬─────────────────────────────────────┘
@@ -181,10 +181,10 @@ Fusion-KB provides a REST API at `/kb/*` for knowledge base operations.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `FUSION_KB_PORT` | 11436 | Server port |
-| `FUSION_KB_HOST` | 127.0.0.1 | Listen address |
+| `FUSION_RAG_PORT` | 11436 | Server port |
+| `FUSION_RAG_HOST` | 127.0.0.1 | Listen address |
 | `FUSION_MLX_URL` | http://localhost:11434/v1 | fusion-mlx URL |
-| `FUSION_KB_EMBED` | BGE-M3 | Embedding model |
+| `FUSION_RAG_EMBED` | BGE-M3 | Embedding model |
 
 ### Using start.sh
 
@@ -207,7 +207,7 @@ pip install -e ".[test]"
 pytest tests/
 
 # Run with coverage
-pytest tests/ --cov=fusion_kb --cov-report=term-missing
+pytest tests/ --cov=fusion_rag --cov-report=term-missing
 ```
 
 ### Test Stats
@@ -219,7 +219,7 @@ pytest tests/ --cov=fusion_kb --cov-report=term-missing
 
 ## Comparison with Alternatives
 
-| Dimension | LightRAG | PrivateGPT | **Fusion-KB** |
+| Dimension | LightRAG | PrivateGPT | **Fusion-RAG** |
 |-----------|----------|-----------|--------------|
 | **MLX native** | ❌ | ❌ | ✅ fusion-mlx API |
 | **Apple Silicon optimized** | ❌ | ❌ | ✅ LanceDB + MLX |

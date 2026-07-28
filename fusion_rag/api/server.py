@@ -1,4 +1,4 @@
-"""Fusion-KB FastAPI server — wires together all routes and services."""
+"""Fusion-RAG FastAPI server — wires together all routes and services."""
 from __future__ import annotations
 
 import logging
@@ -20,9 +20,9 @@ def create_app(
     mlx_base_url: str = "http://localhost:11434/v1",
     embedding_model: str = "BGE-M3",
 ) -> FastAPI:
-    """Create and configure the Fusion-KB FastAPI application."""
+    """Create and configure the Fusion-RAG FastAPI application."""
     app = FastAPI(
-        title="Fusion-KB",
+        title="Fusion-RAG",
         description="Apple Silicon native offline vector knowledge base backend",
         version="0.1.0",
     )
@@ -43,7 +43,7 @@ def create_app(
     # Health check
     @app.get("/health")
     async def health():
-        return {"status": "ok", "service": "fusion-kb"}
+        return {"status": "ok", "service": "fusion-rag"}
 
     return app
 
@@ -56,7 +56,7 @@ def run_server(
     embedding_model: str = "BGE-M3",
     log_level: str = "INFO",
 ) -> None:
-    """Run the Fusion-KB server."""
+    """Run the Fusion-RAG server."""
     logging.basicConfig(level=getattr(logging, log_level.upper(), logging.INFO))
     app = create_app(
         kb_storage_dir=kb_storage_dir,

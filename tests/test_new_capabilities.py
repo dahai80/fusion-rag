@@ -1,4 +1,4 @@
-"""Tests for new P0/P1/P2 capabilities in fusion-kb."""
+"""Tests for new P0/P1/P2 capabilities in fusion-rag."""
 from __future__ import annotations
 
 import tempfile
@@ -7,12 +7,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from fusion_kb.engine.reranker import Reranker, HybridSearch
-from fusion_kb.engine.retrievers import MMRRetriever, ContextCompressionRetriever, FusionRetriever
-from fusion_kb.engine.preprocessor import DocumentPreprocessor, RecursiveChunker
-from fusion_kb.engine.rag_chain import MultiTurnRAG, DocumentChain
-from fusion_kb.engine.streaming import SSEStreamer, MetadataExtractor, ResultCache
-from fusion_kb.connectors import DatabaseConnector, WebLoader
+from fusion_rag.engine.reranker import Reranker, HybridSearch
+from fusion_rag.engine.retrievers import MMRRetriever, ContextCompressionRetriever, FusionRetriever
+from fusion_rag.engine.preprocessor import DocumentPreprocessor, RecursiveChunker
+from fusion_rag.engine.rag_chain import MultiTurnRAG, DocumentChain
+from fusion_rag.engine.streaming import SSEStreamer, MetadataExtractor, ResultCache
+from fusion_rag.connectors import DatabaseConnector, WebLoader
 
 
 # ── Reranker ──

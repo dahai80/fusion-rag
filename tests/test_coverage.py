@@ -9,10 +9,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from fusion_kb.api.server import create_app
-from fusion_kb.api.routes import set_kb_context
-from fusion_kb.engine.knowledge_base import KnowledgeBaseManager
-from fusion_kb.embed.client import EmbeddingClient
+from fusion_rag.api.server import create_app
+from fusion_rag.api.routes import set_kb_context
+from fusion_rag.engine.knowledge_base import KnowledgeBaseManager
+from fusion_rag.embed.client import EmbeddingClient
 
 
 # ── FastAPI Routes ──
@@ -171,7 +171,7 @@ class TestDocumentParserAdvanced:
             f.write("<html><body><h1>Title</h1><p>Content</p></body></html>")
             path = f.name
         try:
-            from fusion_kb.engine.document import DocumentParser
+            from fusion_rag.engine.document import DocumentParser
             parser = DocumentParser()
             result = await parser.parse(path)
             assert "Title" in result.content
@@ -186,7 +186,7 @@ class TestDocumentParserAdvanced:
             Path(tmpdir, "a.txt").write_text("file a")
             Path(tmpdir, "sub").mkdir()
             Path(tmpdir, "sub", "b.md").write_text("# sub file")
-            from fusion_kb.engine.document import DocumentParser
+            from fusion_rag.engine.document import DocumentParser
             parser = DocumentParser()
             results = await parser.parse_directory(tmpdir, recursive=True)
             assert len(results) == 2
@@ -195,7 +195,7 @@ class TestDocumentParserAdvanced:
 
     @pytest.mark.asyncio
     async def test_parse_directory_not_dir(self):
-        from fusion_kb.engine.document import DocumentParser
+        from fusion_rag.engine.document import DocumentParser
         parser = DocumentParser()
         results = await parser.parse_directory("/nonexistent")
         assert results == []
@@ -207,7 +207,7 @@ class TestVectorStoreAdvanced:
     @pytest.mark.asyncio
     async def test_add_and_search_with_threshold(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            from fusion_kb.store.vector_store import VectorStore
+            from fusion_rag.store.vector_store import VectorStore
             store = VectorStore(tmpdir, dimension=4)
             store.add("c1", [1.0, 0.0, 0.0, 0.0], "cats", doc_path="/a.txt", doc_name="a.txt", doc_type="txt")
             store.add("c2", [0.0, 1.0, 0.0, 0.0], "dogs", doc_path="/b.txt", doc_name="b.txt", doc_type="txt")
@@ -221,7 +221,7 @@ class TestVectorStoreAdvanced:
     @pytest.mark.asyncio
     async def test_keyword_search(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            from fusion_kb.store.vector_store import VectorStore
+            from fusion_rag.store.vector_store import VectorStore
             store = VectorStore(tmpdir, dimension=4)
             store.add("c1", [1.0, 0.0, 0.0, 0.0], "the cat sat on the mat", doc_path="/a.txt", doc_name="a.txt", doc_type="txt")
             store.add("c2", [0.0, 1.0, 0.0, 0.0], "dogs are great pets", doc_path="/b.txt", doc_name="b.txt", doc_type="txt")
@@ -233,7 +233,7 @@ class TestVectorStoreAdvanced:
     @pytest.mark.asyncio
     async def test_delete_by_doc(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            from fusion_kb.store.vector_store import VectorStore
+            from fusion_rag.store.vector_store import VectorStore
             store = VectorStore(tmpdir, dimension=4)
             store.add("c1", [1.0, 0.0, 0.0, 0.0], "text", doc_path="/a.txt")
             store.add("c2", [0.0, 1.0, 0.0, 0.0], "more", doc_path="/b.txt")
@@ -244,7 +244,7 @@ class TestVectorStoreAdvanced:
     @pytest.mark.asyncio
     async def test_add_batch_with_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            from fusion_kb.store.vector_store import VectorStore
+            from fusion_rag.store.vector_store import VectorStore
             store = VectorStore(tmpdir, dimension=4)
             records = [
                 {"id": "c1", "vector": [1.0, 0.0, 0.0, 0.0], "text": "a", "doc_path": "", "doc_name": "", "doc_type": "", "chunk_index": 0, "metadata": {"type": "code"}},
@@ -259,7 +259,7 @@ class TestMetadataStoreAdvanced:
     @pytest.mark.asyncio
     async def test_get_document_by_path(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            from fusion_kb.store.metadata_store import MetadataStore
+            from fusion_rag.store.metadata_store import MetadataStore
             store = MetadataStore(str(Path(tmpdir) / "meta.db"))
             store.add_document("d1", "/path/to/file.pdf", "file.pdf", "pdf")
             doc = store.get_document_by_path("/path/to/file.pdf")
@@ -271,7 +271,7 @@ class TestMetadataStoreAdvanced:
     @pytest.mark.asyncio
     async def test_delete_chunks_by_doc(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            from fusion_kb.store.metadata_store import MetadataStore
+            from fusion_rag.store.metadata_store import MetadataStore
             store = MetadataStore(str(Path(tmpdir) / "meta.db"))
             store.add_document("d1", "/f.txt", "f.txt", "txt")
             store.add_chunk("c1", "d1", "/f.txt", 0, "text")
@@ -286,7 +286,7 @@ class TestMetadataStoreAdvanced:
 class TestRAGChainAdvanced:
     @pytest.mark.asyncio
     async def test_refine(self):
-        from fusion_kb.engine.rag_chain import DocumentChain
+        from fusion_rag.engine.rag_chain import DocumentChain
         with patch("httpx.AsyncClient.post", new=AsyncMock()) as mock_post:
             mock_resp = MagicMock()
             mock_resp.json.return_value = {"choices": [{"message": {"content": "refined answer"}}]}
@@ -296,7 +296,7 @@ class TestRAGChainAdvanced:
 
     @pytest.mark.asyncio
     async def test_map_reduce(self):
-        from fusion_kb.engine.rag_chain import DocumentChain
+        from fusion_rag.engine.rag_chain import DocumentChain
         with patch("httpx.AsyncClient.post", new=AsyncMock()) as mock_post:
             mock_resp = MagicMock()
             mock_resp.json.return_value = {"choices": [{"message": {"content": "map result"}}]}
@@ -309,20 +309,20 @@ class TestRAGChainAdvanced:
 
 class TestPreprocessorAdvanced:
     def test_clean_with_control_chars(self):
-        from fusion_kb.engine.preprocessor import DocumentPreprocessor
+        from fusion_rag.engine.preprocessor import DocumentPreprocessor
         result = DocumentPreprocessor.clean("hello\x00world\x01test")
         assert "hello" in result
         assert "\x00" not in result
 
     def test_strip_boilerplate(self):
-        from fusion_kb.engine.preprocessor import DocumentPreprocessor
+        from fusion_rag.engine.preprocessor import DocumentPreprocessor
         text = "Header\n\nMain content\n\nCopyright 2024\n\nFooter"
         result = DocumentPreprocessor.strip_boilerplate(text)
         # Should remove short lines and boilerplate
         assert "Main content" in result
 
     def test_recursive_chunker_overlap(self):
-        from fusion_kb.engine.preprocessor import RecursiveChunker
+        from fusion_rag.engine.preprocessor import RecursiveChunker
         c = RecursiveChunker(chunk_size=20, chunk_overlap=5)
         text = "Hello world. This is a test. " * 10
         chunks = c.chunk(text)
@@ -334,7 +334,7 @@ class TestPreprocessorAdvanced:
 class TestRerankerAdvanced:
     @pytest.mark.asyncio
     async def test_rerank_failure_neutral_score(self):
-        from fusion_kb.engine.reranker import Reranker
+        from fusion_rag.engine.reranker import Reranker
         r = Reranker()
         with patch("httpx.AsyncClient.post", new=AsyncMock(side_effect=RuntimeError("fail"))):
             docs = [{"id": "1", "text": "test"}]
@@ -348,7 +348,7 @@ class TestRerankerAdvanced:
 class TestConnectorsAdvanced:
     @pytest.mark.asyncio
     async def test_web_loader_success(self):
-        from fusion_kb.connectors import WebLoader
+        from fusion_rag.connectors import WebLoader
         loader = WebLoader()
         with patch("httpx.AsyncClient.get", new=AsyncMock()) as mock_get:
             mock_resp = MagicMock()
@@ -361,7 +361,7 @@ class TestConnectorsAdvanced:
 
     @pytest.mark.asyncio
     async def test_web_loader_error(self):
-        from fusion_kb.connectors import WebLoader
+        from fusion_rag.connectors import WebLoader
         loader = WebLoader()
         with patch("httpx.AsyncClient.get", side_effect=RuntimeError("fail")):
             result = await loader.load("http://example.com")
@@ -373,7 +373,7 @@ class TestConnectorsAdvanced:
 class TestStreamingAdvanced:
     @pytest.mark.asyncio
     async def test_sse_stream(self):
-        from fusion_kb.engine.streaming import SSEStreamer
+        from fusion_rag.engine.streaming import SSEStreamer
         sse = SSEStreamer()
         with patch("httpx.AsyncClient.stream") as mock_stream:
             mock_ctx = MagicMock()
@@ -390,7 +390,7 @@ class TestStreamingAdvanced:
 
     @pytest.mark.asyncio
     async def test_metadata_extractor(self):
-        from fusion_kb.engine.streaming import MetadataExtractor
+        from fusion_rag.engine.streaming import MetadataExtractor
         extractor = MetadataExtractor()
         with patch("httpx.AsyncClient.post", new=AsyncMock()) as mock_post:
             mock_resp = MagicMock()
@@ -403,7 +403,7 @@ class TestStreamingAdvanced:
 
     @pytest.mark.asyncio
     async def test_metadata_extractor_failure(self):
-        from fusion_kb.engine.streaming import MetadataExtractor
+        from fusion_rag.engine.streaming import MetadataExtractor
         extractor = MetadataExtractor()
         with patch("httpx.AsyncClient.post", side_effect=RuntimeError("fail")):
             meta = await extractor.extract("text", "doc.md")
@@ -415,7 +415,7 @@ class TestStreamingAdvanced:
 class TestRetrieversAdvanced:
     @pytest.mark.asyncio
     async def test_mmr_empty(self):
-        from fusion_kb.engine.retrievers import MMRRetriever
+        from fusion_rag.engine.retrievers import MMRRetriever
         store = MagicMock()
         store.search = MagicMock(return_value=[])
         mmr = MMRRetriever(store)
@@ -424,7 +424,7 @@ class TestRetrieversAdvanced:
 
     @pytest.mark.asyncio
     async def test_context_compression_empty(self):
-        from fusion_kb.engine.retrievers import ContextCompressionRetriever
+        from fusion_rag.engine.retrievers import ContextCompressionRetriever
         store = MagicMock()
         retriever = ContextCompressionRetriever(store)
         retriever.base_retriever.search = AsyncMock(return_value=[])

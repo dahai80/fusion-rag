@@ -1,4 +1,4 @@
-"""Fusion-KB HTTP API — FastAPI routes for knowledge base operations.
+"""Fusion-RAG HTTP API — FastAPI routes for knowledge base operations.
 
 All model calls go through fusion-mlx HTTP API (/v1/embeddings, /v1/chat/completions).
 No direct MLX imports.

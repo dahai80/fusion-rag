@@ -1,13 +1,13 @@
-# Fusion-KB API Reference
+# Fusion-RAG API Reference
 
-> Module-level documentation for `fusion_kb` packages.
+> Module-level documentation for `fusion_rag` packages.
 
 ---
 
-## `fusion_kb.engine.knowledge_base` — Knowledge Base Management
+## `fusion_rag.engine.knowledge_base` — Knowledge Base Management
 
 ```python
-from fusion_kb.engine.knowledge_base import KnowledgeBaseManager, KnowledgeBase, KnowledgeBaseConfig
+from fusion_rag.engine.knowledge_base import KnowledgeBaseManager, KnowledgeBase, KnowledgeBaseConfig
 ```
 
 ### KnowledgeBaseManager
@@ -37,10 +37,10 @@ Manages multiple knowledge bases with CRUD operations.
 
 ---
 
-## `fusion_kb.engine.document` — Document Parser
+## `fusion_rag.engine.document` — Document Parser
 
 ```python
-from fusion_kb.engine.document import DocumentParser, DocumentType, ParseResult
+from fusion_rag.engine.document import DocumentParser, DocumentType, ParseResult
 ```
 
 ### DocumentParser
@@ -67,10 +67,10 @@ Parses documents of various formats into plain text.
 
 ---
 
-## `fusion_kb.engine.chunker` — Chunker
+## `fusion_rag.engine.chunker` — Chunker
 
 ```python
-from fusion_kb.engine.chunker import Chunker, Chunk
+from fusion_rag.engine.chunker import Chunker, Chunk
 ```
 
 Splits parsed text into chunks for embedding.
@@ -89,10 +89,10 @@ Splits parsed text into chunks for embedding.
 
 ---
 
-## `fusion_kb.embed.client` — Embedding Client
+## `fusion_rag.embed.client` — Embedding Client
 
 ```python
-from fusion_kb.embed.client import EmbeddingClient
+from fusion_rag.embed.client import EmbeddingClient
 ```
 
 Generates text embeddings via fusion-mlx HTTP API. Never imports MLX directly.
@@ -110,10 +110,10 @@ EmbeddingClient(base_url="http://localhost:11434/v1", model="BGE-M3", api_key="l
 
 ---
 
-## `fusion_kb.store.vector_store` — Vector Store
+## `fusion_rag.store.vector_store` — Vector Store
 
 ```python
-from fusion_kb.store.vector_store import VectorStore
+from fusion_rag.store.vector_store import VectorStore
 ```
 
 LanceDB-based vector storage. LanceDB is imported lazily.
@@ -135,10 +135,10 @@ VectorStore(vector_path, dimension=1024)
 
 ---
 
-## `fusion_kb.store.metadata_store` — Metadata Store
+## `fusion_rag.store.metadata_store` — Metadata Store
 
 ```python
-from fusion_kb.store.metadata_store import MetadataStore
+from fusion_rag.store.metadata_store import MetadataStore
 ```
 
 SQLite-backed metadata tracking for documents and chunks.
@@ -160,7 +160,7 @@ MetadataStore(db_path)
 
 ---
 
-## `fusion_kb.api.routes` — HTTP API Routes
+## `fusion_rag.api.routes` — HTTP API Routes
 
 FastAPI routes mounted at `/kb/*`.
 

@@ -1,7 +1,7 @@
-# Fusion-KB 业界对标与差距分析
+# Fusion-RAG 业界对标与差距分析
 
 > 对比 Dify RAG、LlamaIndex、LangChain RAG、Haystack、Chroma 等业界最佳方案，
-> 定位 Fusion-KB 当前能力缺口。
+> 定位 Fusion-RAG 当前能力缺口。
 
 ---
 
@@ -9,7 +9,7 @@
 
 ### 1.1 Dify RAG（最完整 RAG 平台）
 
-| 能力维度 | Dify RAG | Fusion-KB | 差距 | 优先级 |
+| 能力维度 | Dify RAG | Fusion-RAG | 差距 | 优先级 |
 |---------|----------|-----------|------|--------|
 | **文档解析** | PDF/DOCX/MD/TXT/HTML/图片/音频 | PDF/DOCX/MD/TXT/HTML/代码 | 🟡 缺图片OCR、音频 | P2 |
 | **分片策略** | 固定/语义/递归/代码 | 固定/语义/代码 | 🟡 缺递归分片 | P1 |
@@ -29,7 +29,7 @@
 
 ### 1.2 LlamaIndex（最流行数据框架）
 
-| 能力维度 | LlamaIndex | Fusion-KB | 差距 | 优先级 |
+| 能力维度 | LlamaIndex | Fusion-RAG | 差距 | 优先级 |
 |---------|-----------|-----------|------|--------|
 | **数据连接器** | 160+（数据库/API/SaaS/文件） | 7种（本地文件） | 🔴 缺数据库连接器 | P0 |
 | **索引类型** | 向量/摘要/树/关键词/知识图谱 | 向量 | 🔴 缺多种索引 | P1 |
@@ -41,7 +41,7 @@
 
 ### 1.3 LangChain RAG（最流行 RAG 框架）
 
-| 能力维度 | LangChain RAG | Fusion-KB | 差距 | 优先级 |
+| 能力维度 | LangChain RAG | Fusion-RAG | 差距 | 优先级 |
 |---------|--------------|-----------|------|--------|
 | **文档加载器** | 100+ | 7种 | 🔴 缺网页/数据库/API | P0 |
 | **文本分割器** | 6种（递归/字符/代码/语义等） | 3种 | 🟡 缺递归分割 | P1 |
@@ -53,7 +53,7 @@
 
 ### 1.4 Haystack（RAG 框架）
 
-| 能力维度 | Haystack | Fusion-KB | 差距 | 优先级 |
+| 能力维度 | Haystack | Fusion-RAG | 差距 | 优先级 |
 |---------|---------|-----------|------|--------|
 | **Pipeline** | 可视化Pipeline编排 | 无 | 🔴 缺Pipeline | P1 |
 | **文件转换** | 10+转换器 | 7种解析 | 🟡 缺预处理 | P1 |
@@ -63,7 +63,7 @@
 
 ### 1.5 Chroma（向量数据库）
 
-| 能力维度 | Chroma | Fusion-KB | 差距 | 优先级 |
+| 能力维度 | Chroma | Fusion-RAG | 差距 | 优先级 |
 |---------|--------|-----------|------|--------|
 | **过滤** | 元数据过滤 | 无 | 🔴 缺过滤 | P0 |
 | **批量操作** | 完整批量API | 基础批量 | 🟡 缺批量删除/更新 | P1 |
@@ -117,7 +117,7 @@
 ### 3.1 Rerank 重排（P0）
 
 ```python
-# fusion_kb/engine/reranker.py
+# fusion_rag/engine/reranker.py
 class Reranker:
     """Rerank search results to improve precision.
 
@@ -160,7 +160,7 @@ class Reranker:
 ### 3.2 混合检索（P0）
 
 ```python
-# fusion_kb/engine/hybrid_search.py
+# fusion_rag/engine/hybrid_search.py
 class HybridSearch:
     """Hybrid search combining vector similarity and keyword matching."""
 
@@ -190,7 +190,7 @@ class HybridSearch:
 ### 3.3 数据库连接器（P0）
 
 ```python
-# fusion_kb/engine/connectors.py
+# fusion_rag/engine/connectors.py
 class DatabaseConnector:
     """Connect to SQLite/PostgreSQL databases and index table data."""
 
@@ -261,6 +261,6 @@ Day 7:    发布 v0.2
 
 ## 五、一句话总结
 
-> **Fusion-KB 当前对标 Dify RAG 有 6 个 P0 缺口（重排/混合检索/过滤/数据库连接器/网页加载/多种检索器），**
-> **核心缺失在检索精度和连接器生态。这些补齐后，Fusion-KB 在 Apple Silicon 本地 RAG 场景将具备业界领先能力。**
+> **Fusion-RAG 当前对标 Dify RAG 有 6 个 P0 缺口（重排/混合检索/过滤/数据库连接器/网页加载/多种检索器），**
+> **核心缺失在检索精度和连接器生态。这些补齐后，Fusion-RAG 在 Apple Silicon 本地 RAG 场景将具备业界领先能力。**
 > **而我们的差异化优势（MLX 原生 Embedding、100% 本地离线、知识库隔离）是 Dify/LlamaIndex/LangChain 无法复制的。**

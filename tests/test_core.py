@@ -1,4 +1,4 @@
-"""Tests for Fusion-KB core modules."""
+"""Tests for Fusion-RAG core modules."""
 from __future__ import annotations
 
 import json
@@ -8,12 +8,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from fusion_kb.engine.knowledge_base import KnowledgeBase, KnowledgeBaseConfig, KnowledgeBaseManager
-from fusion_kb.engine.document import DocumentParser, DocumentType, ParseResult
-from fusion_kb.engine.chunker import Chunker, Chunk
-from fusion_kb.embed.client import EmbeddingClient
-from fusion_kb.store.vector_store import VectorStore
-from fusion_kb.store.metadata_store import MetadataStore
+from fusion_rag.engine.knowledge_base import KnowledgeBase, KnowledgeBaseConfig, KnowledgeBaseManager
+from fusion_rag.engine.document import DocumentParser, DocumentType, ParseResult
+from fusion_rag.engine.chunker import Chunker, Chunk
+from fusion_rag.embed.client import EmbeddingClient
+from fusion_rag.store.vector_store import VectorStore
+from fusion_rag.store.metadata_store import MetadataStore
 
 
 # ── KnowledgeBaseConfig ──

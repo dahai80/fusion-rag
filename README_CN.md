@@ -1,6 +1,6 @@
 <div align="center">
 
-# Fusion-KB
+# Fusion-RAG
 
 **Apple Silicon 原生离线向量知识库底座**
 
@@ -16,9 +16,9 @@ Fusion-MLX 生态的统一本地向量知识库服务——100% 离线，数据�
 
 ---
 
-## 为什么选择 Fusion-KB？
+## 为什么选择 Fusion-RAG？
 
-| 特性 | Fusion-KB | Dify RAG | LangChain RAG |
+| 特性 | Fusion-RAG | Dify RAG | LangChain RAG |
 |------|-----------|----------|---------------|
 | **MLX 原生** | ✅ fusion-mlx API | ❌ Ollama/云端 | ❌ 云端 API |
 | **Apple Silicon 优化** | ✅ LanceDB + MLX | ❌ | ❌ |
@@ -27,7 +27,7 @@ Fusion-MLX 生态的统一本地向量知识库服务——100% 离线，数据�
 | **本地离线** | ✅ 100% | ⚠️ 部分 | ❌ |
 | **零 API 费用** | ✅ | ❌ | ❌ |
 
-**一句话：** Fusion-KB 是 Fusion-MLX 生态的统一本地向量知识库底座——所有 Embedding 通过 fusion-mlx HTTP API 调用，不直接调用 MLX。
+**一句话：** Fusion-RAG 是 Fusion-MLX 生态的统一本地向量知识库底座——所有 Embedding 通过 fusion-mlx HTTP API 调用，不直接调用 MLX。
 
 ---
 
@@ -42,8 +42,8 @@ Fusion-MLX 生态的统一本地向量知识库服务——100% 离线，数据�
 ### 安装
 
 ```bash
-git clone https://github.com/dahai80/fusion-kb.git
-cd fusion-kb
+git clone https://github.com/dahai80/fusion-rag.git
+cd fusion-rag
 pip install -e ".[test]"
 ```
 
@@ -51,15 +51,15 @@ pip install -e ".[test]"
 
 ```bash
 ./start.sh start
-# Fusion-KB 运行在 http://127.0.0.1:11436
+# Fusion-RAG 运行在 http://127.0.0.1:11436
 ```
 
 ### 最小示例
 
 ```python
 import asyncio
-from fusion_kb import DocumentParser, Chunker
-from fusion_kb.embed.client import EmbeddingClient
+from fusion_rag import DocumentParser, Chunker
+from fusion_rag.embed.client import EmbeddingClient
 
 async def main():
     # 1. 解析文档
@@ -84,7 +84,7 @@ asyncio.run(main())
 
 ## API 参考
 
-Fusion-KB 通过 `/kb/*` 提供 REST API。
+Fusion-RAG 通过 `/kb/*` 提供 REST API。
 
 ### 知识库管理
 
@@ -123,7 +123,7 @@ Fusion-KB 通过 `/kb/*` 提供 REST API。
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Fusion-KB HTTP API (FastAPI)                   │
+│                    Fusion-RAG HTTP API (FastAPI)                   │
 │  /kb/bases  /kb/bases/{id}/documents  /kb/bases/{id}/search     │
 │  /kb/bases/{id}/ask  /kb/status  /health                        │
 └───────────────────────────┬─────────────────────────────────────┘
@@ -180,10 +180,10 @@ Fusion-KB 通过 `/kb/*` 提供 REST API。
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `FUSION_KB_PORT` | 11436 | 服务端口 |
-| `FUSION_KB_HOST` | 127.0.0.1 | 监听地址 |
+| `FUSION_RAG_PORT` | 11436 | 服务端口 |
+| `FUSION_RAG_HOST` | 127.0.0.1 | 监听地址 |
 | `FUSION_MLX_URL` | http://localhost:11434/v1 | fusion-mlx 地址 |
-| `FUSION_KB_EMBED` | BGE-M3 | Embedding 模型 |
+| `FUSION_RAG_EMBED` | BGE-M3 | Embedding 模型 |
 
 ### 使用 start.sh
 
@@ -206,7 +206,7 @@ pip install -e ".[test]"
 pytest tests/
 
 # 带覆盖率运行
-pytest tests/ --cov=fusion_kb --cov-report=term-missing
+pytest tests/ --cov=fusion_rag --cov-report=term-missing
 ```
 
 ### 测试统计
@@ -218,7 +218,7 @@ pytest tests/ --cov=fusion_kb --cov-report=term-missing
 
 ## 对比
 
-| 维度 | LightRAG | PrivateGPT | **Fusion-KB** |
+| 维度 | LightRAG | PrivateGPT | **Fusion-RAG** |
 |------|----------|-----------|--------------|
 | MLX 原生 | ❌ | ❌ | ✅ fusion-mlx API |
 | Apple Silicon 优化 | ❌ | ❌ | ✅ LanceDB + MLX |

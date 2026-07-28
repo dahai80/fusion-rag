@@ -9,12 +9,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from fusion_kb.api.server import create_app
-from fusion_kb.engine.document import DocumentParser, DocumentType, ParseResult
-from fusion_kb.engine.reranker import Reranker, HybridSearch
-from fusion_kb.engine.retrievers import MMRRetriever, FusionRetriever
-from fusion_kb.store.vector_store import VectorStore
-from fusion_kb.connectors import DatabaseConnector, WebLoader
+from fusion_rag.api.server import create_app
+from fusion_rag.engine.document import DocumentParser, DocumentType, ParseResult
+from fusion_rag.engine.reranker import Reranker, HybridSearch
+from fusion_rag.engine.retrievers import MMRRetriever, FusionRetriever
+from fusion_rag.store.vector_store import VectorStore
+from fusion_rag.connectors import DatabaseConnector, WebLoader
 
 
 # ── API Routes Extra ──
@@ -237,7 +237,7 @@ class TestConnectorsFinal:
 
     @pytest.mark.asyncio
     async def test_web_loader_extract_text(self):
-        from fusion_kb.connectors import WebLoader
+        from fusion_rag.connectors import WebLoader
         loader = WebLoader()
         html = "<html><body><script>var x=1;</script><p>Hello world</p></body></html>"
         text = loader._extract_text(html)

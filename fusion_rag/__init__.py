@@ -1,4 +1,4 @@
-"""Fusion-KB — Apple Silicon native offline vector knowledge base backend.
+"""Fusion-RAG — Apple Silicon native offline vector knowledge base backend.
 
 All model inference (embeddings, chat) goes through fusion-mlx HTTP API.
 Never imports MLX, mlx-lm, or any engine code directly.

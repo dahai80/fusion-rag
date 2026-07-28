@@ -1,7 +1,7 @@
 [project]
-name = "fusion-kb"
+name = "fusion-rag"
 version = "0.1.0"
-description = "Fusion-KB — Apple Silicon native offline vector knowledge base backend"
+description = "Fusion-RAG — Apple Silicon native offline vector knowledge base backend"
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.27.0",
@@ -29,7 +29,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.coverage.run]
-source = ["fusion_kb"]
+source = ["fusion_rag"]
 branch = true
 relative_files = true
 
@@ -45,4 +45,4 @@ exclude_lines = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["fusion_kb*"]
+include = ["fusion_rag*"]

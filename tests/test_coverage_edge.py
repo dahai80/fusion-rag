@@ -8,9 +8,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from fusion_kb.store.vector_store import VectorStore
-from fusion_kb.engine.document import DocumentParser, DocumentType
-from fusion_kb.connectors import DatabaseConnector
+from fusion_rag.store.vector_store import VectorStore
+from fusion_rag.engine.document import DocumentParser, DocumentType
+from fusion_rag.connectors import DatabaseConnector
 
 
 # ── Vector Store: lazy imports ──
@@ -18,13 +18,13 @@ from fusion_kb.connectors import DatabaseConnector
 class TestVectorStoreLazy:
     def test_lancedb_import_error(self):
         with patch.dict("sys.modules", {"lancedb": None}):
-            from fusion_kb.store.vector_store import _lancedb
+            from fusion_rag.store.vector_store import _lancedb
             with pytest.raises(ImportError):
                 _lancedb()
 
     def test_pyarrow_import_error(self):
         with patch.dict("sys.modules", {"pyarrow": None}):
-            from fusion_kb.store.vector_store import _pa
+            from fusion_rag.store.vector_store import _pa
             with pytest.raises(ImportError):
                 _pa()
 
@@ -116,13 +116,13 @@ class TestConnectorsEdge:
 
 class TestKnowledgeBaseEdge:
     def test_kb_config_from_dict_partial(self):
-        from fusion_kb.engine.knowledge_base import KnowledgeBaseConfig
+        from fusion_rag.engine.knowledge_base import KnowledgeBaseConfig
         cfg = KnowledgeBaseConfig.from_dict({"name": "test"})
         assert cfg.name == "test"
         assert cfg.chunk_size == 512  # default
 
     def test_kb_to_dict_roundtrip(self):
-        from fusion_kb.engine.knowledge_base import KnowledgeBase, KnowledgeBaseConfig
+        from fusion_rag.engine.knowledge_base import KnowledgeBase, KnowledgeBaseConfig
         kb = KnowledgeBase(config=KnowledgeBaseConfig(name="test"))
         d = kb.to_dict()
         assert d["name"] == "test"
@@ -137,6 +137,6 @@ class TestKnowledgeBaseEdge:
 class TestServerEdge:
     def test_run_server_imports(self):
         """Test that server module imports correctly."""
-        from fusion_kb.api import server
+        from fusion_rag.api import server
         assert hasattr(server, "create_app")
         assert hasattr(server, "run_server")
