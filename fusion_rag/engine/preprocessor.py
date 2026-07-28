@@ -1,8 +1,11 @@
 """Document preprocessor — cleaning, normalization, and deduplication."""
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class DocumentPreprocessor:
@@ -62,11 +65,13 @@ class DocumentPreprocessor:
 class RecursiveChunker:
     """Recursively splits text by multiple separators, like LangChain."""
 
-    SEPARATORS = ["\n\n", "\n", ". ", " ", ""]
+    SEPARATORS = None
 
     def __init__(self, chunk_size: int = 512, chunk_overlap: int = 64):
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        if self.SEPARATORS is None:
+            self.SEPARATORS = ["\n\n", "\n", ". ", " ", ""]
 
     def chunk(self, text: str) -> list[str]:
         """Recursively split text into chunks."""

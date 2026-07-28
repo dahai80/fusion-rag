@@ -77,8 +77,6 @@ class RAGEvaluator:
     async def evaluate(self, kb_id: str,
                        test_cases: list[dict[str, str]]) -> dict[str, Any]:
         """Run evaluation on test cases against a knowledge base."""
-        from .routes import _get_kb_manager, _get_embed_client, _get_base
-        from ..store.vector_store import VectorStore
 
         results = []
         for tc in test_cases:
@@ -124,8 +122,8 @@ class RAGEvaluator:
                                 expected: str,
                                 expected_docs: list[str]) -> dict[str, Any]:
         """Evaluate a single query."""
-        from .routes import _get_base, _get_embed_client, _generate_answer
         from ..store.vector_store import VectorStore
+        from .routes import _generate_answer, _get_base, _get_embed_client
 
         kb = _get_base(kb_id)
         embed = _get_embed_client()

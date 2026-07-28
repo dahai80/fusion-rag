@@ -182,7 +182,8 @@ class DocumentChain:
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(f"{mlx_url}/chat/completions", json={
                 "model": "qwen3.5-9b",
-                "messages": [{"role": "user", "content": f"Summaries:\n{combined}\n\nQuestion: {query}\n\nFinal answer:"}],
+                "messages": [{"role": "user",
+                          "content": f"Summaries:\n{combined}\n\nQuestion: {query}\n\nFinal answer:"}],
                 "max_tokens": 4096,
             })
             return resp.json()["choices"][0]["message"]["content"]

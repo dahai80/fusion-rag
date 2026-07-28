@@ -79,8 +79,8 @@ class Reranker:
             scores = json.loads(content)
             if isinstance(scores, list):
                 return [float(s) for s in scores[:expected]]
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to parse rerank scores as JSON: %s", e)
         nums = re.findall(r"\d+\.?\d*", content)
         if len(nums) >= expected:
             return [float(n) for n in nums[:expected]]

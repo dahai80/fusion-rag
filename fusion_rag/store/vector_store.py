@@ -11,6 +11,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 
 def _lancedb():
     try:
@@ -57,7 +59,8 @@ class VectorStore:
         ])
         try:
             self._table = self._db.open_table(table_name)
-        except Exception:
+        except Exception as e:
+            logger.warning("Vector store clear failed: %s", e)
             self._table = self._db.create_table(table_name, schema=schema)
 
     @property
@@ -100,7 +103,8 @@ class VectorStore:
                 r.pop("_distance", None)
                 try:
                     r["metadata"] = json.loads(r.get("metadata_json", "{}"))
-                except Exception:
+                except Exception as e:
+                    logger.warning("Failed to parse metadata JSON: %s", e)
                     r["metadata"] = {}
                 r.pop("metadata_json", None)
                 filtered.append(r)
@@ -124,7 +128,8 @@ class VectorStore:
     def count(self) -> int:
         try:
             return self.table.count_rows()
-        except Exception:
+        except Exception as e:
+            logger.warning("Vector store clear failed: %s", e)
             return 0
 
     # callers: KnowledgeBase.delete_document(), tests
@@ -146,14 +151,15 @@ class VectorStore:
                 count = 0
             self.bm25.remove_document(doc_path)
             return count
-        except Exception:
+        except Exception as e:
+            logger.warning("Vector store clear failed: %s", e)
             return 0
 
     def clear(self) -> None:
         try:
             self.table.delete("true")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Vector store clear failed: %s", e)
 
     def close(self) -> None:
         self._db = None

@@ -6,25 +6,21 @@ No direct MLX imports.
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
-import time
 import uuid
-from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
-from ..engine.knowledge_base import KnowledgeBaseManager, KnowledgeBaseConfig
-from ..engine.document import DocumentParser, ParseResult
-from ..engine.chunker import Chunker, Chunk
-from ..engine.contextualizer import Contextualizer
-from ..engine.query_rewriter import QueryRewriter
-from .auth import verify_api_key
 from ..embed.client import EmbeddingClient
-from ..store.vector_store import VectorStore
+from ..engine.chunker import Chunker
+from ..engine.contextualizer import Contextualizer
+from ..engine.document import DocumentParser
+from ..engine.knowledge_base import KnowledgeBaseManager
+from ..engine.query_rewriter import QueryRewriter
 from ..store.metadata_store import MetadataStore
+from ..store.vector_store import VectorStore
+from .auth import verify_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -261,7 +257,7 @@ async def search(kb_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
     vec_store = _get_vector_store(kb_id)
 
     # Query rewrite (optional)
-    rewrite_mode = data.get("rewrite_mode", None)
+    rewrite_mode = data.get("rewrite_mode")
     if rewrite_mode:
         rewriter = QueryRewriter(enabled=True)
         rewritten = await rewriter.rewrite(query, mode=rewrite_mode)
@@ -309,8 +305,8 @@ async def ask(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     vec_store = _get_vector_store(kb_id)
 
     # Query rewrite (condense with conversation history)
-    rewrite_mode = data.get("rewrite_mode", None)
-    history = data.get("history", None)
+    rewrite_mode = data.get("rewrite_mode")
+    history = data.get("history")
     if rewrite_mode or history:
         rewriter = QueryRewriter(enabled=True)
         mode = rewrite_mode or ("condense" if history else "hyde")

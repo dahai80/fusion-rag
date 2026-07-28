@@ -1,10 +1,6 @@
-# callers: pip install -e .[test]; CI pipeline
-# API: package dependencies including BM25 + jieba Chinese tokenization
-# schema: standard pip dependency specifiers
-# user instruction: "按照你的方案和计划落地所有phase阶段的需求"
 [project]
 name = "fusion-rag"
-version = "0.3.0"
+version = "0.4.0"
 description = "Fusion-RAG — Apple Silicon native offline vector knowledge base backend"
 requires-python = ">=3.12"
 dependencies = [
@@ -49,6 +45,14 @@ exclude_lines = [
     "if __name__ == .__main__.:",
     "if TYPE_CHECKING:",
 ]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "S", "SIM", "C4", "RUF", "UP"]
+ignore = ["BLE001", "S101", "S311", "S324", "S608", "RUF003", "RUF005", "E402", "UP042", "SIM108"]
 
 [tool.setuptools.packages.find]
 include = ["fusion_rag*"]

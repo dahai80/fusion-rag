@@ -1,7 +1,6 @@
 """Metadata store — SQLite-based metadata for knowledge bases, documents, and chunks."""
 from __future__ import annotations
 
-import json
 import sqlite3
 import time
 from contextlib import contextmanager

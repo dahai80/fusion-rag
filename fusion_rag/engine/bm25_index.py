@@ -79,7 +79,8 @@ class BM25Index:
             "CREATE TABLE IF NOT EXISTS bm25_docs (doc_id TEXT PRIMARY KEY, text TEXT, doc_len INTEGER)"
         )
         self._db.execute(
-            "CREATE TABLE IF NOT EXISTS bm25_inverted (token TEXT, doc_id TEXT, tf INTEGER, PRIMARY KEY (token, doc_id))"
+            "CREATE TABLE IF NOT EXISTS bm25_inverted "
+            "(token TEXT, doc_id TEXT, tf INTEGER, PRIMARY KEY (token, doc_id))"
         )
         self._db.commit()
 

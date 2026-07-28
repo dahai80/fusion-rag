@@ -136,9 +136,8 @@ async def mcp_handler(request: Request) -> JSONResponse:
 
 async def _dispatch_tool(name: str, args: dict) -> Any:
     """Dispatch MCP tool calls to internal API."""
-    from .routes import _get_kb_manager, _get_embed_client, _get_base
     from ..store.vector_store import VectorStore
-    from ..store.metadata_store import MetadataStore
+    from .routes import _get_base, _get_embed_client, _get_kb_manager
 
     try:
         if name == "kb_list":

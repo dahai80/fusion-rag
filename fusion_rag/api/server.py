@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
+
+from ..embed.client import EmbeddingClient
+from ..engine.knowledge_base import KnowledgeBaseManager
+from .mcp_server import router as mcp_router
 
 # callers: create_app() mounts both routers; run_server() calls create_app
 # API: app.include_router(mcp_router) adds /mcp/* endpoints
@@ -13,9 +16,6 @@ from fastapi import FastAPI
 # user instruction: "按照你的方案和计划落地所有phase阶段的需求"
 from .routes import router as kb_router
 from .routes import set_kb_context
-from .mcp_server import router as mcp_router
-from ..engine.knowledge_base import KnowledgeBaseManager
-from ..embed.client import EmbeddingClient
 
 logger = logging.getLogger(__name__)
 

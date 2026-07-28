@@ -115,8 +115,8 @@ class GraphRAG:
                             (ent.get("name", ""), ent.get("type", "CONCEPT"), chunk_id, kb_id),
                         )
                         total_entities += 1
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning("Failed to insert entity: %s", e)
                 for rel in result.get("relations", []):
                     try:
                         conn.execute(
@@ -125,8 +125,8 @@ class GraphRAG:
                              rel.get("label", "related_to"), kb_id),
                         )
                         total_relations += 1
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning("Failed to insert relation: %s", e)
             conn.commit()
         finally:
             conn.close()
@@ -156,7 +156,7 @@ class GraphRAG:
 
             # Expand via relations
             entity_names = [r["name"] for r in rows]
-            chunk_ids = set(r["chunk_id"] for r in rows if r["chunk_id"])
+            chunk_ids = {r["chunk_id"] for r in rows if r["chunk_id"]}
             visited = set(entity_names)
             current = entity_names
 

@@ -6,7 +6,6 @@ All processing is local — no network calls.
 
 from __future__ import annotations
 
-import mimetypes
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -118,9 +117,7 @@ class DocumentParser:
                 result.pages = pages
             elif doc_type == DocumentType.DOCX:
                 result.content = self._parse_docx(path)
-            elif doc_type == DocumentType.MARKDOWN:
-                result.content = path.read_text(encoding="utf-8", errors="replace")
-            elif doc_type == DocumentType.TXT:
+            elif doc_type == DocumentType.MARKDOWN or doc_type == DocumentType.TXT:
                 result.content = path.read_text(encoding="utf-8", errors="replace")
             elif doc_type == DocumentType.HTML:
                 result.content = self._parse_html(path)

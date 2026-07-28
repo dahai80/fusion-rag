@@ -6,11 +6,14 @@ No direct MLX imports.
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -127,8 +130,8 @@ class KnowledgeBaseManager:
                         data = json.loads(meta_file.read_text(encoding="utf-8"))
                         kb = KnowledgeBase.from_dict(data)
                         self._bases[kb.id] = kb
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning("Failed to load KB meta from %s: %s", meta_file, e)
 
     def _save_meta(self, kb: KnowledgeBase) -> None:
         """Save knowledge base metadata to disk."""

@@ -21,8 +21,8 @@ class SSEStreamer:
             {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"},
         ]
         events = []
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            async with client.stream("POST", f"{mlx_url}/chat/completions", json={
+        async with httpx.AsyncClient(timeout=60.0) as client, \
+                client.stream("POST", f"{mlx_url}/chat/completions", json={
                 "model": "qwen3.5-9b",
                 "messages": messages,
                 "max_tokens": 4096,
