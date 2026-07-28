@@ -4,4 +4,10 @@ __pycache__/
 htmlcov/
 .venv/
 *.egg-info/
-.pytest_cache/
+.pytest_cache/# Non-code docs (keep local only)
+CLAUDE.md
+GAP_ANALYSIS.md
+claude-rag-insight.md
+prd-ar-plan.md
+rag-oss-analysis.md
+logs/
