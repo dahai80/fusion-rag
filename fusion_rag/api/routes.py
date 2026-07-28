@@ -14,11 +14,14 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 
 from ..engine.knowledge_base import KnowledgeBaseManager, KnowledgeBaseConfig
 from ..engine.document import DocumentParser, ParseResult
 from ..engine.chunker import Chunker, Chunk
+from ..engine.contextualizer import Contextualizer
+from ..engine.query_rewriter import QueryRewriter
+from .auth import verify_api_key
 from ..embed.client import EmbeddingClient
 from ..store.vector_store import VectorStore
 from ..store.metadata_store import MetadataStore
@@ -60,7 +63,7 @@ async def list_knowledge_bases() -> list[dict[str, Any]]:
     return _get_kb_manager().list()
 
 
-@router.post("/bases")
+@router.post("/bases", dependencies=[Depends(verify_api_key)])
 async def create_knowledge_base(data: dict[str, Any]) -> dict[str, Any]:
     """Create a new knowledge base."""
     name = data.get("name", "")
@@ -85,7 +88,7 @@ async def get_knowledge_base(kb_id: str) -> dict[str, Any]:
         raise HTTPException(404, f"Knowledge base '{kb_id}' not found")
 
 
-@router.delete("/bases/{kb_id}")
+@router.delete("/bases/{kb_id}", dependencies=[Depends(verify_api_key)])
 async def delete_knowledge_base(kb_id: str) -> dict[str, str]:
     """Delete a knowledge base."""
     if _get_kb_manager().delete(kb_id):
@@ -96,7 +99,7 @@ async def delete_knowledge_base(kb_id: str) -> dict[str, str]:
 # ── Document Operations ──
 
 
-@router.post("/bases/{kb_id}/documents")
+@router.post("/bases/{kb_id}/documents", dependencies=[Depends(verify_api_key)])
 async def upload_document(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     """Upload and index a single document."""
     kb = _get_base(kb_id)
@@ -113,9 +116,19 @@ async def upload_document(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     chunker = Chunker(strategy=kb.config.chunk_strategy, chunk_size=kb.config.chunk_size)
     chunks = await chunker.chunk(result)
 
-    # Embed
+    # Contextualize (optional, default enabled)
+    contextualize = data.get("contextualize", True)
+    contextualizer = Contextualizer(enabled=contextualize)
+    chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
+    chunk_dicts = await contextualizer.contextualize(chunk_dicts, result.content)
+
+    # Embed (use context+text when available)
     embed = _get_embed_client()
-    vectors = await embed.embed_batch([c.text for c in chunks])
+    embed_texts = []
+    for cd, c in zip(chunk_dicts, chunks):
+        ctx = cd.get("context", "")
+        embed_texts.append((ctx + " " + c.text).strip() if ctx else c.text)
+    vectors = await embed.embed_batch(embed_texts)
 
     # Store vectors
     vec_store = _get_vector_store(kb_id)
@@ -126,7 +139,7 @@ async def upload_document(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
                             result.doc_type.value, result.metadata.get("size", 0))
 
     records = []
-    for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
+    for i, (chunk, vector, cd) in enumerate(zip(chunks, vectors, chunk_dicts)):
         chunk_id = f"{doc_id}_{i}"
         meta_store.add_chunk(chunk_id, doc_id, result.file_path, i, chunk.text, chunk.tokens)
         records.append({
@@ -138,9 +151,12 @@ async def upload_document(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
             "doc_type": result.doc_type.value,
             "chunk_index": i,
             "metadata": result.metadata,
+            "context": cd.get("context", ""),
         })
 
     vec_store.add_batch(records)
+    # Update BM25 index
+    vec_store.bm25.add_documents(records)
     meta_store.update_chunk_count(doc_id, len(chunks), result.chars)
 
     # Update KB stats
@@ -151,7 +167,7 @@ async def upload_document(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     return {"doc_id": doc_id, "chunks": len(chunks), "chars": result.chars}
 
 
-@router.post("/bases/{kb_id}/scan")
+@router.post("/bases/{kb_id}/scan", dependencies=[Depends(verify_api_key)])
 async def scan_directory(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     """Scan a directory and index all supported files."""
     kb = _get_base(kb_id)
@@ -163,6 +179,8 @@ async def scan_directory(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     embed = _get_embed_client()
     vec_store = _get_vector_store(kb_id)
     meta_store = _get_meta_store(kb_id)
+    contextualize = data.get("contextualize", True)
+    contextualizer = Contextualizer(enabled=contextualize)
 
     total_chunks = 0
     total_chars = 0
@@ -179,13 +197,23 @@ async def scan_directory(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
         if not chunks:
             continue
 
-        vectors = await embed.embed_batch([c.text for c in chunks])
+        # Contextualize
+        chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
+        chunk_dicts = await contextualizer.contextualize(chunk_dicts, result.content)
+
+        # Embed with context
+        embed_texts = []
+        for cd, c in zip(chunk_dicts, chunks):
+            ctx = cd.get("context", "")
+            embed_texts.append((ctx + " " + c.text).strip() if ctx else c.text)
+        vectors = await embed.embed_batch(embed_texts)
+
         doc_id = uuid.uuid4().hex[:16]
         meta_store.add_document(doc_id, result.file_path, result.file_name,
                                 result.doc_type.value, result.metadata.get("size", 0))
 
         records = []
-        for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
+        for i, (chunk, vector, cd) in enumerate(zip(chunks, vectors, chunk_dicts)):
             chunk_id = f"{doc_id}_{i}"
             meta_store.add_chunk(chunk_id, doc_id, result.file_path, i, chunk.text, chunk.tokens)
             records.append({
@@ -193,9 +221,11 @@ async def scan_directory(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
                 "doc_path": result.file_path, "doc_name": result.file_name,
                 "doc_type": result.doc_type.value, "chunk_index": i,
                 "metadata": result.metadata,
+                "context": cd.get("context", ""),
             })
 
         vec_store.add_batch(records)
+        vec_store.bm25.add_documents(records)
         meta_store.update_chunk_count(doc_id, len(chunks), result.chars)
         total_chunks += len(chunks)
         total_chars += result.chars
@@ -230,8 +260,34 @@ async def search(kb_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
     embed = _get_embed_client()
     vec_store = _get_vector_store(kb_id)
 
+    # Query rewrite (optional)
+    rewrite_mode = data.get("rewrite_mode", None)
+    if rewrite_mode:
+        rewriter = QueryRewriter(enabled=True)
+        rewritten = await rewriter.rewrite(query, mode=rewrite_mode)
+        if isinstance(rewritten, list):
+            # For expand mode, embed original + variants and merge results
+            all_results = []
+            for q in rewritten:
+                qv = await embed.embed(q)
+                if qv and not all(v == 0.0 for v in qv):
+                    all_results.extend(vec_store.search(qv, top_k=top_k, threshold=threshold))
+            # Deduplicate by id, keep highest score
+            seen = {}
+            for r in all_results:
+                rid = r.get("id", "")
+                if rid not in seen or r.get("score", 0) > seen[rid].get("score", 0):
+                    seen[rid] = r
+            results = sorted(seen.values(), key=lambda x: x.get("score", 0), reverse=True)[:top_k]
+            return results
+        query = rewritten
+
+    # callers: test_search_with_mocked_embed expects 500 when embed fails
+    # API: search() -> list[dict]; embed returns zero vector on failure
+    # schema: query_vector is list[float], zero-vector means embed failed
+    # user instruction: "bug/问题/需求 修改完成，遇到报错的用例，不管和自己的代码是否相关，都要定位修复"
     query_vector = await embed.embed(query)
-    if not query_vector:
+    if not query_vector or all(v == 0.0 for v in query_vector):
         raise HTTPException(500, "Embedding failed")
 
     results = vec_store.search(query_vector, top_k=top_k, threshold=threshold)
@@ -252,7 +308,19 @@ async def ask(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     embed = _get_embed_client()
     vec_store = _get_vector_store(kb_id)
 
+    # Query rewrite (condense with conversation history)
+    rewrite_mode = data.get("rewrite_mode", None)
+    history = data.get("history", None)
+    if rewrite_mode or history:
+        rewriter = QueryRewriter(enabled=True)
+        mode = rewrite_mode or ("condense" if history else "hyde")
+        rewritten = await rewriter.rewrite(question, history=history, mode=mode)
+        if isinstance(rewritten, str) and rewritten:
+            question = rewritten
+
     query_vector = await embed.embed(question)
+    if not query_vector or all(v == 0.0 for v in query_vector):
+        raise HTTPException(500, "Embedding failed")
     chunks = vec_store.search(query_vector, top_k=top_k, threshold=kb.config.similarity_threshold)
 
     if not chunks:

@@ -21,6 +21,9 @@ class EmbeddingClient:
     All model calls are via HTTP — no direct MLX imports.
     """
 
+    # callers: routes.py search/ask/upload endpoints
+    # API: embed/embed_batch with cache, schema: cache stores text_hash->vector
+    # user instruction: "按照你的方案和计划落地所有phase阶段的需求"
     def __init__(
         self,
         base_url: str = "http://localhost:11434/v1",
@@ -29,6 +32,7 @@ class EmbeddingClient:
         timeout: float = 30.0,
         max_retries: int = 3,
         batch_size: int = 16,
+        cache_enabled: bool = True,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -36,8 +40,13 @@ class EmbeddingClient:
         self.timeout = timeout
         self.max_retries = max_retries
         self.batch_size = batch_size
+        self.cache_enabled = cache_enabled
         self._client: httpx.AsyncClient | None = None
-        self._semaphore = asyncio.Semaphore(4)  # Limit concurrent requests
+        self._semaphore = asyncio.Semaphore(4)
+        self._cache = None
+        if cache_enabled:
+            from ..engine.embedding_cache import EmbeddingCache
+            self._cache = EmbeddingCache()
 
     @property
     def client(self) -> httpx.AsyncClient:
@@ -64,11 +73,39 @@ class EmbeddingClient:
         if not texts:
             return []
 
+        # Check cache
+        if self._cache:
+            cached = self._cache.get_batch(texts, self.model)
+            uncached_indices = [i for i, v in enumerate(cached) if v is None]
+            if not uncached_indices:
+                logger.debug("EmbeddingCache: all %d texts hit cache", len(texts))
+                return cached  # type: ignore
+            if uncached_indices:
+                uncached_texts = [texts[i] for i in uncached_indices]
+            else:
+                uncached_texts = texts
+        else:
+            cached = None
+            uncached_indices = list(range(len(texts)))
+            uncached_texts = texts
+
+        # Call API for uncached texts
         all_vectors: list[list[float]] = []
-        for i in range(0, len(texts), self.batch_size):
-            batch = texts[i : i + self.batch_size]
+        for i in range(0, len(uncached_texts), self.batch_size):
+            batch = uncached_texts[i : i + self.batch_size]
             vectors = await self._call_embed_api(batch)
             all_vectors.extend(vectors)
+
+        # Cache new results
+        if self._cache and all_vectors:
+            self._cache.set_batch(uncached_texts, all_vectors, self.model)
+
+        # Merge cached + new
+        if cached:
+            result = list(cached)
+            for idx, vec in zip(uncached_indices, all_vectors):
+                result[idx] = vec
+            return result  # type: ignore
 
         return all_vectors
 

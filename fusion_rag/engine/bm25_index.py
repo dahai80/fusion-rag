@@ -1,0 +1,205 @@
+"""BM25 index — Okapi BM25 with Chinese/English tokenization.
+
+callers: VectorStore.keyword_search(), HybridSearch.search(), KnowledgeBase intake flow
+API: BM25Index.add_documents(), search(), remove_document(), save(), load(), count()
+schema: internal _inverted {token: {doc_id: tf}}, _doc_texts {doc_id: text}, persisted to SQLite
+user instruction: "按照你的方案和计划落地所有phase阶段的需求"
+"""
+from __future__ import annotations
+
+import json
+import logging
+import math
+import re
+import sqlite3
+from collections import Counter
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+_JIEBA_AVAILABLE = False
+try:
+    import jieba
+    _JIEBA_AVAILABLE = True
+except ImportError:
+    pass
+
+
+def _tokenize(text: str) -> list[str]:
+    if not text:
+        return []
+    tokens = []
+    chinese_segs = re.findall(r"[一-鿿]+", text)
+    if _JIEBA_AVAILABLE:
+        for seg in chinese_segs:
+            tokens.extend(jieba.lcut(seg))
+    else:
+        for seg in chinese_segs:
+            tokens.extend(seg)
+    english_segs = re.findall(r"[a-zA-Z0-9]+", text)
+    tokens.extend(w.lower() for w in english_segs)
+    return [t for t in tokens if len(t) > 1]
+
+
+class BM25Index:
+    """Okapi BM25 index with SQLite persistence."""
+
+    def __init__(self, store_path: str, k1: float = 1.5, b: float = 0.75):
+        self.store_path = Path(store_path)
+        self.k1 = k1
+        self.b = b
+        self._corpus_size = 0
+        self._avgdl = 0.0
+        self._df: Counter = Counter()
+        self._doc_len: dict[str, int] = {}
+        self._inverted: dict[str, dict[str, int]] = {}
+        self._doc_texts: dict[str, str] = {}
+        self._db: sqlite3.Connection | None = None
+        self._init_db()
+        self._load()
+
+    def _init_db(self) -> None:
+        self.store_path.parent.mkdir(parents=True, exist_ok=True)
+        self._db = sqlite3.connect(str(self.store_path))
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS bm25_meta (key TEXT PRIMARY KEY, value TEXT)"
+        )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS bm25_docs (doc_id TEXT PRIMARY KEY, text TEXT, doc_len INTEGER)"
+        )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS bm25_inverted (token TEXT, doc_id TEXT, tf INTEGER, PRIMARY KEY (token, doc_id))"
+        )
+        self._db.commit()
+
+    def _load(self) -> None:
+        try:
+            row = self._db.execute(
+                "SELECT value FROM bm25_meta WHERE key='stats'"
+            ).fetchone()
+            if row:
+                stats = json.loads(row[0])
+                self._corpus_size = stats.get("corpus_size", 0)
+                self._avgdl = stats.get("avgdl", 0.0)
+            for doc_id, text, doc_len in self._db.execute(
+                "SELECT doc_id, text, doc_len FROM bm25_docs"
+            ):
+                self._doc_texts[doc_id] = text
+                self._doc_len[doc_id] = doc_len
+            for token, doc_id, tf in self._db.execute(
+                "SELECT token, doc_id, tf FROM bm25_inverted"
+            ):
+                if token not in self._inverted:
+                    self._inverted[token] = {}
+                self._inverted[token][doc_id] = tf
+            self._df = Counter()
+            for token, postings in self._inverted.items():
+                self._df[token] = len(postings)
+            logger.debug("BM25 index loaded: %d docs, %d tokens", self._corpus_size, len(self._inverted))
+        except Exception as e:
+            logger.warning("BM25 index load failed, starting fresh: %s", e)
+
+    def add_documents(self, chunks: list[dict[str, Any]]) -> None:
+        if not chunks:
+            return
+        for chunk in chunks:
+            doc_id = chunk.get("id", "")
+            if not doc_id:
+                continue
+            text = chunk.get("text", "")
+            context = chunk.get("context", "")
+            full_text = (context + " " + text).strip() if context else text
+            self._doc_texts[doc_id] = full_text
+            tokens = _tokenize(full_text)
+            self._doc_len[doc_id] = len(tokens)
+            tf = Counter(tokens)
+            for token, freq in tf.items():
+                if token not in self._inverted:
+                    self._inverted[token] = {}
+                self._inverted[token][doc_id] = freq
+            self._corpus_size += 1
+        self._df = Counter()
+        for token, postings in self._inverted.items():
+            self._df[token] = len(postings)
+        total_len = sum(self._doc_len.values())
+        self._avgdl = total_len / max(self._corpus_size, 1)
+        self._save_to_db()
+        logger.info("BM25 index updated: %d docs, %d tokens", self._corpus_size, len(self._inverted))
+
+    def remove_document(self, doc_path: str) -> int:
+        to_remove = [
+            did for did, txt in self._doc_texts.items()
+            if doc_path in txt or doc_path in str(did)
+        ]
+        if not to_remove:
+            return 0
+        for did in to_remove:
+            del self._doc_texts[did]
+            self._doc_len.pop(did, None)
+            self._corpus_size -= 1
+        for token in list(self._inverted.keys()):
+            self._inverted[token] = {
+                k: v for k, v in self._inverted[token].items()
+                if k not in set(to_remove)
+            }
+            if not self._inverted[token]:
+                del self._inverted[token]
+        self._df = Counter()
+        for token, postings in self._inverted.items():
+            self._df[token] = len(postings)
+        total_len = sum(self._doc_len.values())
+        self._avgdl = total_len / max(self._corpus_size, 1)
+        self._save_to_db()
+        logger.info("BM25 index: removed %d chunks for doc %s", len(to_remove), doc_path)
+        return len(to_remove)
+
+    def search(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
+        if not query or self._corpus_size == 0:
+            return []
+        query_tokens = _tokenize(query)
+        if not query_tokens:
+            return []
+        scores: dict[str, float] = {}
+        for token in query_tokens:
+            if token not in self._inverted:
+                continue
+            df = self._df.get(token, 0)
+            idf = math.log((self._corpus_size - df + 0.5) / (df + 0.5) + 1)
+            for doc_id, tf in self._inverted[token].items():
+                dl = self._doc_len.get(doc_id, 1)
+                numerator = tf * (self.k1 + 1)
+                denominator = tf + self.k1 * (1 - self.b + self.b * dl / max(self._avgdl, 1))
+                scores[doc_id] = scores.get(doc_id, 0) + idf * numerator / denominator
+        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+        return [
+            {"id": did, "score": s, "text": self._doc_texts.get(did, "")}
+            for did, s in ranked
+        ]
+
+    def count(self) -> int:
+        return self._corpus_size
+
+    def _save_to_db(self) -> None:
+        try:
+            stats = json.dumps({
+                "corpus_size": self._corpus_size,
+                "avgdl": self._avgdl,
+            })
+            self._db.execute("INSERT OR REPLACE INTO bm25_meta VALUES ('stats', ?)", (stats,))
+            for doc_id, text in self._doc_texts.items():
+                dl = self._doc_len.get(doc_id, 0)
+                self._db.execute(
+                    "INSERT OR REPLACE INTO bm25_docs VALUES (?, ?, ?)",
+                    (doc_id, text, dl),
+                )
+            self._db.execute("DELETE FROM bm25_inverted")
+            for token, postings in self._inverted.items():
+                for doc_id, tf in postings.items():
+                    self._db.execute(
+                        "INSERT INTO bm25_inverted VALUES (?, ?, ?)",
+                        (token, doc_id, tf),
+                    )
+            self._db.commit()
+        except Exception as e:
+            logger.error("BM25 index save failed: %s", e)

@@ -7,8 +7,13 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI
 
+# callers: create_app() mounts both routers; run_server() calls create_app
+# API: app.include_router(mcp_router) adds /mcp/* endpoints
+# schema: MCP JSON-RPC 2.0 protocol (see mcp_server.py)
+# user instruction: "按照你的方案和计划落地所有phase阶段的需求"
 from .routes import router as kb_router
 from .routes import set_kb_context
+from .mcp_server import router as mcp_router
 from ..engine.knowledge_base import KnowledgeBaseManager
 from ..embed.client import EmbeddingClient
 
@@ -39,6 +44,7 @@ def create_app(
 
     # Register routes
     app.include_router(kb_router)
+    app.include_router(mcp_router)
 
     # Health check
     @app.get("/health")

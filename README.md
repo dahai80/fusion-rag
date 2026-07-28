@@ -8,7 +8,8 @@ Local vector knowledge base service for the Fusion-MLX ecosystem — 100% offlin
 
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-40-success.svg)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-164-success.svg)](tests/)
+<!-- callers: GitHub README page; API: documentation; user instruction: "按照你的方案和计划落地所有phase阶段的需求" -->
 
 [Quick Start](#quick-start) · [API Reference](#api-reference) · [Architecture](#architecture) · [Documentation](docs/)
 
@@ -23,6 +24,10 @@ Local vector knowledge base service for the Fusion-MLX ecosystem — 100% offlin
 | **MLX native** | ✅ fusion-mlx API | ❌ Ollama/Cloud | ❌ Cloud API |
 | **Apple Silicon optimized** | ✅ LanceDB + MLX | ❌ | ❌ |
 | **Multi-KB isolation** | ✅ | ✅ | ❌ |
+| **BM25 + Vector hybrid** | ✅ Okapi BM25 + RRF | ❌ | ❌ |
+| **Contextual Retrieval** | ✅ Anthropic-style | ❌ | ❌ |
+| **MCP Server** | ✅ Claude/Cursor native | ❌ | ❌ |
+| **GraphRAG** | ✅ Entity-relation graph | ❌ | ❌ |
 | **Code-specific chunking** | ✅ | ❌ | ❌ |
 | **Local offline** | ✅ 100% | ⚠️ Partial | ❌ |
 | **Zero API cost** | ✅ | ❌ | ❌ |
@@ -111,6 +116,12 @@ Fusion-RAG provides a REST API at `/kb/*` for knowledge base operations.
 | POST | `/kb/bases/{id}/search` | Semantic search with vector similarity |
 | POST | `/kb/bases/{id}/ask` | RAG Q&A with source citation |
 
+### MCP Protocol
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/mcp` | MCP JSON-RPC handler (tools/list, tools/call) |
+
 ### System
 
 | Method | Endpoint | Description |
@@ -167,8 +178,17 @@ Fusion-RAG provides a REST API at `/kb/*` for knowledge base operations.
 | **Knowledge Base** | `engine/knowledge_base.py` | KB CRUD, config, persistence |
 | **Document Parser** | `engine/document.py` | PDF, DOCX, MD, TXT, HTML, code |
 | **Chunker** | `engine/chunker.py` | Semantic, fixed, code-specific chunking |
+| **BM25 Index** | `engine/bm25_index.py` | Okapi BM25 with jieba Chinese tokenization |
+| **Contextualizer** | `engine/contextualizer.py` | Anthropic Contextual Retrieval |
+| **Reranker** | `engine/reranker.py` | Batch LLM reranking + HybridSearch (alpha/RRF) |
+| **Query Rewriter** | `engine/query_rewriter.py` | HyDE, query expansion, condensation |
+| **GraphRAG** | `engine/graph_rag.py` | Entity extraction and graph-based retrieval |
+| **Evaluator** | `engine/evaluator.py` | RAG quality evaluation (faithfulness/relevance) |
+| **Embedding Cache** | `engine/embedding_cache.py` | SQLite-backed embedding vector cache |
+| **Auth** | `api/auth.py` | API key authentication |
+| **MCP Server** | `api/mcp_server.py` | Model Context Protocol for Claude/Cursor |
 | **Embedding** | `embed/client.py` | MLX Embedding via fusion-mlx HTTP API |
-| **Vector Store** | `store/vector_store.py` | LanceDB storage (lazy import) |
+| **Vector Store** | `store/vector_store.py` | LanceDB storage (lazy import) + BM25 |
 | **Metadata Store** | `store/metadata_store.py` | SQLite document/chunk tracking |
 | **API Routes** | `api/routes.py` | FastAPI endpoints |
 | **Server** | `api/server.py` | FastAPI server |
@@ -185,6 +205,7 @@ Fusion-RAG provides a REST API at `/kb/*` for knowledge base operations.
 | `FUSION_RAG_HOST` | 127.0.0.1 | Listen address |
 | `FUSION_MLX_URL` | http://localhost:11434/v1 | fusion-mlx URL |
 | `FUSION_RAG_EMBED` | BGE-M3 | Embedding model |
+| `FUSION_RAG_API_KEY` | (empty) | API key auth (disabled if empty) |
 
 ### Using start.sh
 
@@ -211,8 +232,8 @@ pytest tests/ --cov=fusion_rag --cov-report=term-missing
 ```
 
 ### Test Stats
-- **40 tests**, 0 failures
-- **96%+ statement coverage** (core modules)
+- **164 tests**, 0 failures
+- **84%+ statement coverage**
 - **Python 3.12+** compatible
 
 ---
@@ -223,6 +244,10 @@ pytest tests/ --cov=fusion_rag --cov-report=term-missing
 |-----------|----------|-----------|--------------|
 | **MLX native** | ❌ | ❌ | ✅ fusion-mlx API |
 | **Apple Silicon optimized** | ❌ | ❌ | ✅ LanceDB + MLX |
+| **BM25 + Vector hybrid** | ❌ | ❌ | ✅ RRF fusion |
+| **Contextual Retrieval** | ❌ | ❌ | ✅ Anthropic-style |
+| **MCP Server** | ❌ | ❌ | ✅ Claude/Cursor |
+| **GraphRAG** | ❌ | ❌ | ✅ Entity graph |
 | **Multi-KB isolation** | ❌ | ❌ | ✅ |
 | **Code chunking** | ❌ | ❌ | ✅ |
 | **Local offline** | ✅ | ✅ | ✅ 100% |

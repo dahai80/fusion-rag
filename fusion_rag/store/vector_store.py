@@ -36,6 +36,7 @@ class VectorStore:
         self.dimension = dimension
         self._db = None
         self._table = None
+        self._bm25_index = None
         self._connect()
 
     def _connect(self) -> None:
@@ -75,6 +76,7 @@ class VectorStore:
             "metadata_json": json.dumps(metadata or {}, ensure_ascii=False),
         }]
         self.table.add(data)
+        self.bm25.add_documents(data)
 
     def add_batch(self, records: list[dict[str, Any]]) -> None:
         if not records:
@@ -83,6 +85,7 @@ class VectorStore:
             if "metadata_json" not in r and "metadata" in r:
                 r["metadata_json"] = json.dumps(r.pop("metadata", {}), ensure_ascii=False)
         self.table.add(records)
+        self.bm25.add_documents(records)
 
     def search(self, query_vector: list[float], top_k: int = 10,
                threshold: float = 0.0) -> list[dict[str, Any]]:
@@ -106,27 +109,17 @@ class VectorStore:
             logger.error("Vector search failed: %s", e)
             return []
 
+    @property
+    def bm25(self):
+        if self._bm25_index is None:
+            from ..engine.bm25_index import BM25Index
+            bm25_path = str(Path(self.vector_path).parent / "bm25_index.db")
+            self._bm25_index = BM25Index(bm25_path)
+        return self._bm25_index
+
     def keyword_search(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
-        query_lower = query.lower()
-        try:
-            zero_vec = [0.0] * self.dimension
-            all_rows = self.table.search(zero_vec).limit(10000).to_list()
-        except Exception:
-            return []
-        scored = []
-        for row in all_rows:
-            text = row.get("text", "").lower()
-            score = text.count(query_lower)
-            if score > 0:
-                row["score"] = score / max(len(text.split()), 1)
-                try:
-                    row["metadata"] = json.loads(row.get("metadata_json", "{}"))
-                except Exception:
-                    row["metadata"] = {}
-                row.pop("metadata_json", None)
-                scored.append(row)
-        scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored[:top_k]
+        # BM25-based keyword search (replaces zero-vector + substring counting)
+        return self.bm25.search(query, top_k)
 
     def count(self) -> int:
         try:
@@ -134,10 +127,25 @@ class VectorStore:
         except Exception:
             return 0
 
+    # callers: KnowledgeBase.delete_document(), tests
+    # API: delete_by_doc(doc_path: str) -> int
+    # schema: LanceDB chunks table + BM25 index, DeleteResult.rows_deleted or int return
+    # user instruction: "bug/问题/需求 修改完成，遇到报错的用例，不管和自己的代码是否相关，都要定位修复"
     def delete_by_doc(self, doc_path: str) -> int:
         safe = doc_path.replace("'", "''")
         try:
-            return self.table.delete(f"doc_path = '{safe}'")
+            result = self.table.delete(f"doc_path = '{safe}'")
+            if isinstance(result, int):
+                count = result
+            elif hasattr(result, "__int__"):
+                count = int(result)
+            elif hasattr(result, "rows_deleted"):
+                count = result.rows_deleted
+            else:
+                logger.debug("delete_by_doc returned unexpected type: %s", type(result))
+                count = 0
+            self.bm25.remove_document(doc_path)
+            return count
         except Exception:
             return 0
 
@@ -150,3 +158,4 @@ class VectorStore:
     def close(self) -> None:
         self._db = None
         self._table = None
+        self._bm25_index = None
