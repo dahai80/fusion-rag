@@ -56,12 +56,26 @@ class VectorStore:
             pa.field("doc_type", pa.string()),
             pa.field("chunk_index", pa.int32()),
             pa.field("metadata_json", pa.string()),
+            pa.field("context", pa.string()),
         ])
         try:
             self._table = self._db.open_table(table_name)
+            self._migrate_schema(self._table, schema)
         except Exception as e:
-            logger.warning("Vector store clear failed: %s", e)
+            logger.warning("Vector store open failed, creating new: %s", e)
             self._table = self._db.create_table(table_name, schema=schema)
+
+    def _migrate_schema(self, table, target_schema) -> None:
+        existing_fields = {f.name for f in table.schema}
+        missing = [f for f in target_schema if f.name not in existing_fields]
+        if not missing:
+            return
+        for field in missing:
+            logger.info("Migrating schema: adding column '%s'", field.name)
+            try:
+                table.add_columns({field.name: "''"})
+            except Exception as e:
+                logger.warning("Schema migration failed for '%s': %s", field.name, e)
 
     @property
     def table(self):
@@ -71,12 +85,14 @@ class VectorStore:
 
     def add(self, chunk_id: str, vector: list[float], text: str,
             doc_path: str = "", doc_name: str = "", doc_type: str = "",
-            chunk_index: int = 0, metadata: dict | None = None) -> None:
+            chunk_index: int = 0, metadata: dict | None = None,
+            context: str = "") -> None:
         data = [{
             "id": chunk_id, "vector": vector, "text": text,
             "doc_path": doc_path, "doc_name": doc_name, "doc_type": doc_type,
             "chunk_index": chunk_index,
             "metadata_json": json.dumps(metadata or {}, ensure_ascii=False),
+            "context": context,
         }]
         self.table.add(data)
         self.bm25.add_documents(data)
