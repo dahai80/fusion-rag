@@ -27,7 +27,7 @@ class EmbeddingClient:
         self,
         base_url: str = "http://localhost:11434/v1",
         model: str = "BGE-M3",
-        api_key: str = "local",
+        api_key: str = "",
         timeout: float = 30.0,
         max_retries: int = 3,
         batch_size: int = 16,
@@ -50,10 +50,13 @@ class EmbeddingClient:
     @property
     def client(self) -> httpx.AsyncClient:
         if self._client is None:
+            headers = {}
+            if self.api_key:
+                headers["Authorization"] = f"Bearer {self.api_key}"
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
                 timeout=self.timeout,
-                headers={"Authorization": f"Bearer {self.api_key}"},
+                headers=headers,
             )
         return self._client
 
