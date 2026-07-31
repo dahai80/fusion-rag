@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import logging
 import uuid
+import os
+import asyncio
+import hashlib
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -236,6 +239,146 @@ async def scan_directory(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
         "total_chunks": total_chunks,
         "total_chars": total_chars,
         "errors": errors,
+    }
+
+
+# ── File Watching ──
+
+_watches: dict[str, dict[str, Any]] = {}
+
+
+def _file_hash(path: str) -> str:
+    try:
+        with open(path, "rb") as f:
+            return hashlib.md5(f.read()).hexdigest()
+    except Exception:
+        return ""
+
+
+async def _watch_loop(watch_id: str) -> None:
+    watch = _watches.get(watch_id)
+    if not watch:
+        return
+    kb_id = watch["kb_id"]
+    file_paths = watch["file_paths"]
+    interval = watch.get("poll_interval", 30)
+    hashes = watch["hashes"]
+    logger.info("watch %s: started, %d files, interval=%ds", watch_id, len(file_paths), interval)
+    while watch.get("active", False):
+        await asyncio.sleep(interval)
+        if not watch.get("active", False):
+            break
+        changed = []
+        for fp in file_paths:
+            current = _file_hash(fp)
+            previous = hashes.get(fp, "")
+            if current and current != previous:
+                changed.append(fp)
+                hashes[fp] = current
+        if changed:
+            logger.info("watch %s: %d files changed, re-indexing", watch_id, len(changed))
+            try:
+                kb = _get_base(kb_id)
+                embed = _get_embed_client()
+                vec_store = _get_vector_store(kb_id)
+                meta_store = _get_meta_store(kb_id)
+                contextualizer = Contextualizer(enabled=True)
+                for fp in changed:
+                    results = await _doc_parser.parse_directory(os.path.dirname(fp), recursive=False, max_files=1)
+                    for result in results:
+                        if result.error:
+                            continue
+                        chunker = Chunker(strategy=kb.config.chunk_strategy, chunk_size=kb.config.chunk_size)
+                        chunks = await chunker.chunk(result)
+                        if not chunks:
+                            continue
+                        chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
+                        chunk_dicts = await contextualizer.contextualize(chunk_dicts, result.content)
+                        embed_texts = []
+                        for cd, c in zip(chunk_dicts, chunks):
+                            ctx = cd.get("context", "")
+                            embed_texts.append((ctx + " " + c.text).strip() if ctx else c.text)
+                        vectors = await embed.embed_batch(embed_texts)
+                        doc_id = uuid.uuid4().hex[:16]
+                        meta_store.add_document(doc_id, result.file_path, result.file_name,
+                                                result.doc_type.value, result.metadata.get("size", 0))
+                        records = []
+                        for i, (chunk, vector, cd) in enumerate(zip(chunks, vectors, chunk_dicts)):
+                            chunk_id = f"{doc_id}_{i}"
+                            meta_store.add_chunk(chunk_id, doc_id, result.file_path, i, chunk.text, chunk.tokens)
+                            records.append({
+                                "id": chunk_id, "vector": vector, "text": chunk.text,
+                                "doc_path": result.file_path, "doc_name": result.file_name,
+                                "doc_type": result.doc_type.value, "chunk_index": i,
+                                "metadata": result.metadata, "context": cd.get("context", ""),
+                            })
+                        vec_store.add_batch(records)
+                        vec_store.bm25.add_documents(records)
+                watch["last_reindex"] = uuid.uuid4().hex[:8]
+                watch["changes_detected"] = watch.get("changes_detected", 0) + len(changed)
+                logger.info("watch %s: re-indexed %d files", watch_id, len(changed))
+            except Exception as e:
+                logger.error("watch %s: re-index error: %s", watch_id, e, exc_info=True)
+    logger.info("watch %s: stopped", watch_id)
+
+
+@router.post("/bases/{kb_id}/watch")
+async def watch_files(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    _get_base(kb_id)
+    file_paths = data.get("file_paths", [])
+    poll_interval = max(data.get("poll_interval", 30), 10)
+    if not file_paths:
+        raise HTTPException(400, "file_paths is required")
+    valid_paths = [fp for fp in file_paths if os.path.isfile(fp)]
+    if not valid_paths:
+        raise HTTPException(400, "No valid file paths provided")
+    hashes = {}
+    for fp in valid_paths:
+        h = _file_hash(fp)
+        if h:
+            hashes[fp] = h
+    watch_id = uuid.uuid4().hex[:12]
+    watch = {
+        "watch_id": watch_id,
+        "kb_id": kb_id,
+        "file_paths": valid_paths,
+        "poll_interval": poll_interval,
+        "hashes": hashes,
+        "active": True,
+        "changes_detected": 0,
+    }
+    _watches[watch_id] = watch
+    asyncio.create_task(_watch_loop(watch_id))
+    logger.info("watch: created watch_id=%s, %d files", watch_id, len(valid_paths))
+    return {"watch_id": watch_id, "file_count": len(valid_paths), "poll_interval": poll_interval}
+
+
+@router.post("/bases/{kb_id}/unwatch")
+async def unwatch_files(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    watch_id = data.get("watch_id", "")
+    watch = _watches.get(watch_id)
+    if not watch or watch["kb_id"] != kb_id:
+        raise HTTPException(404, f"Watch not found: {watch_id}")
+    watch["active"] = False
+    changes = watch.get("changes_detected", 0)
+    del _watches[watch_id]
+    return {"stopped": True, "watch_id": watch_id, "changes_detected": changes}
+
+
+@router.get("/bases/{kb_id}/watch/status")
+async def watch_status(kb_id: str) -> dict[str, Any]:
+    active = [w for w in _watches.values() if w["kb_id"] == kb_id and w.get("active")]
+    return {
+        "active_watches": len(active),
+        "watches": [
+            {
+                "watch_id": w["watch_id"],
+                "file_count": len(w["file_paths"]),
+                "changes_detected": w.get("changes_detected", 0),
+                "last_reindex": w.get("last_reindex"),
+            }
+            for w in active
+        ],
     }
 
 
