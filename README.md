@@ -107,14 +107,44 @@ Fusion-RAG provides a REST API at `/kb/*` for knowledge base operations.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/kb/bases/{id}/documents` | Upload and index a document |
+| POST | `/kb/bases/{id}/documents/batch` | Batch upload multiple documents |
+| GET | `/kb/bases/{id}/documents` | List all documents in a KB |
+| DELETE | `/kb/bases/{id}/documents/{doc_id}` | Delete a document and its chunks |
+| PUT | `/kb/bases/{id}/documents/{doc_id}` | Replace a document (re-index) |
+| GET | `/kb/bases/{id}/documents/{doc_id}/status` | Get document indexing status |
 | POST | `/kb/bases/{id}/scan` | Scan directory and index all files |
 
 ### Search & RAG
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/kb/bases/{id}/search` | Semantic search with vector similarity |
-| POST | `/kb/bases/{id}/ask` | RAG Q&A with source citation |
+| POST | `/kb/bases/{id}/search` | Semantic search (supports hybrid, rerank, folder_prefix) |
+| POST | `/kb/bases/{id}/ask` | RAG Q&A (supports model, hybrid, rerank, folder_prefix) |
+
+#### Search Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `query` | (required) | Search query text |
+| `top_k` | 10 | Number of results |
+| `threshold` | 0.0 | Minimum similarity score |
+| `hybrid` | false | Enable BM25+Vector hybrid search |
+| `hybrid_alpha` | 0.7 | Vector weight (alpha fusion) |
+| `hybrid_method` | "rrf" | Fusion method: "alpha" or "rrf" |
+| `rerank` | false | Enable LLM reranking of results |
+| `folder_prefix` | (none) | Filter results by folder path prefix |
+
+#### Ask Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `question` | (required) | Question text |
+| `model` | "qwen3.5-9b" | LLM model for answer generation |
+| `max_tokens` | 4096 | Max output tokens |
+| `temperature` | 0.3 | Sampling temperature |
+| `hybrid` | false | Enable hybrid search |
+| `rerank` | false | Enable LLM reranking |
+| `folder_prefix` | (none) | Filter by folder path |
 
 ### MCP Protocol
 
