@@ -28,17 +28,22 @@ class Contextualizer:
     """Generates context for chunks using Anthropic's Contextual Retrieval approach."""
 
     def __init__(self, mlx_url: str = "http://localhost:11434/v1",
-                 model: str = "qwen3.5-9b", enabled: bool = True):
+                 model: str = "qwen3.5-9b", enabled: bool = True,
+                 api_key: str = ""):
         self.mlx_url = mlx_url.rstrip("/")
         self.model = model
         self.enabled = enabled
+        self.api_key = api_key
 
     async def contextualize(self, chunks: list[dict[str, Any]],
                             doc_text: str) -> list[dict[str, Any]]:
         if not self.enabled or not doc_text or not chunks:
             return chunks
         doc_truncated = doc_text[:8000]
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        headers = {}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        async with httpx.AsyncClient(timeout=30.0, headers=headers) as client:
             for chunk in chunks:
                 try:
                     context = await self._generate_context(
