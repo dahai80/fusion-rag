@@ -6,11 +6,11 @@ No direct MLX imports.
 
 from __future__ import annotations
 
-import logging
-import uuid
-import os
 import asyncio
 import hashlib
+import logging
+import os
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -21,9 +21,13 @@ from ..engine.contextualizer import Contextualizer
 from ..engine.document import DocumentParser
 from ..engine.knowledge_base import KnowledgeBaseManager
 from ..engine.query_rewriter import QueryRewriter
+from ..engine.reranker import HybridSearch, Reranker
 from ..store.metadata_store import MetadataStore
 from ..store.vector_store import VectorStore
 from .auth import verify_api_key
+
+# Async task tracking for indexing status (#14)
+_tasks: dict[str, dict[str, Any]] = {}
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +168,222 @@ async def upload_document(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     _get_kb_manager().update(kb_id, file_count=kb.file_count, chunk_count=kb.chunk_count)
 
     return {"doc_id": doc_id, "chunks": len(chunks), "chars": result.chars}
+
+
+# #18: Batch file upload
+@router.post("/bases/{kb_id}/documents/batch", dependencies=[Depends(verify_api_key)])
+async def batch_upload_documents(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    """Upload and index multiple documents in batch."""
+    kb = _get_base(kb_id)
+    file_paths = data.get("file_paths", [])
+    if not file_paths:
+        raise HTTPException(400, "file_paths is required")
+
+    embed = _get_embed_client()
+    vec_store = _get_vector_store(kb_id)
+    meta_store = _get_meta_store(kb_id)
+    contextualize = data.get("contextualize", True)
+    contextualizer = Contextualizer(enabled=contextualize)
+
+    total_chunks = 0
+    total_chars = 0
+    indexed = []
+    errors = []
+
+    for fp in file_paths:
+        if not os.path.isfile(fp):
+            errors.append({"file": fp, "error": "file not found"})
+            continue
+        try:
+            result = await _doc_parser.parse(fp)
+            if result.error:
+                errors.append({"file": fp, "error": result.error})
+                continue
+            chunker = Chunker(strategy=kb.config.chunk_strategy, chunk_size=kb.config.chunk_size)
+            chunks = await chunker.chunk(result)
+            if not chunks:
+                continue
+            chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
+            chunk_dicts = await contextualizer.contextualize(chunk_dicts, result.content)
+            embed_texts = []
+            for cd, c in zip(chunk_dicts, chunks):
+                ctx = cd.get("context", "")
+                embed_texts.append((ctx + " " + c.text).strip() if ctx else c.text)
+            vectors = await embed.embed_batch(embed_texts)
+            doc_id = uuid.uuid4().hex[:16]
+            meta_store.add_document(doc_id, result.file_path, result.file_name,
+                                    result.doc_type.value, result.metadata.get("size", 0))
+            records = []
+            for i, (chunk, vector, cd) in enumerate(zip(chunks, vectors, chunk_dicts)):
+                chunk_id = f"{doc_id}_{i}"
+                meta_store.add_chunk(chunk_id, doc_id, result.file_path, i, chunk.text, chunk.tokens)
+                records.append({
+                    "id": chunk_id, "vector": vector, "text": chunk.text,
+                    "doc_path": result.file_path, "doc_name": result.file_name,
+                    "doc_type": result.doc_type.value, "chunk_index": i,
+                    "metadata": result.metadata, "context": cd.get("context", ""),
+                })
+            vec_store.add_batch(records)
+            vec_store.bm25.add_documents(records)
+            meta_store.update_chunk_count(doc_id, len(chunks), result.chars)
+            indexed.append({"doc_id": doc_id, "file": fp, "chunks": len(chunks)})
+            total_chunks += len(chunks)
+            total_chars += result.chars
+        except Exception as e:
+            logger.error("batch upload: failed %s: %s", fp, e)
+            errors.append({"file": fp, "error": str(e)})
+
+    kb.file_count += len(indexed)
+    kb.chunk_count += total_chunks
+    _get_kb_manager().update(kb_id, file_count=kb.file_count, chunk_count=kb.chunk_count)
+
+    return {
+        "indexed": len(indexed),
+        "total_chunks": total_chunks,
+        "total_chars": total_chars,
+        "documents": indexed,
+        "errors": errors,
+    }
+
+
+# #11: Document delete API
+@router.delete("/bases/{kb_id}/documents/{doc_id}", dependencies=[Depends(verify_api_key)])
+async def delete_document(kb_id: str, doc_id: str) -> dict[str, Any]:
+    """Delete a document and its associated chunks/vectors."""
+    kb = _get_base(kb_id)
+    meta_store = _get_meta_store(kb_id)
+    vec_store = _get_vector_store(kb_id)
+
+    doc = meta_store.get_document(doc_id)
+    if not doc:
+        raise HTTPException(404, f"Document '{doc_id}' not found")
+
+    doc_path = doc.get("file_path", "")
+    chunks = meta_store.get_chunks_by_doc(doc_id)
+    chunk_count = len(chunks)
+
+    vec_store.delete_by_doc(doc_path)
+    meta_store.delete_chunks_by_doc(doc_id)
+    meta_store.delete_document(doc_id)
+
+    kb.file_count = max(0, kb.file_count - 1)
+    kb.chunk_count = max(0, kb.chunk_count - chunk_count)
+    _get_kb_manager().update(kb_id, file_count=kb.file_count, chunk_count=kb.chunk_count)
+
+    logger.info("deleted doc %s from kb %s: %d chunks removed", doc_id, kb_id, chunk_count)
+    return {"doc_id": doc_id, "status": "deleted", "chunks_removed": chunk_count}
+
+
+# #13: Document replace API (delete + re-index, preserving doc_id)
+@router.put("/bases/{kb_id}/documents/{doc_id}", dependencies=[Depends(verify_api_key)])
+async def replace_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    """Replace a document: delete old vectors, re-index from new file_path."""
+    kb = _get_base(kb_id)
+    meta_store = _get_meta_store(kb_id)
+    vec_store = _get_vector_store(kb_id)
+
+    doc = meta_store.get_document(doc_id)
+    if not doc:
+        raise HTTPException(404, f"Document '{doc_id}' not found")
+
+    new_file_path = data.get("file_path", "")
+    if not new_file_path:
+        raise HTTPException(400, "file_path is required for replacement")
+
+    old_path = doc.get("file_path", "")
+    old_chunks = meta_store.get_chunks_by_doc(doc_id)
+    old_chunk_count = len(old_chunks)
+    vec_store.delete_by_doc(old_path)
+    meta_store.delete_chunks_by_doc(doc_id)
+
+    result = await _doc_parser.parse(new_file_path)
+    if result.error:
+        raise HTTPException(400, result.error)
+
+    chunker = Chunker(strategy=kb.config.chunk_strategy, chunk_size=kb.config.chunk_size)
+    chunks = await chunker.chunk(result)
+
+    contextualize = data.get("contextualize", True)
+    contextualizer = Contextualizer(enabled=contextualize)
+    chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
+    chunk_dicts = await contextualizer.contextualize(chunk_dicts, result.content)
+
+    embed = _get_embed_client()
+    embed_texts = []
+    for cd, c in zip(chunk_dicts, chunks):
+        ctx = cd.get("context", "")
+        embed_texts.append((ctx + " " + c.text).strip() if ctx else c.text)
+    vectors = await embed.embed_batch(embed_texts)
+
+    meta_store.delete_document(doc_id)
+    meta_store.add_document(doc_id, result.file_path, result.file_name,
+                            result.doc_type.value, result.metadata.get("size", 0))
+
+    records = []
+    for i, (chunk, vector, cd) in enumerate(zip(chunks, vectors, chunk_dicts)):
+        chunk_id = f"{doc_id}_{i}"
+        meta_store.add_chunk(chunk_id, doc_id, result.file_path, i, chunk.text, chunk.tokens)
+        records.append({
+            "id": chunk_id, "vector": vector, "text": chunk.text,
+            "doc_path": result.file_path, "doc_name": result.file_name,
+            "doc_type": result.doc_type.value, "chunk_index": i,
+            "metadata": result.metadata, "context": cd.get("context", ""),
+        })
+
+    vec_store.add_batch(records)
+    vec_store.bm25.add_documents(records)
+    meta_store.update_chunk_count(doc_id, len(chunks), result.chars)
+
+    kb.chunk_count = max(0, kb.chunk_count - old_chunk_count + len(chunks))
+    _get_kb_manager().update(kb_id, file_count=kb.file_count, chunk_count=kb.chunk_count)
+
+    logger.info("replaced doc %s in kb %s: %d -> %d chunks", doc_id, kb_id, old_chunk_count, len(chunks))
+    return {
+        "doc_id": doc_id,
+        "status": "replaced",
+        "old_chunks": old_chunk_count,
+        "new_chunks": len(chunks),
+        "chars": result.chars,
+    }
+
+
+# #14: Document indexing status
+@router.get("/bases/{kb_id}/documents/{doc_id}/status")
+async def document_status(kb_id: str, doc_id: str) -> dict[str, Any]:
+    """Get document indexing status."""
+    _get_base(kb_id)
+    meta_store = _get_meta_store(kb_id)
+
+    doc = meta_store.get_document(doc_id)
+    if not doc:
+        task = _tasks.get(doc_id)
+        if task and task.get("kb_id") == kb_id:
+            return {
+                "doc_id": doc_id,
+                "status": task.get("status", "unknown"),
+                "progress": task.get("progress"),
+                "error": task.get("error"),
+            }
+        raise HTTPException(404, f"Document '{doc_id}' not found")
+
+    chunks = meta_store.get_chunks_by_doc(doc_id)
+    return {
+        "doc_id": doc_id,
+        "status": "indexed",
+        "file_path": doc.get("file_path", ""),
+        "file_name": doc.get("file_name", ""),
+        "chunk_count": len(chunks),
+        "chars": doc.get("chars", 0),
+    }
+
+
+# List documents in a KB (#14)
+@router.get("/bases/{kb_id}/documents")
+async def list_documents(kb_id: str) -> list[dict[str, Any]]:
+    """List all documents in a knowledge base."""
+    _get_base(kb_id)
+    meta_store = _get_meta_store(kb_id)
+    return meta_store.list_documents()
 
 
 @router.post("/bases/{kb_id}/scan", dependencies=[Depends(verify_api_key)])
@@ -348,7 +568,7 @@ async def watch_files(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
         "changes_detected": 0,
     }
     _watches[watch_id] = watch
-    asyncio.create_task(_watch_loop(watch_id))
+    _watches[watch_id]["_task"] = asyncio.create_task(_watch_loop(watch_id))
     logger.info("watch: created watch_id=%s, %d files", watch_id, len(valid_paths))
     return {"watch_id": watch_id, "file_count": len(valid_paths), "poll_interval": poll_interval}
 
@@ -387,7 +607,14 @@ async def watch_status(kb_id: str) -> dict[str, Any]:
 
 @router.post("/bases/{kb_id}/search")
 async def search(kb_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
-    """Search for relevant document chunks using vector similarity."""
+    """Search for relevant document chunks.
+
+    Supports:
+    - Vector search (default)
+    - Hybrid search (BM25+Vector RRF) via hybrid=true (#15)
+    - Reranking via rerank=true (#16)
+    - Folder-level filter via folder_prefix (#12)
+    """
     kb = _get_base(kb_id)
     query = data.get("query", "")
     if not query:
@@ -395,6 +622,11 @@ async def search(kb_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
 
     top_k = data.get("top_k", kb.config.max_results)
     threshold = data.get("threshold", kb.config.similarity_threshold)
+    folder_prefix = data.get("folder_prefix")  # #12
+    use_hybrid = data.get("hybrid", False)  # #15
+    use_rerank = data.get("rerank", False)  # #16
+    hybrid_alpha = data.get("hybrid_alpha", 0.7)  # #15
+    hybrid_method = data.get("hybrid_method", "rrf")  # #15
 
     embed = _get_embed_client()
     vec_store = _get_vector_store(kb_id)
@@ -405,43 +637,93 @@ async def search(kb_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
         rewriter = QueryRewriter(enabled=True)
         rewritten = await rewriter.rewrite(query, mode=rewrite_mode)
         if isinstance(rewritten, list):
-            # For expand mode, embed original + variants and merge results
             all_results = []
             for q in rewritten:
                 qv = await embed.embed(q)
                 if qv and not all(v == 0.0 for v in qv):
                     all_results.extend(vec_store.search(qv, top_k=top_k, threshold=threshold))
-            # Deduplicate by id, keep highest score
             seen = {}
             for r in all_results:
                 rid = r.get("id", "")
                 if rid not in seen or r.get("score", 0) > seen[rid].get("score", 0):
                     seen[rid] = r
             results = sorted(seen.values(), key=lambda x: x.get("score", 0), reverse=True)[:top_k]
+            results = _apply_search_filters(results, folder_prefix)
+            if use_rerank:
+                results = await _do_rerank(query, results, top_k)
             return results
         query = rewritten
 
-    # callers: test_search_with_mocked_embed expects 500 when embed fails
-    # API: search() -> list[dict]; embed returns zero vector on failure
-    # schema: query_vector is list[float], zero-vector means embed failed
-    # user instruction: "bug/问题/需求 修改完成，遇到报错的用例，不管和自己的代码是否相关，都要定位修复"
     query_vector = await embed.embed(query)
     if not query_vector or all(v == 0.0 for v in query_vector):
         raise HTTPException(500, "Embedding failed")
 
-    results = vec_store.search(query_vector, top_k=top_k, threshold=threshold)
+    # #15: Hybrid search (BM25 + Vector with RRF fusion)
+    if use_hybrid:
+        hs = HybridSearch(vec_store, alpha=hybrid_alpha, method=hybrid_method)
+        filters = {}
+        if folder_prefix:
+            filters["folder_prefix"] = folder_prefix
+        results = await hs.search(
+            query_vector, query,
+            top_k=top_k, threshold=threshold,
+            filters=filters if filters else None,
+        )
+    else:
+        results = vec_store.search(query_vector, top_k=top_k, threshold=threshold)
+        results = _apply_search_filters(results, folder_prefix)
+
+    # #16: Reranking
+    if use_rerank:
+        results = await _do_rerank(query, results, top_k)
+
     return results
+
+
+def _apply_search_filters(results: list[dict], folder_prefix: str | None) -> list[dict]:
+    """Apply folder prefix filter to search results (#12)."""
+    if not folder_prefix:
+        return results
+    return [r for r in results if r.get("doc_path", "").startswith(folder_prefix)]
+
+
+async def _do_rerank(query: str, results: list[dict], top_k: int) -> list[dict]:
+    """Apply LLM reranking to search results (#16)."""
+    if not results:
+        return results
+    try:
+        mlx_base = _get_embed_client().base_url.replace("/v1", "")
+        reranker = Reranker(mlx_url=mlx_base)
+        return await reranker.rerank(query, results, top_k=top_k)
+    except Exception as e:
+        logger.error("rerank failed: %s", e)
+        return results[:top_k]
 
 
 @router.post("/bases/{kb_id}/ask")
 async def ask(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
-    """RAG: Retrieve relevant chunks and generate an answer."""
+    """RAG: Retrieve relevant chunks and generate an answer.
+
+    Supports:
+    - Parameterized model/max_tokens/temperature (#17)
+    - Hybrid search via hybrid=true (#15)
+    - Reranking via rerank=true (#16)
+    - Folder-level filter via folder_prefix (#12)
+    """
     kb = _get_base(kb_id)
     question = data.get("question", "")
     if not question:
         raise HTTPException(400, "question is required")
 
     top_k = data.get("top_k", kb.config.max_results)
+    # #17: Parameterized model config
+    model = data.get("model", "qwen3.5-9b")
+    max_tokens = data.get("max_tokens", 4096)
+    temperature = data.get("temperature", 0.3)
+    # #15/#16/#12: Search enhancements
+    use_hybrid = data.get("hybrid", False)
+    use_rerank = data.get("rerank", False)
+    folder_prefix = data.get("folder_prefix")
 
     # 1. Retrieve
     embed = _get_embed_client()
@@ -460,10 +742,29 @@ async def ask(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     query_vector = await embed.embed(question)
     if not query_vector or all(v == 0.0 for v in query_vector):
         raise HTTPException(500, "Embedding failed")
-    chunks = vec_store.search(query_vector, top_k=top_k, threshold=kb.config.similarity_threshold)
+
+    # Search with optional hybrid + folder filter
+    if use_hybrid:
+        hs = HybridSearch(vec_store)
+        filters = {}
+        if folder_prefix:
+            filters["folder_prefix"] = folder_prefix
+        chunks = await hs.search(
+            query_vector, question,
+            top_k=top_k, threshold=kb.config.similarity_threshold,
+            filters=filters if filters else None,
+        )
+    else:
+        chunks = vec_store.search(query_vector, top_k=top_k, threshold=kb.config.similarity_threshold)
+        if folder_prefix:
+            chunks = [c for c in chunks if c.get("doc_path", "").startswith(folder_prefix)]
 
     if not chunks:
         return {"answer": "No relevant documents found.", "sources": []}
+
+    # #16: Reranking
+    if use_rerank:
+        chunks = await _do_rerank(question, chunks, top_k)
 
     # 2. Build context
     context = "\n\n".join(
@@ -471,14 +772,19 @@ async def ask(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
         for c in chunks
     )
 
-    # 3. Generate answer via fusion-mlx chat
-    answer = await _generate_answer(question, context, chunks)
+    # 3. Generate answer via fusion-mlx chat (#17: parameterized)
+    answer = await _generate_answer(question, context, chunks,
+                                    model=model, max_tokens=max_tokens,
+                                    temperature=temperature)
 
     return answer
 
 
 async def _generate_answer(question: str, context: str,
-                           chunks: list[dict]) -> dict[str, Any]:
+                           chunks: list[dict], *,
+                           model: str = "qwen3.5-9b",
+                           max_tokens: int = 4096,
+                           temperature: float = 0.3) -> dict[str, Any]:
     """Generate an answer using fusion-mlx's chat API."""
     mlx_base = _get_embed_client().base_url.replace("/v1", "")
     mlx_url = f"{mlx_base}/v1/chat/completions"
@@ -498,10 +804,10 @@ async def _generate_answer(question: str, context: str,
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(mlx_url, json={
-                "model": "qwen3.5-9b",
+                "model": model,
                 "messages": messages,
-                "max_tokens": 4096,
-                "temperature": 0.3,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
             })
             resp.raise_for_status()
             data = resp.json()
