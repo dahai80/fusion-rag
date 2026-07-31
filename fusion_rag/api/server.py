@@ -24,6 +24,7 @@ def create_app(
     kb_storage_dir: str = "",
     mlx_base_url: str = "http://localhost:11434/v1",
     embedding_model: str = "BGE-M3",
+    mlx_api_key: str = "",
 ) -> FastAPI:
     """Create and configure the Fusion-RAG FastAPI application."""
     app = FastAPI(
@@ -37,6 +38,7 @@ def create_app(
     embed_client = EmbeddingClient(
         base_url=mlx_base_url,
         model=embedding_model,
+        api_key=mlx_api_key,
     )
 
     # Inject context
@@ -60,6 +62,7 @@ def run_server(
     kb_storage_dir: str = "",
     mlx_base_url: str = "http://localhost:11434/v1",
     embedding_model: str = "BGE-M3",
+    mlx_api_key: str = "",
     log_level: str = "INFO",
 ) -> None:
     """Run the Fusion-RAG server."""
@@ -68,6 +71,7 @@ def run_server(
         kb_storage_dir=kb_storage_dir,
         mlx_base_url=mlx_base_url,
         embedding_model=embedding_model,
+        mlx_api_key=mlx_api_key,
     )
     uvicorn.run(app, host=host, port=port, log_level=log_level.lower())
 
@@ -77,11 +81,13 @@ if __name__ == "__main__":
     port = int(os.environ.get("FUSION_RAG_PORT", "11436"))
     mlx_url = os.environ.get("FUSION_MLX_URL", "http://localhost:11434/v1")
     embed_model = os.environ.get("FUSION_RAG_EMBED", "BGE-M3")
+    mlx_api_key = os.environ.get("FUSION_MLX_API_KEY", "")
     log_level = os.environ.get("FUSION_RAG_LOG_LEVEL", "INFO")
     run_server(
         host=host,
         port=port,
         mlx_base_url=mlx_url,
         embedding_model=embed_model,
+        mlx_api_key=mlx_api_key,
         log_level=log_level,
     )
