@@ -75,7 +75,14 @@ class EmbeddingCache:
         finally:
             conn.close()
 
+    @staticmethod
+    def _is_zero_vector(vector: list[float]) -> bool:
+        return len(vector) > 0 and all(v == 0.0 for v in vector)
+
     def set(self, text: str, vector: list[float], model: str = "") -> None:
+        if self._is_zero_vector(vector):
+            logger.warning("skip caching zero vector for text=%s model=%s", text[:60], model)
+            return
         h = self._hash(text, model)
         conn = self._get_conn()
         try:
@@ -100,17 +107,20 @@ class EmbeddingCache:
         conn = self._get_conn()
         try:
             now = time.time()
-            rows = [
-                (h(t, model), t[:1000], json.dumps(v), model, now)
-                for t, v in zip(texts, vectors)
-            ]
-            conn.executemany(
-                """INSERT OR REPLACE INTO embed_cache (text_hash, text, vector, model, created_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                rows,
-            )
-            conn.commit()
-            self._evict_if_needed(conn)
+            rows = []
+            for t, v in zip(texts, vectors):
+                if self._is_zero_vector(v):
+                    logger.warning("skip caching zero vector for text=%s model=%s", t[:60], model)
+                    continue
+                rows.append((h(t, model), t[:1000], json.dumps(v), model, now))
+            if rows:
+                conn.executemany(
+                    """INSERT OR REPLACE INTO embed_cache (text_hash, text, vector, model, created_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    rows,
+                )
+                conn.commit()
+                self._evict_if_needed(conn)
         except Exception as e:
             logger.warning("EmbeddingCache set_batch failed: %s", e)
         finally:

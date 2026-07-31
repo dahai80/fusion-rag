@@ -121,12 +121,12 @@ async def upload_document(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
 
     # Contextualize (optional, default enabled)
     contextualize = data.get("contextualize", True)
-    contextualizer = Contextualizer(enabled=contextualize)
+    embed = _get_embed_client()
+    contextualizer = Contextualizer(enabled=contextualize, api_key=embed.api_key)
     chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
     chunk_dicts = await contextualizer.contextualize(chunk_dicts, result.content)
 
     # Embed (use context+text when available)
-    embed = _get_embed_client()
     embed_texts = []
     for cd, c in zip(chunk_dicts, chunks):
         ctx = cd.get("context", "")
@@ -183,7 +183,7 @@ async def batch_upload_documents(kb_id: str, data: dict[str, Any]) -> dict[str, 
     vec_store = _get_vector_store(kb_id)
     meta_store = _get_meta_store(kb_id)
     contextualize = data.get("contextualize", True)
-    contextualizer = Contextualizer(enabled=contextualize)
+    contextualizer = Contextualizer(enabled=contextualize, api_key=embed.api_key)
 
     total_chunks = 0
     total_chars = 0
@@ -304,11 +304,10 @@ async def replace_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dic
     chunks = await chunker.chunk(result)
 
     contextualize = data.get("contextualize", True)
-    contextualizer = Contextualizer(enabled=contextualize)
+    embed = _get_embed_client()
+    contextualizer = Contextualizer(enabled=contextualize, api_key=embed.api_key)
     chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
     chunk_dicts = await contextualizer.contextualize(chunk_dicts, result.content)
-
-    embed = _get_embed_client()
     embed_texts = []
     for cd, c in zip(chunk_dicts, chunks):
         ctx = cd.get("context", "")
@@ -399,7 +398,7 @@ async def scan_directory(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     vec_store = _get_vector_store(kb_id)
     meta_store = _get_meta_store(kb_id)
     contextualize = data.get("contextualize", True)
-    contextualizer = Contextualizer(enabled=contextualize)
+    contextualizer = Contextualizer(enabled=contextualize, api_key=embed.api_key)
 
     total_chunks = 0
     total_chars = 0
@@ -502,7 +501,7 @@ async def _watch_loop(watch_id: str) -> None:
                 embed = _get_embed_client()
                 vec_store = _get_vector_store(kb_id)
                 meta_store = _get_meta_store(kb_id)
-                contextualizer = Contextualizer(enabled=True)
+                contextualizer = Contextualizer(enabled=True, api_key=embed.api_key)
                 for fp in changed:
                     results = await _doc_parser.parse_directory(os.path.dirname(fp), recursive=False, max_files=1)
                     for result in results:
