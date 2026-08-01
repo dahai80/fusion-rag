@@ -84,6 +84,22 @@ class TestKnowledgeBaseManager:
             assert mgr.delete(kb.id) is True
             assert len(mgr.list()) == 0
 
+    def test_create_with_kb_id(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = KnowledgeBaseManager(storage_dir=tmpdir)
+            kb = mgr.create("my-kb", kb_id="kb_test_1")
+            assert kb.id == "kb_test_1"
+            assert mgr.get("kb_test_1").config.name == "my-kb"
+
+    def test_create_with_kb_id_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = KnowledgeBaseManager(storage_dir=tmpdir)
+            mgr.create("my-kb", kb_id="kb_test_1")
+            kb2 = mgr.create("my-kb-2", kb_id="kb_test_1")
+            assert kb2.id == "kb_test_1"
+            assert kb2.config.name == "my-kb"
+            assert len(mgr.list()) == 1
+
     def test_delete_nonexistent(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             mgr = KnowledgeBaseManager(storage_dir=tmpdir)

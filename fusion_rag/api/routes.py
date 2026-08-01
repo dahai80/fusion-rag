@@ -68,18 +68,24 @@ async def list_knowledge_bases() -> list[dict[str, Any]]:
 
 @router.post("/bases", dependencies=[Depends(verify_api_key)])
 async def create_knowledge_base(data: dict[str, Any]) -> dict[str, Any]:
-    """Create a new knowledge base."""
+    """Create a new knowledge base. Accepts optional kb_id for external bind (idempotent)."""
     name = data.get("name", "")
+    kb_id = data.get("kb_id", "")
+    if not name and not kb_id:
+        raise HTTPException(400, "name or kb_id is required")
     if not name:
-        raise HTTPException(400, "name is required")
+        name = kb_id
     description = data.get("description", "")
     chunk_strategy = data.get("chunk_strategy", "semantic")
     embedding_model = data.get("embedding_model", "BGE-M3")
+    existing = kb_id and kb_id in _get_kb_manager()._bases
     kb = _get_kb_manager().create(
         name=name, description=description,
         chunk_strategy=chunk_strategy, embedding_model=embedding_model,
+        kb_id=kb_id,
     )
-    return {"id": kb.id, "name": kb.config.name, "status": "created"}
+    status = "exists" if existing else "created"
+    return {"id": kb.id, "name": kb.config.name, "status": status}
 
 
 @router.get("/bases/{kb_id}")

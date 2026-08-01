@@ -142,15 +142,20 @@ class KnowledgeBaseManager:
         meta_file.write_text(json.dumps(kb.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
 
     def create(self, name: str, description: str = "",
-               chunk_strategy: str = "semantic", embedding_model: str = "BGE-M3") -> KnowledgeBase:
-        """Create a new knowledge base."""
+               chunk_strategy: str = "semantic", embedding_model: str = "BGE-M3",
+               kb_id: str = "") -> KnowledgeBase:
+        """Create a new knowledge base. If kb_id given and already exists, return existing (idempotent)."""
+        if kb_id and kb_id in self._bases:
+            logger.info("KB '%s' already exists, returning existing", kb_id)
+            return self._bases[kb_id]
         config = KnowledgeBaseConfig(
             name=name, description=description,
             chunk_strategy=chunk_strategy, embedding_model=embedding_model,
         )
-        kb = KnowledgeBase(config=config, storage_dir=str(self._storage_dir))
+        kb = KnowledgeBase(id=kb_id or "", config=config, storage_dir=str(self._storage_dir))
         self._bases[kb.id] = kb
         self._save_meta(kb)
+        logger.info("Created KB '%s' (id=%s)", name, kb.id)
         return kb
 
     def get(self, kb_id: str) -> KnowledgeBase:
