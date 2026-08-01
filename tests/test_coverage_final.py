@@ -1,7 +1,6 @@
 """Final coverage push — targets remaining uncovered lines in key modules."""
 from __future__ import annotations
 
-import json
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -10,12 +9,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from fusion_rag.api.server import create_app
-from fusion_rag.engine.document import DocumentParser, DocumentType, ParseResult
-from fusion_rag.engine.reranker import Reranker, HybridSearch
-from fusion_rag.engine.retrievers import MMRRetriever, FusionRetriever
-from fusion_rag.store.vector_store import VectorStore
 from fusion_rag.connectors import DatabaseConnector, WebLoader
-
+from fusion_rag.engine.document import DocumentParser, DocumentType
+from fusion_rag.engine.reranker import HybridSearch, Reranker
+from fusion_rag.engine.retrievers import FusionRetriever, MMRRetriever
+from fusion_rag.store.vector_store import VectorStore
 
 # ── API Routes Extra ──
 
@@ -237,7 +235,6 @@ class TestConnectorsFinal:
 
     @pytest.mark.asyncio
     async def test_web_loader_extract_text(self):
-        from fusion_rag.connectors import WebLoader
         loader = WebLoader()
         html = "<html><body><script>var x=1;</script><p>Hello world</p></body></html>"
         text = loader._extract_text(html)

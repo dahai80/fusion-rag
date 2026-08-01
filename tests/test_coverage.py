@@ -10,10 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from fusion_rag.api.server import create_app
-from fusion_rag.api.routes import set_kb_context
-from fusion_rag.engine.knowledge_base import KnowledgeBaseManager
 from fusion_rag.embed.client import EmbeddingClient
-
 
 # ── FastAPI Routes ──
 
@@ -181,7 +178,7 @@ class TestDocumentParserAdvanced:
 
     @pytest.mark.asyncio
     async def test_parse_directory_recursive(self):
-        import tempfile, os
+        import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             Path(tmpdir, "a.txt").write_text("file a")
             Path(tmpdir, "sub").mkdir()
@@ -223,8 +220,14 @@ class TestVectorStoreAdvanced:
         with tempfile.TemporaryDirectory() as tmpdir:
             from fusion_rag.store.vector_store import VectorStore
             store = VectorStore(tmpdir, dimension=4)
-            store.add("c1", [1.0, 0.0, 0.0, 0.0], "the cat sat on the mat", doc_path="/a.txt", doc_name="a.txt", doc_type="txt")
-            store.add("c2", [0.0, 1.0, 0.0, 0.0], "dogs are great pets", doc_path="/b.txt", doc_name="b.txt", doc_type="txt")
+            store.add("c1", [1.0, 0.0, 0.0, 0.0],
+                      "the cat sat on the mat",
+                      doc_path="/a.txt", doc_name="a.txt",
+                      doc_type="txt")
+            store.add("c2", [0.0, 1.0, 0.0, 0.0],
+                      "dogs are great pets",
+                      doc_path="/b.txt", doc_name="b.txt",
+                      doc_type="txt")
             results = store.keyword_search("cat", top_k=5)
             assert len(results) >= 1
             results2 = store.keyword_search("nonexistent", top_k=5)
@@ -246,9 +249,11 @@ class TestVectorStoreAdvanced:
         with tempfile.TemporaryDirectory() as tmpdir:
             from fusion_rag.store.vector_store import VectorStore
             store = VectorStore(tmpdir, dimension=4)
-            records = [
-                {"id": "c1", "vector": [1.0, 0.0, 0.0, 0.0], "text": "a", "doc_path": "", "doc_name": "", "doc_type": "", "chunk_index": 0, "metadata": {"type": "code"}},
-            ]
+            r1 = {"id": "c1", "vector": [1.0, 0.0, 0.0, 0.0],
+                  "text": "a", "doc_path": "", "doc_name": "",
+                  "doc_type": "", "chunk_index": 0,
+                  "metadata": {"type": "code"}}
+            records = [r1]
             store.add_batch(records)
             assert store.count() == 1
 

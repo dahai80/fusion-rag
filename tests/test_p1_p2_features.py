@@ -1,24 +1,23 @@
 """Tests for P1/P2 features: QueryRewriter, EmbeddingCache, Auth, GraphRAG, MCP, Evaluator."""
 from __future__ import annotations
 
-import json
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from fusion_rag.api.auth import AuthConfig
+from fusion_rag.engine.embedding_cache import EmbeddingCache
+from fusion_rag.engine.evaluator import RAGEvaluator
+from fusion_rag.engine.graph_rag import GraphRAG
+
 # callers: pytest runner
 # API: test functions verify P1/P2 features
 # schema: N/A
 # user instruction: "按照你的方案和计划落地所有phase阶段的需求"
 from fusion_rag.engine.query_rewriter import QueryRewriter
-from fusion_rag.engine.embedding_cache import EmbeddingCache
 from fusion_rag.engine.rag_chain import MultiTurnRAG, estimate_tokens
-from fusion_rag.api.auth import AuthConfig, verify_api_key
-from fusion_rag.engine.graph_rag import GraphRAG
-from fusion_rag.engine.evaluator import RAGEvaluator
-
 
 # ── estimate_tokens ──
 
@@ -66,7 +65,10 @@ class TestQueryRewriter:
         with patch("httpx.AsyncClient.post", new=AsyncMock()) as mock_post:
             mock_resp = MagicMock()
             mock_resp.json.return_value = {
-                "choices": [{"message": {"content": "1. What is Python language\n2. Python programming\n3. Python overview"}}]
+                "choices": [{"message": {"content":
+                    "1. What is Python language\n"
+                    "2. Python programming\n"
+                    "3. Python overview"}}]
             }
             mock_post.return_value = mock_resp
             result = await rw.rewrite("What is Python?", mode="expand")
@@ -130,7 +132,8 @@ class TestEmbeddingCache:
             cache = EmbeddingCache(str(Path(tmpdir) / "cache.db"), ttl=1)
             cache.set("test", [1.0], model="test")
             # Manually backdate the created_at to force expiry
-            import sqlite3, time
+            import sqlite3
+            import time
             conn = sqlite3.connect(str(Path(tmpdir) / "cache.db"))
             conn.execute("UPDATE embed_cache SET created_at = ?", (time.time() - 10,))
             conn.commit()
@@ -237,7 +240,10 @@ class TestGraphRAG:
             with patch("httpx.AsyncClient.post", new=AsyncMock()) as mock_post:
                 mock_resp = MagicMock()
                 mock_resp.json.return_value = {
-                    "choices": [{"message": {"content": '{"entities": [{"name": "Python", "type": "CONCEPT"}], "relations": []}'}}]
+                    "choices": [{"message": {"content":
+                        '{"entities": [{"name": "Python", '
+                        '"type": "CONCEPT"}], '
+                        '"relations": []}'}}]
                 }
                 mock_post.return_value = mock_resp
                 result = await graph.extract_entities("Python is a language")
@@ -257,7 +263,10 @@ class TestGraphRAG:
             with patch("httpx.AsyncClient.post", new=AsyncMock()) as mock_post:
                 mock_resp = MagicMock()
                 mock_resp.json.return_value = {
-                    "choices": [{"message": {"content": '{"entities": [{"name": "Python", "type": "CONCEPT"}], "relations": []}'}}]
+                    "choices": [{"message": {"content":
+                        '{"entities": [{"name": "Python", '
+                        '"type": "CONCEPT"}], '
+                        '"relations": []}'}}]
                 }
                 mock_post.return_value = mock_resp
                 stats = await graph.build_graph(

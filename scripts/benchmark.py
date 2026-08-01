@@ -1,9 +1,10 @@
-# Callers: manual benchmark, CI. API: BM25Index, EmbeddingCache, _rrf_fusion. schema: result dict. user instruction: "完成所有待办任务"
+# Callers: manual benchmark, CI. API: BM25Index, EmbeddingCache,
+# _rrf_fusion. schema: result dict.
 
-import time
 import logging
-import sys
 import os
+import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -19,9 +20,9 @@ PRD_TARGETS = {
 
 def bench_bm25():
     logger.info("=== BM25 Search Benchmark ===")
-    from fusion_rag.engine.bm25_index import BM25Index
-
     import tempfile
+
+    from fusion_rag.engine.bm25_index import BM25Index
     with tempfile.TemporaryDirectory() as tmpdir:
         idx = BM25Index(store_path=os.path.join(tmpdir, "bm25.db"))
         docs = []
@@ -47,9 +48,9 @@ def bench_bm25():
 
 def bench_embedding_cache():
     logger.info("=== Embedding Cache Benchmark ===")
-    from fusion_rag.engine.embedding_cache import EmbeddingCache
-
     import tempfile
+
+    from fusion_rag.engine.embedding_cache import EmbeddingCache
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(db_path=os.path.join(tmpdir, "cache.db"), ttl=3600)
         texts = [f"测试文本内容片段编号{i}用于缓存命中率测试" for i in range(100)]
@@ -102,7 +103,7 @@ def bench_rrf_fusion():
     fuse_ms = (time.perf_counter() - t0) / 100 * 1000
     logger.info("RRF fusion: %.3f ms avg, %d results", fuse_ms, len(fused))
 
-    has_diversity = len(set(r["id"] for r in fused)) == len(fused)
+    has_diversity = len({r["id"] for r in fused}) == len(fused)
     logger.info("RRF fusion produces diverse results: %s", has_diversity)
 
     return {"name": "rrf_fusion", "value_ms": fuse_ms, "passed": has_diversity and fuse_ms < 100}

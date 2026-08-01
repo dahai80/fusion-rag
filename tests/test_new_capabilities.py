@@ -7,13 +7,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from fusion_rag.engine.reranker import Reranker, HybridSearch
-from fusion_rag.engine.retrievers import MMRRetriever, ContextCompressionRetriever, FusionRetriever
-from fusion_rag.engine.preprocessor import DocumentPreprocessor, RecursiveChunker
-from fusion_rag.engine.rag_chain import MultiTurnRAG, DocumentChain
-from fusion_rag.engine.streaming import SSEStreamer, MetadataExtractor, ResultCache
 from fusion_rag.connectors import DatabaseConnector, WebLoader
-
+from fusion_rag.engine.preprocessor import DocumentPreprocessor, RecursiveChunker
+from fusion_rag.engine.rag_chain import DocumentChain, MultiTurnRAG
+from fusion_rag.engine.reranker import HybridSearch, Reranker
+from fusion_rag.engine.retrievers import ContextCompressionRetriever, FusionRetriever, MMRRetriever
+from fusion_rag.engine.streaming import MetadataExtractor, ResultCache
 
 # ── Reranker ──
 

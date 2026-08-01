@@ -1,17 +1,15 @@
 """Final coverage push — targets remaining uncovered lines for 90%+."""
 from __future__ import annotations
 
-import json
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
-from fusion_rag.store.vector_store import VectorStore
-from fusion_rag.engine.document import DocumentParser, DocumentType
 from fusion_rag.connectors import DatabaseConnector
-
+from fusion_rag.engine.document import DocumentParser
+from fusion_rag.store.vector_store import VectorStore
 
 # ── Vector Store: lazy imports ──
 

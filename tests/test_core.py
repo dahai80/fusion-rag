@@ -1,20 +1,17 @@
 """Tests for Fusion-RAG core modules."""
 from __future__ import annotations
 
-import json
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from fusion_rag.engine.knowledge_base import KnowledgeBase, KnowledgeBaseConfig, KnowledgeBaseManager
-from fusion_rag.engine.document import DocumentParser, DocumentType, ParseResult
-from fusion_rag.engine.chunker import Chunker, Chunk
 from fusion_rag.embed.client import EmbeddingClient
-from fusion_rag.store.vector_store import VectorStore
+from fusion_rag.engine.chunker import Chunker
+from fusion_rag.engine.document import DocumentParser, DocumentType, ParseResult
+from fusion_rag.engine.knowledge_base import KnowledgeBase, KnowledgeBaseConfig, KnowledgeBaseManager
 from fusion_rag.store.metadata_store import MetadataStore
-
+from fusion_rag.store.vector_store import VectorStore
 
 # ── KnowledgeBaseConfig ──
 
@@ -275,10 +272,13 @@ class TestVectorStore:
     def test_add_batch(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = VectorStore(tmpdir, dimension=4)
-            records = [
-                {"id": "c1", "vector": [1.0, 0.0, 0.0, 0.0], "text": "a", "doc_path": "", "doc_name": "", "doc_type": "", "chunk_index": 0, "metadata": {}},
-                {"id": "c2", "vector": [0.0, 1.0, 0.0, 0.0], "text": "b", "doc_path": "", "doc_name": "", "doc_type": "", "chunk_index": 0, "metadata": {}},
-            ]
+            r1 = {"id": "c1", "vector": [1.0, 0.0, 0.0, 0.0], "text": "a",
+                   "doc_path": "", "doc_name": "", "doc_type": "",
+                   "chunk_index": 0, "metadata": {}}
+            r2 = {"id": "c2", "vector": [0.0, 1.0, 0.0, 0.0], "text": "b",
+                   "doc_path": "", "doc_name": "", "doc_type": "",
+                   "chunk_index": 0, "metadata": {}}
+            records = [r1, r2]
             store.add_batch(records)
             assert store.count() == 2
 
