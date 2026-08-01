@@ -246,6 +246,86 @@ async def batch_upload_documents(kb_id: str, data: dict[str, Any]) -> dict[str, 
     }
 
 
+# #27.1: Inline content ingest endpoint (no file needed)
+@router.post("/bases/{kb_id}/documents/ingest", dependencies=[Depends(verify_api_key)])
+async def ingest_content(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    """Ingest inline content directly (no file required).
+
+    Accepts content string + content_type + metadata dict.
+    Supports FSB workflow output auto-archival.
+    """
+    kb = _get_base(kb_id)
+    content = data.get("content", "")
+    if not content:
+        raise HTTPException(400, "content is required")
+    content_type = data.get("content_type", "text")
+    metadata = data.get("metadata", {})
+    doc_name = data.get("doc_name", f"inline_{uuid.uuid4().hex[:8]}.{content_type}")
+
+    # Create a synthetic file_path for the inline content
+    doc_path = f"inline://{doc_name}"
+
+    # Build synthetic ParseResult for inline content
+    from ..engine.document import DocType, ParseResult
+    type_map = {"markdown": DocType.MD, "html": DocType.HTML, "csv": DocType.TXT, "text": DocType.TXT}
+    doc_type_enum = type_map.get(content_type, DocType.TXT)
+    parse_result = ParseResult(
+        file_path=doc_path, file_name=doc_name,
+        content=content, chars=len(content),
+        doc_type=doc_type_enum, metadata={},
+    )
+
+    # Chunk
+    chunker = Chunker(strategy=kb.config.chunk_strategy, chunk_size=kb.config.chunk_size)
+    chunks = await chunker.chunk(parse_result)
+
+    # Contextualize
+    contextualize = data.get("contextualize", True)
+    contextualizer = Contextualizer(enabled=contextualize)
+    chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
+    chunk_dicts = await contextualizer.contextualize(chunk_dicts, content)
+
+    # Embed
+    embed = _get_embed_client()
+    embed_texts = []
+    for cd, c in zip(chunk_dicts, chunks):
+        ctx = cd.get("context", "")
+        embed_texts.append((ctx + " " + c.text).strip() if ctx else c.text)
+    vectors = await embed.embed_batch(embed_texts)
+
+    # Store
+    vec_store = _get_vector_store(kb_id)
+    meta_store = _get_meta_store(kb_id)
+
+    doc_id = uuid.uuid4().hex[:16]
+    meta_store.add_document(doc_id, doc_path, doc_name,
+                            content_type, len(content.encode("utf-8")),
+                            metadata=metadata)
+
+    records = []
+    for i, (chunk, vector, cd) in enumerate(zip(chunks, vectors, chunk_dicts)):
+        chunk_id = f"{doc_id}_{i}"
+        meta_store.add_chunk(chunk_id, doc_id, doc_path, i, chunk.text, chunk.tokens,
+                             metadata=metadata)
+        records.append({
+            "id": chunk_id, "vector": vector, "text": chunk.text,
+            "doc_path": doc_path, "doc_name": doc_name,
+            "doc_type": content_type, "chunk_index": i,
+            "metadata": metadata, "context": cd.get("context", ""),
+        })
+
+    vec_store.add_batch(records)
+    vec_store.bm25.add_documents(records)
+    meta_store.update_chunk_count(doc_id, len(chunks), len(content))
+
+    kb.file_count += 1
+    kb.chunk_count += len(chunks)
+    _get_kb_manager().update(kb_id, file_count=kb.file_count, chunk_count=kb.chunk_count)
+
+    logger.info("ingested inline content %s into kb %s: %d chunks", doc_id, kb_id, len(chunks))
+    return {"doc_id": doc_id, "chunks": len(chunks), "chars": len(content)}
+
+
 # #11: Document delete API
 @router.delete("/bases/{kb_id}/documents/{doc_id}", dependencies=[Depends(verify_api_key)])
 async def delete_document(kb_id: str, doc_id: str) -> dict[str, Any]:
@@ -626,6 +706,7 @@ async def search(kb_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
     use_rerank = data.get("rerank", False)  # #16
     hybrid_alpha = data.get("hybrid_alpha", 0.7)  # #15
     hybrid_method = data.get("hybrid_method", "rrf")  # #15
+    metadata_filter = data.get("filter")  # #27: metadata filter dict
 
     embed = _get_embed_client()
     vec_store = _get_vector_store(kb_id)
@@ -647,7 +728,7 @@ async def search(kb_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
                 if rid not in seen or r.get("score", 0) > seen[rid].get("score", 0):
                     seen[rid] = r
             results = sorted(seen.values(), key=lambda x: x.get("score", 0), reverse=True)[:top_k]
-            results = _apply_search_filters(results, folder_prefix)
+            results = _apply_search_filters(results, folder_prefix, metadata_filter)
             if use_rerank:
                 results = await _do_rerank(query, results, top_k)
             return results
@@ -670,7 +751,7 @@ async def search(kb_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
         )
     else:
         results = vec_store.search(query_vector, top_k=top_k, threshold=threshold)
-        results = _apply_search_filters(results, folder_prefix)
+        results = _apply_search_filters(results, folder_prefix, metadata_filter)
 
     # #16: Reranking
     if use_rerank:
@@ -679,11 +760,24 @@ async def search(kb_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
     return results
 
 
-def _apply_search_filters(results: list[dict], folder_prefix: str | None) -> list[dict]:
-    """Apply folder prefix filter to search results (#12)."""
-    if not folder_prefix:
-        return results
-    return [r for r in results if r.get("doc_path", "").startswith(folder_prefix)]
+def _apply_search_filters(results: list[dict], folder_prefix: str | None,
+                          metadata_filter: dict | None = None) -> list[dict]:
+    """Apply folder prefix and metadata filters to search results (#12, #27)."""
+    filtered = results
+    if folder_prefix:
+        filtered = [r for r in filtered if r.get("doc_path", "").startswith(folder_prefix)]
+    if metadata_filter:
+        def _match_meta(r: dict) -> bool:
+            meta = r.get("metadata", {})
+            if isinstance(meta, str):
+                import json as _json
+                try:
+                    meta = _json.loads(meta)
+                except Exception:
+                    meta = {}
+            return all(meta.get(k) == v for k, v in metadata_filter.items())
+        filtered = [r for r in filtered if _match_meta(r)]
+    return filtered
 
 
 async def _do_rerank(query: str, results: list[dict], top_k: int) -> list[dict]:
@@ -723,6 +817,7 @@ async def ask(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     use_hybrid = data.get("hybrid", False)
     use_rerank = data.get("rerank", False)
     folder_prefix = data.get("folder_prefix")
+    metadata_filter = data.get("filter")  # #27
 
     # 1. Retrieve
     embed = _get_embed_client()
@@ -755,6 +850,7 @@ async def ask(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
         )
     else:
         chunks = vec_store.search(query_vector, top_k=top_k, threshold=kb.config.similarity_threshold)
+        chunks = _apply_search_filters(chunks, folder_prefix, metadata_filter)
         if folder_prefix:
             chunks = [c for c in chunks if c.get("doc_path", "").startswith(folder_prefix)]
 
@@ -830,6 +926,46 @@ async def _generate_answer(question: str, context: str,
             })
 
     return {"answer": answer_text, "sources": sources}
+
+
+# ── Project-Level KB Mapping (#27.3) ──
+
+_project_kb_map: dict[str, str] = {}
+
+
+@router.post("/projects/{project_id}/kb", dependencies=[Depends(verify_api_key)])
+async def map_project_kb(project_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    """Map a projectId to a kb_id. Creates a new KB if none specified."""
+    kb_id = data.get("kb_id", "")
+    if not kb_id:
+        name = data.get("name", f"project-{project_id}")
+        description = data.get("description", f"Auto-created for project {project_id}")
+        kb = _get_kb_manager().create(name=name, description=description)
+        kb_id = kb.id
+        logger.info("created kb %s for project %s", kb_id, project_id)
+    else:
+        _get_base(kb_id)  # validate kb exists
+
+    _project_kb_map[project_id] = kb_id
+    return {"project_id": project_id, "kb_id": kb_id}
+
+
+@router.get("/projects/{project_id}/kb")
+async def get_project_kb(project_id: str) -> dict[str, Any]:
+    """Get the kb_id mapped to a projectId."""
+    kb_id = _project_kb_map.get(project_id)
+    if not kb_id:
+        raise HTTPException(404, f"No KB mapped for project '{project_id}'")
+    return {"project_id": project_id, "kb_id": kb_id}
+
+
+@router.delete("/projects/{project_id}/kb", dependencies=[Depends(verify_api_key)])
+async def unmap_project_kb(project_id: str) -> dict[str, Any]:
+    """Remove projectId → kb_id mapping."""
+    if project_id not in _project_kb_map:
+        raise HTTPException(404, f"No KB mapped for project '{project_id}'")
+    kb_id = _project_kb_map.pop(project_id)
+    return {"project_id": project_id, "kb_id": kb_id, "unmapped": True}
 
 
 # ── System ──
