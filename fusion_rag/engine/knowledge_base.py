@@ -27,7 +27,7 @@ class KnowledgeBaseConfig:
     chunk_overlap: int = 64
     embedding_model: str = "BGE-M3"  # Model name for fusion-mlx
     max_results: int = 10
-    similarity_threshold: float = 0.6
+    similarity_threshold: float = 0.3
     language: str = "zh"  # "zh", "en", "auto"
 
     def to_dict(self) -> dict[str, Any]:
