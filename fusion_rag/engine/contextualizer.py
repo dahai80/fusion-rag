@@ -5,6 +5,7 @@ API: Contextualizer.contextualize(chunks, doc_text) -> list[dict]
 schema: chunks gain "context" field (str), embedded as context+text
 user instruction: "按照你的方案和计划落地所有phase阶段的需求"
 """
+
 from __future__ import annotations
 
 import logging
@@ -27,16 +28,19 @@ CONTEXT_PROMPT = (
 class Contextualizer:
     """Generates context for chunks using Anthropic's Contextual Retrieval approach."""
 
-    def __init__(self, mlx_url: str = "http://localhost:11434/v1",
-                 model: str = "qwen3.5-9b", enabled: bool = True,
-                 api_key: str = ""):
+    def __init__(
+        self,
+        mlx_url: str = "http://localhost:11434/v1",
+        model: str = "qwen3.5-9b",
+        enabled: bool = True,
+        api_key: str = "",
+    ):
         self.mlx_url = mlx_url.rstrip("/")
         self.model = model
         self.enabled = enabled
         self.api_key = api_key
 
-    async def contextualize(self, chunks: list[dict[str, Any]],
-                            doc_text: str) -> list[dict[str, Any]]:
+    async def contextualize(self, chunks: list[dict[str, Any]], doc_text: str) -> list[dict[str, Any]]:
         if not self.enabled or not doc_text or not chunks:
             return chunks
         doc_truncated = doc_text[:8000]
@@ -46,21 +50,21 @@ class Contextualizer:
         async with httpx.AsyncClient(timeout=30.0, headers=headers) as client:
             for chunk in chunks:
                 try:
-                    context = await self._generate_context(
-                        client, chunk.get("text", ""), doc_truncated)
+                    context = await self._generate_context(client, chunk.get("text", ""), doc_truncated)
                     chunk["context"] = context
                 except Exception as e:
                     logger.warning(
                         "Context generation failed for chunk %s: %s",
-                        chunk.get("id", "?"), e,
+                        chunk.get("id", "?"),
+                        e,
                     )
                     chunk["context"] = ""
         return chunks
 
-    async def _generate_context(self, client: httpx.AsyncClient,
-                                chunk_text: str, doc_text: str) -> str:
+    async def _generate_context(self, client: httpx.AsyncClient, chunk_text: str, doc_text: str) -> str:
         prompt = CONTEXT_PROMPT.format(
-            doc_text=doc_text, chunk_text=chunk_text,
+            doc_text=doc_text,
+            chunk_text=chunk_text,
         )
         resp = await client.post(
             f"{self.mlx_url}/chat/completions",

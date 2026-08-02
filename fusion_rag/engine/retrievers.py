@@ -1,4 +1,5 @@
 """Retrieval strategies — MMR, context compression, and fusion retrievers."""
+
 from __future__ import annotations
 
 import math
@@ -71,8 +72,7 @@ class ContextCompressionRetriever:
         self.base_retriever = base_retriever
         self.max_tokens = max_tokens
 
-    async def search(self, query_vector: list[float], query_text: str = "",
-                     top_k: int = 10) -> list[dict[str, Any]]:
+    async def search(self, query_vector: list[float], query_text: str = "", top_k: int = 10) -> list[dict[str, Any]]:
         """Retrieve and compress results to fit token budget."""
         results = await self.base_retriever.search(query_vector, top_k=top_k)
         return self._compress(results, query_text)
@@ -101,8 +101,7 @@ class FusionRetriever:
     def __init__(self, retrievers: list[tuple[str, Any, float]]):
         self.retrievers = retrievers  # [(name, retriever, weight), ...]
 
-    async def search(self, query_vector: list[float], query_text: str = "",
-                     top_k: int = 10) -> list[dict[str, Any]]:
+    async def search(self, query_vector: list[float], query_text: str = "", top_k: int = 10) -> list[dict[str, Any]]:
         """Fuse results from multiple retrievers with weighted scores."""
         all_scores: dict[str, float] = {}
         all_results: dict[str, dict] = {}

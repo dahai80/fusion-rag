@@ -1,10 +1,11 @@
-"""API authentication — API key-based auth for Fusion-RAG endpoints.
+"""API authentication — pluggable auth backend for Fusion-RAG endpoints.
 
 callers: routes.py via FastAPI dependency injection
-API: verify_api_key() dependency, AuthConfig for key management
+API: verify_api_key() dependency, AuthBackend ABC, AuthConfig for key management
 schema: api_keys table (key_hash TEXT PK, name TEXT, created_at REAL)
-user instruction: "按照你的方案和计划落地所有phase阶段的需求"
+user instruction: "修复所有的issue和pr"
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -12,6 +13,7 @@ import logging
 import os
 import sqlite3
 import time
+from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,39 @@ from fastapi.security import APIKeyHeader
 logger = logging.getLogger(__name__)
 
 API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+class AuthBackend(ABC):
+    """Abstract auth backend — pluggable authentication strategy."""
+
+    @abstractmethod
+    def verify(self, api_key: str | None) -> str | None:
+        """Verify API key. Returns identity string or None if auth disabled.
+        Raises HTTPException on invalid key."""
+
+
+class NoAuthBackend(AuthBackend):
+    """No-op backend — all requests pass through."""
+
+    def verify(self, api_key: str | None) -> str | None:
+        return None
+
+
+class ApiKeyBackend(AuthBackend):
+    """API key validation against env var + SQLite key store."""
+
+    def __init__(self, admin_key: str = "", db_path: str = ""):
+        self.admin_key = admin_key
+        self.auth_config = AuthConfig(db_path) if admin_key else AuthConfig()
+
+    def verify(self, api_key: str | None) -> str | None:
+        if not self.admin_key:
+            return None
+        if not api_key:
+            raise HTTPException(401, "API key required. Set X-API-Key header.")
+        if api_key == self.admin_key or self.auth_config.validate_key(api_key):
+            return api_key
+        raise HTTPException(401, "Invalid API key")
 
 
 class AuthConfig:
@@ -76,9 +111,7 @@ class AuthConfig:
         h = self._hash_key(key)
         conn = self._get_conn()
         try:
-            row = conn.execute(
-                "SELECT name FROM api_keys WHERE key_hash = ?", (h,)
-            ).fetchone()
+            row = conn.execute("SELECT name FROM api_keys WHERE key_hash = ?", (h,)).fetchone()
             return row is not None
         finally:
             conn.close()
@@ -96,35 +129,33 @@ class AuthConfig:
     def list_keys(self) -> list[dict[str, Any]]:
         conn = self._get_conn()
         try:
-            rows = conn.execute(
-                "SELECT key_hash, name, created_at FROM api_keys ORDER BY created_at DESC"
-            ).fetchall()
+            rows = conn.execute("SELECT key_hash, name, created_at FROM api_keys ORDER BY created_at DESC").fetchall()
             return [
-                {"key_hash": r["key_hash"][:12] + "...", "name": r["name"],
-                 "created_at": r["created_at"]}
-                for r in rows
+                {"key_hash": r["key_hash"][:12] + "...", "name": r["name"], "created_at": r["created_at"]} for r in rows
             ]
         finally:
             conn.close()
 
 
+_auth_backend: AuthBackend | None = None
+
+
+def get_auth_backend() -> AuthBackend:
+    global _auth_backend
+    if _auth_backend is not None:
+        return _auth_backend
+    backend_name = os.environ.get("FUSION_RAG_AUTH_BACKEND", "apikey")
+    if backend_name == "none":
+        _auth_backend = NoAuthBackend()
+    else:
+        admin_key = os.environ.get("FUSION_RAG_API_KEY", "")
+        _auth_backend = ApiKeyBackend(admin_key=admin_key)
+    logger.info("auth backend: %s", type(_auth_backend).__name__)
+    return _auth_backend
+
+
 def verify_api_key(
     api_key: str | None = Security(API_KEY_HEADER),
 ) -> str | None:
-    """FastAPI dependency for API key verification.
-
-    Returns None if auth is disabled (no FUSION_RAG_API_KEY env var).
-    Raises HTTPException 401 if auth is enabled and key is invalid.
-    """
-    admin_key = os.environ.get("FUSION_RAG_API_KEY", "")
-    if not admin_key:
-        return None  # Auth disabled
-
-    if not api_key:
-        raise HTTPException(401, "API key required. Set X-API-Key header.")
-
-    auth = AuthConfig()
-    if api_key == admin_key or auth.validate_key(api_key):
-        return api_key
-
-    raise HTTPException(401, "Invalid API key")
+    """FastAPI dependency for API key verification — delegates to pluggable backend."""
+    return get_auth_backend().verify(api_key)

@@ -5,6 +5,7 @@ API: EmbeddingCache.get(text) -> list[float] | None, .set(text, vector), .clear(
 schema: cache table (text_hash TEXT PK, text TEXT, vector BLOB, model TEXT, created_at REAL)
 user instruction: "按照你的方案和计划落地所有phase阶段的需求"
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -20,8 +21,7 @@ logger = logging.getLogger(__name__)
 class EmbeddingCache:
     """SQLite-backed cache for embedding vectors to avoid redundant API calls."""
 
-    def __init__(self, db_path: str = "", ttl: int = 86400 * 7,
-                 max_entries: int = 100000):
+    def __init__(self, db_path: str = "", ttl: int = 86400 * 7, max_entries: int = 100000):
         if not db_path:
             db_path = str(Path.home() / ".fusion-rag" / "embed_cache.db")
         self.db_path = db_path
@@ -101,8 +101,7 @@ class EmbeddingCache:
     def get_batch(self, texts: list[str], model: str = "") -> list[list[float] | None]:
         return [self.get(t, model) for t in texts]
 
-    def set_batch(self, texts: list[str], vectors: list[list[float]],
-                  model: str = "") -> None:
+    def set_batch(self, texts: list[str], vectors: list[list[float]], model: str = "") -> None:
         h = self._hash
         conn = self._get_conn()
         try:

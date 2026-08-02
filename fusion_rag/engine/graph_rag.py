@@ -5,6 +5,7 @@ API: GraphRAG.extract_entities(text), .build_graph(chunks), .search(query, graph
 schema: entities table (id, name, type), relations table (source, target, label)
 user instruction: "按照你的方案和计划落地所有phase阶段的需求"
 """
+
 from __future__ import annotations
 
 import json
@@ -31,9 +32,7 @@ ENTITY_PROMPT = (
 class GraphRAG:
     """Lightweight graph-based RAG with entity extraction via LLM."""
 
-    def __init__(self, db_path: str = "",
-                 mlx_url: str = "http://localhost:11434/v1",
-                 model: str = "qwen3.5-9b"):
+    def __init__(self, db_path: str = "", mlx_url: str = "http://localhost:11434/v1", model: str = "qwen3.5-9b"):
         if not db_path:
             db_path = str(Path.home() / ".fusion-rag" / "graph.db")
         self.db_path = db_path
@@ -97,8 +96,7 @@ class GraphRAG:
             logger.warning("Entity extraction failed: %s", e)
             return {"entities": [], "relations": []}
 
-    async def build_graph(self, chunks: list[dict],
-                          kb_id: str = "") -> dict[str, int]:
+    async def build_graph(self, chunks: list[dict], kb_id: str = "") -> dict[str, int]:
         """Extract entities from chunks and store in graph DB."""
         total_entities = 0
         total_relations = 0
@@ -121,8 +119,7 @@ class GraphRAG:
                     try:
                         conn.execute(
                             "INSERT OR IGNORE INTO relations (source, target, label, kb_id) VALUES (?, ?, ?, ?)",
-                            (rel.get("source", ""), rel.get("target", ""),
-                             rel.get("label", "related_to"), kb_id),
+                            (rel.get("source", ""), rel.get("target", ""), rel.get("label", "related_to"), kb_id),
                         )
                         total_relations += 1
                     except Exception as e:
@@ -130,12 +127,12 @@ class GraphRAG:
             conn.commit()
         finally:
             conn.close()
-        logger.info("GraphRAG: built graph with %d entities, %d relations for kb=%s",
-                    total_entities, total_relations, kb_id)
+        logger.info(
+            "GraphRAG: built graph with %d entities, %d relations for kb=%s", total_entities, total_relations, kb_id
+        )
         return {"entities": total_entities, "relations": total_relations}
 
-    def search(self, query: str, kb_id: str = "",
-               max_hops: int = 2) -> list[dict[str, Any]]:
+    def search(self, query: str, kb_id: str = "", max_hops: int = 2) -> list[dict[str, Any]]:
         """Find entities matching query and expand via graph relations."""
         conn = self._get_conn()
         try:
@@ -207,9 +204,7 @@ class GraphRAG:
         conn = self._get_conn()
         try:
             if kb_id:
-                row = conn.execute(
-                    "SELECT COUNT(*) as cnt FROM entities WHERE kb_id = ?", (kb_id,)
-                ).fetchone()
+                row = conn.execute("SELECT COUNT(*) as cnt FROM entities WHERE kb_id = ?", (kb_id,)).fetchone()
             else:
                 row = conn.execute("SELECT COUNT(*) as cnt FROM entities").fetchone()
             return row["cnt"] if row else 0
@@ -220,9 +215,7 @@ class GraphRAG:
         conn = self._get_conn()
         try:
             if kb_id:
-                row = conn.execute(
-                    "SELECT COUNT(*) as cnt FROM relations WHERE kb_id = ?", (kb_id,)
-                ).fetchone()
+                row = conn.execute("SELECT COUNT(*) as cnt FROM relations WHERE kb_id = ?", (kb_id,)).fetchone()
             else:
                 row = conn.execute("SELECT COUNT(*) as cnt FROM relations").fetchone()
             return row["cnt"] if row else 0

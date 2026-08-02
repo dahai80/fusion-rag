@@ -309,7 +309,7 @@ class TestVectorStore:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = VectorStore(tmpdir)
             store.close()
-            assert store._db is None
+            assert store._backend._db is None
 
 
 # ── MetadataStore ──

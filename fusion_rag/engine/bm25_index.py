@@ -5,6 +5,7 @@ API: BM25Index.add_documents(), search(), remove_document(), save(), load(), cou
 schema: internal _inverted {token: {doc_id: tf}}, _doc_texts {doc_id: text}, persisted to SQLite
 user instruction: "按照你的方案和计划落地所有phase阶段的需求"
 """
+
 from __future__ import annotations
 
 import json
@@ -26,6 +27,7 @@ _JIEBA_AVAILABLE = False
 _JIEBA_DICT_LOADED = False
 try:
     import jieba
+
     _JIEBA_AVAILABLE = True
     _dict_path = Path(__file__).parent.parent / "data" / "tech_dict.txt"
     if _dict_path.exists():
@@ -72,12 +74,8 @@ class BM25Index:
     def _init_db(self) -> None:
         self.store_path.parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(str(self.store_path))
-        self._db.execute(
-            "CREATE TABLE IF NOT EXISTS bm25_meta (key TEXT PRIMARY KEY, value TEXT)"
-        )
-        self._db.execute(
-            "CREATE TABLE IF NOT EXISTS bm25_docs (doc_id TEXT PRIMARY KEY, text TEXT, doc_len INTEGER)"
-        )
+        self._db.execute("CREATE TABLE IF NOT EXISTS bm25_meta (key TEXT PRIMARY KEY, value TEXT)")
+        self._db.execute("CREATE TABLE IF NOT EXISTS bm25_docs (doc_id TEXT PRIMARY KEY, text TEXT, doc_len INTEGER)")
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS bm25_inverted "
             "(token TEXT, doc_id TEXT, tf INTEGER, PRIMARY KEY (token, doc_id))"
@@ -86,21 +84,15 @@ class BM25Index:
 
     def _load(self) -> None:
         try:
-            row = self._db.execute(
-                "SELECT value FROM bm25_meta WHERE key='stats'"
-            ).fetchone()
+            row = self._db.execute("SELECT value FROM bm25_meta WHERE key='stats'").fetchone()
             if row:
                 stats = json.loads(row[0])
                 self._corpus_size = stats.get("corpus_size", 0)
                 self._avgdl = stats.get("avgdl", 0.0)
-            for doc_id, text, doc_len in self._db.execute(
-                "SELECT doc_id, text, doc_len FROM bm25_docs"
-            ):
+            for doc_id, text, doc_len in self._db.execute("SELECT doc_id, text, doc_len FROM bm25_docs"):
                 self._doc_texts[doc_id] = text
                 self._doc_len[doc_id] = doc_len
-            for token, doc_id, tf in self._db.execute(
-                "SELECT token, doc_id, tf FROM bm25_inverted"
-            ):
+            for token, doc_id, tf in self._db.execute("SELECT token, doc_id, tf FROM bm25_inverted"):
                 if token not in self._inverted:
                     self._inverted[token] = {}
                 self._inverted[token][doc_id] = tf
@@ -139,10 +131,7 @@ class BM25Index:
         logger.info("BM25 index updated: %d docs, %d tokens", self._corpus_size, len(self._inverted))
 
     def remove_document(self, doc_path: str) -> int:
-        to_remove = [
-            did for did, txt in self._doc_texts.items()
-            if doc_path in txt or doc_path in str(did)
-        ]
+        to_remove = [did for did, txt in self._doc_texts.items() if doc_path in txt or doc_path in str(did)]
         if not to_remove:
             return 0
         for did in to_remove:
@@ -150,10 +139,7 @@ class BM25Index:
             self._doc_len.pop(did, None)
             self._corpus_size -= 1
         for token in list(self._inverted.keys()):
-            self._inverted[token] = {
-                k: v for k, v in self._inverted[token].items()
-                if k not in set(to_remove)
-            }
+            self._inverted[token] = {k: v for k, v in self._inverted[token].items() if k not in set(to_remove)}
             if not self._inverted[token]:
                 del self._inverted[token]
         self._df = Counter()
@@ -183,20 +169,19 @@ class BM25Index:
                 denominator = tf + self.k1 * (1 - self.b + self.b * dl / max(self._avgdl, 1))
                 scores[doc_id] = scores.get(doc_id, 0) + idf * numerator / denominator
         ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
-        return [
-            {"id": did, "score": s, "text": self._doc_texts.get(did, "")}
-            for did, s in ranked
-        ]
+        return [{"id": did, "score": s, "text": self._doc_texts.get(did, "")} for did, s in ranked]
 
     def count(self) -> int:
         return self._corpus_size
 
     def _save_to_db(self) -> None:
         try:
-            stats = json.dumps({
-                "corpus_size": self._corpus_size,
-                "avgdl": self._avgdl,
-            })
+            stats = json.dumps(
+                {
+                    "corpus_size": self._corpus_size,
+                    "avgdl": self._avgdl,
+                }
+            )
             self._db.execute("INSERT OR REPLACE INTO bm25_meta VALUES ('stats', ?)", (stats,))
             for doc_id, text in self._doc_texts.items():
                 dl = self._doc_len.get(doc_id, 0)

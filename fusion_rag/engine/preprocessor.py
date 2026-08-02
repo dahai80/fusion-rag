@@ -1,4 +1,5 @@
 """Document preprocessor — cleaning, normalization, and deduplication."""
+
 from __future__ import annotations
 
 import logging
@@ -25,6 +26,7 @@ class DocumentPreprocessor:
     def normalize(text: str) -> str:
         """Normalize text: lowercase, unicode NFKC, strip."""
         import unicodedata
+
         text = unicodedata.normalize("NFKC", text)
         text = text.strip()
         return text
@@ -48,9 +50,14 @@ class DocumentPreprocessor:
         lines = text.split("\n")
         filtered = []
         boilerplate_patterns = [
-            r"^navigation$", r"^footer$", r"^header$",
-            r"^cookie", r"^terms of service", r"^privacy policy",
-            r"^all rights reserved", r"^copyright",
+            r"^navigation$",
+            r"^footer$",
+            r"^header$",
+            r"^cookie",
+            r"^terms of service",
+            r"^privacy policy",
+            r"^all rights reserved",
+            r"^copyright",
         ]
         for line in lines:
             stripped = line.strip().lower()

@@ -1,0 +1,185 @@
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from fastapi import APIRouter, HTTPException
+
+from ..engine.query_rewriter import QueryRewriter
+from ..engine.reranker import HybridSearch
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(tags=["search"])
+
+
+@router.post("/bases/{kb_id}/search")
+async def search(kb_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
+    from .routes import _apply_search_filters, _do_rerank, _get_base, _get_embed_client, _get_vector_store
+
+    kb = _get_base(kb_id)
+    query = data.get("query", "")
+    if not query:
+        raise HTTPException(400, "query is required")
+
+    top_k = data.get("top_k", kb.config.max_results)
+    threshold = data.get("threshold", kb.config.similarity_threshold)
+    folder_prefix = data.get("folder_prefix")
+    use_hybrid = data.get("hybrid", False)
+    use_rerank = data.get("rerank", False)
+    hybrid_alpha = data.get("hybrid_alpha", 0.7)
+    hybrid_method = data.get("hybrid_method", "rrf")
+    metadata_filter = data.get("filter")
+    template = data.get("template")
+
+    if template:
+        from ..engine.search_template import SearchTemplateManager
+        from .routes import _get_kb_storage_path
+
+        tpl_mgr = SearchTemplateManager(f"{_get_kb_storage_path(kb_id)}/templates.db")
+        tpl = tpl_mgr.get_template(kb_id, template)
+        if tpl:
+            top_k = tpl.get("top_k", top_k)
+            threshold = tpl.get("threshold", threshold)
+            hybrid_alpha = tpl.get("alpha", hybrid_alpha)
+            use_rerank = tpl.get("rerank", use_rerank)
+            rewrite_mode = tpl.get("rewrite_mode", data.get("rewrite_mode"))
+            doc_type_filter = tpl.get("doc_type_filter", [])
+        else:
+            rewrite_mode = data.get("rewrite_mode")
+            doc_type_filter = []
+    else:
+        rewrite_mode = data.get("rewrite_mode")
+        doc_type_filter = []
+
+    embed = _get_embed_client()
+    vec_store = _get_vector_store(kb_id)
+
+    if rewrite_mode:
+        rewriter = QueryRewriter(enabled=True)
+        rewritten = await rewriter.rewrite(query, mode=rewrite_mode)
+        if isinstance(rewritten, list):
+            all_results = []
+            for q in rewritten:
+                qv = await embed.embed(q)
+                if qv and not all(v == 0.0 for v in qv):
+                    all_results.extend(vec_store.search(qv, top_k=top_k, threshold=threshold))
+            seen = {}
+            for r in all_results:
+                rid = r.get("id", "")
+                if rid not in seen or r.get("score", 0) > seen[rid].get("score", 0):
+                    seen[rid] = r
+            results = sorted(seen.values(), key=lambda x: x.get("score", 0), reverse=True)[:top_k]
+            results = _apply_search_filters(results, folder_prefix, metadata_filter)
+            if doc_type_filter:
+                results = [r for r in results if r.get("doc_type", "") in doc_type_filter]
+            if use_rerank:
+                results = await _do_rerank(query, results, top_k)
+            return results
+        query = rewritten
+
+    query_vector = await embed.embed(query)
+    if not query_vector or all(v == 0.0 for v in query_vector):
+        raise HTTPException(500, "Embedding failed")
+
+    if use_hybrid:
+        hs = HybridSearch(vec_store, alpha=hybrid_alpha, method=hybrid_method)
+        filters = {}
+        if folder_prefix:
+            filters["folder_prefix"] = folder_prefix
+        results = await hs.search(
+            query_vector,
+            query,
+            top_k=top_k,
+            threshold=threshold,
+            filters=filters if filters else None,
+        )
+    else:
+        results = vec_store.search(query_vector, top_k=top_k, threshold=threshold)
+        results = _apply_search_filters(results, folder_prefix, metadata_filter)
+
+    if doc_type_filter:
+        results = [r for r in results if r.get("doc_type", "") in doc_type_filter]
+
+    if use_rerank:
+        results = await _do_rerank(query, results, top_k)
+
+    return results
+
+
+@router.post("/bases/{kb_id}/ask")
+async def ask(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    from .routes import (
+        _apply_search_filters,
+        _do_rerank,
+        _generate_answer,
+        _get_base,
+        _get_embed_client,
+        _get_vector_store,
+    )
+
+    kb = _get_base(kb_id)
+    question = data.get("question", "")
+    if not question:
+        raise HTTPException(400, "question is required")
+
+    top_k = data.get("top_k", kb.config.max_results)
+    model = data.get("model", "qwen3.5-9b")
+    max_tokens = data.get("max_tokens", 4096)
+    temperature = data.get("temperature", 0.3)
+    system_prompt = data.get("system_prompt", "")
+    use_hybrid = data.get("hybrid", False)
+    use_rerank = data.get("rerank", False)
+    folder_prefix = data.get("folder_prefix")
+    metadata_filter = data.get("filter")
+
+    embed = _get_embed_client()
+    vec_store = _get_vector_store(kb_id)
+
+    rewrite_mode = data.get("rewrite_mode")
+    history = data.get("history")
+    if rewrite_mode or history:
+        rewriter = QueryRewriter(enabled=True)
+        mode = rewrite_mode or ("condense" if history else "hyde")
+        rewritten = await rewriter.rewrite(question, history=history, mode=mode)
+        if isinstance(rewritten, str) and rewritten:
+            question = rewritten
+
+    query_vector = await embed.embed(question)
+    if not query_vector or all(v == 0.0 for v in query_vector):
+        raise HTTPException(500, "Embedding failed")
+
+    if use_hybrid:
+        hs = HybridSearch(vec_store)
+        filters = {}
+        if folder_prefix:
+            filters["folder_prefix"] = folder_prefix
+        chunks = await hs.search(
+            query_vector,
+            question,
+            top_k=top_k,
+            threshold=kb.config.similarity_threshold,
+            filters=filters if filters else None,
+        )
+    else:
+        chunks = vec_store.search(query_vector, top_k=top_k, threshold=kb.config.similarity_threshold)
+        chunks = _apply_search_filters(chunks, folder_prefix, metadata_filter)
+
+    if not chunks:
+        return {"answer": "No relevant documents found.", "sources": []}
+
+    if use_rerank:
+        chunks = await _do_rerank(question, chunks, top_k)
+
+    context = "\n\n".join(f"[{c['doc_name']}] {c['text'][:2000]}" for c in chunks)
+
+    answer = await _generate_answer(
+        question,
+        context,
+        chunks,
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        system_prompt=system_prompt,
+    )
+    return answer

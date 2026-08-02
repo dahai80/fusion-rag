@@ -67,6 +67,7 @@ EXTENSION_MAP: dict[str, DocumentType] = {
 @dataclass
 class ParseResult:
     """Result of parsing a single document."""
+
     file_path: str
     file_name: str
     doc_type: DocumentType
@@ -97,16 +98,20 @@ class DocumentParser:
         path = Path(file_path).expanduser().resolve()
         if not path.exists():
             return ParseResult(
-                file_path=str(path), file_name=path.name,
-                doc_type=DocumentType.UNKNOWN, content="",
+                file_path=str(path),
+                file_name=path.name,
+                doc_type=DocumentType.UNKNOWN,
+                content="",
                 error=f"File not found: {path}",
             )
 
         doc_type = self.detect_type(path)
         file_name = path.name
         result = ParseResult(
-            file_path=str(path), file_name=file_name,
-            doc_type=doc_type, content="",
+            file_path=str(path),
+            file_name=file_name,
+            doc_type=doc_type,
+            content="",
             metadata={"size": path.stat().st_size},
         )
 
@@ -140,6 +145,7 @@ class DocumentParser:
     def _parse_pdf(self, path: Path) -> tuple[str, int]:
         """Extract text from PDF using PyMuPDF."""
         import fitz  # PyMuPDF
+
         doc = fitz.open(str(path))
         pages = len(doc)
         texts = []
@@ -151,6 +157,7 @@ class DocumentParser:
     def _parse_docx(self, path: Path) -> str:
         """Extract text from DOCX."""
         from docx import Document
+
         doc = Document(str(path))
         paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
         return "\n".join(paragraphs)
@@ -158,12 +165,13 @@ class DocumentParser:
     def _parse_html(self, path: Path) -> str:
         """Extract text from HTML."""
         from markdownify import markdownify as md
+
         html = path.read_text(encoding="utf-8", errors="replace")
         return md(html, heading_style="ATX", strip=["script", "style"])
 
-    async def parse_directory(self, dir_path: str | Path,
-                                recursive: bool = True,
-                                max_files: int = 1000) -> list[ParseResult]:
+    async def parse_directory(
+        self, dir_path: str | Path, recursive: bool = True, max_files: int = 1000
+    ) -> list[ParseResult]:
         """Parse all supported files in a directory."""
         path = Path(dir_path).expanduser().resolve()
         if not path.is_dir():

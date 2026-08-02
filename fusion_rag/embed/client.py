@@ -32,6 +32,8 @@ class EmbeddingClient:
         max_retries: int = 3,
         batch_size: int = 16,
         cache_enabled: bool = True,
+        fallback_url: str = "",
+        fallback_api_key: str = "",
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -40,11 +42,15 @@ class EmbeddingClient:
         self.max_retries = max_retries
         self.batch_size = batch_size
         self.cache_enabled = cache_enabled
+        self.fallback_url = fallback_url.rstrip("/") if fallback_url else ""
+        self.fallback_api_key = fallback_api_key
         self._client: httpx.AsyncClient | None = None
+        self._fallback_client: httpx.AsyncClient | None = None
         self._semaphore = asyncio.Semaphore(4)
         self._cache = None
         if cache_enabled:
             from ..engine.embedding_cache import EmbeddingCache
+
             self._cache = EmbeddingCache()
 
     @property
@@ -60,10 +66,26 @@ class EmbeddingClient:
             )
         return self._client
 
+    @property
+    def fallback_client(self) -> httpx.AsyncClient:
+        if self._fallback_client is None:
+            headers = {}
+            if self.fallback_api_key:
+                headers["Authorization"] = f"Bearer {self.fallback_api_key}"
+            self._fallback_client = httpx.AsyncClient(
+                base_url=self.fallback_url,
+                timeout=self.timeout,
+                headers=headers,
+            )
+        return self._fallback_client
+
     async def close(self) -> None:
         if self._client:
             await self._client.aclose()
             self._client = None
+        if self._fallback_client:
+            await self._fallback_client.aclose()
+            self._fallback_client = None
 
     async def embed(self, text: str) -> list[float]:
         """Embed a single text string. Returns a vector of floats."""
@@ -112,7 +134,6 @@ class EmbeddingClient:
         return all_vectors
 
     async def _call_embed_api(self, texts: list[str]) -> list[list[float]]:
-        """Call fusion-mlx's /v1/embeddings endpoint."""
         for attempt in range(self.max_retries):
             try:
                 async with self._semaphore:
@@ -140,15 +161,60 @@ class EmbeddingClient:
                 if attempt < self.max_retries - 1:
                     await asyncio.sleep(1.0)
                 else:
-                    # Return zero vectors on failure
-                    return [[0.0] * 1024 for _ in texts]
+                    if self.fallback_url:
+                        return await self._call_fallback_api(texts)
+                    return await self._call_local_embed(texts)
 
+        if self.fallback_url:
+            return await self._call_fallback_api(texts)
+        return await self._call_local_embed(texts)
+
+    async def _call_fallback_api(self, texts: list[str]) -> list[list[float]]:
+        logger.info("Falling back to cloud embedding: %s", self.fallback_url)
+        try:
+            payload = {"model": self.model, "input": texts}
+            resp = await self.fallback_client.post("/embeddings", json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            vectors = []
+            for item in data.get("data", []):
+                vector = item.get("embedding", [])
+                if vector:
+                    vectors.append(vector)
+            if len(vectors) == len(texts):
+                logger.info("Fallback embedding succeeded: %d vectors", len(vectors))
+                return vectors
+            logger.warning("Fallback returned %d/%d vectors", len(vectors), len(texts))
+        except Exception as e:
+            logger.error("Fallback embedding also failed: %s", e)
+        return await self._call_local_embed(texts)
+
+    async def _call_local_embed(self, texts: list[str]) -> list[list[float]]:
+        logger.info("Falling back to local sentence-transformers embedding")
+        try:
+            from .local import embed_local
+
+            loop = asyncio.get_event_loop()
+            vectors = await loop.run_in_executor(None, embed_local, texts, self.model)
+            if vectors and any(any(v != 0.0 for v in vec) for vec in vectors):
+                logger.info("Local embedding succeeded: %d vectors", len(vectors))
+                return vectors
+            logger.warning("Local embedding returned zero vectors")
+        except Exception as e:
+            logger.error("Local embedding failed: %s", e)
         return [[0.0] * 1024 for _ in texts]
 
     async def health(self) -> bool:
-        """Check if fusion-mlx embedding endpoint is available."""
+        """Check if embedding is available (MLX HTTP or local sentence-transformers)."""
         try:
             resp = await self.client.get("/models", timeout=2.0)
-            return resp.status_code == 200
+            if resp.status_code == 200:
+                return True
+        except Exception:
+            logger.debug("health check /models failed")
+        try:
+            from .local import get_local_model
+
+            return get_local_model(self.model) is not None
         except Exception:
             return False

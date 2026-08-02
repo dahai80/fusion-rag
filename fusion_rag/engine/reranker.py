@@ -5,6 +5,7 @@ API: Reranker.rerank(query, documents, top_k), HybridSearch.search(query_vector,
 schema: documents list[dict] with id/text/score keys, HybridSearch supports alpha and rrf fusion methods
 user instruction: "按照你的方案和计划落地所有phase阶段的需求"
 """
+
 from __future__ import annotations
 
 import json
@@ -23,19 +24,17 @@ class Reranker:
     Uses batch LLM scoring — single API call for all documents.
     """
 
-    def __init__(self, mlx_url: str = "http://localhost:11434/v1",
-                 model: str = "qwen3.5-9b", batch_size: int = 20):
+    def __init__(self, mlx_url: str = "http://localhost:11434/v1", model: str = "qwen3.5-9b", batch_size: int = 20):
         self.mlx_url = mlx_url.rstrip("/")
         self.model = model
         self.batch_size = batch_size
 
-    async def rerank(self, query: str, documents: list[dict[str, Any]],
-                     top_k: int = 5) -> list[dict[str, Any]]:
+    async def rerank(self, query: str, documents: list[dict[str, Any]], top_k: int = 5) -> list[dict[str, Any]]:
         if not documents:
             return []
         all_scored = []
         for i in range(0, len(documents), self.batch_size):
-            batch = documents[i:i + self.batch_size]
+            batch = documents[i : i + self.batch_size]
             scores = await self._batch_score(query, batch)
             for doc, score in zip(batch, scores):
                 doc["score"] = score
@@ -43,12 +42,8 @@ class Reranker:
         all_scored.sort(key=lambda x: x["score"], reverse=True)
         return all_scored[:top_k]
 
-    async def _batch_score(self, query: str,
-                           docs: list[dict[str, Any]]) -> list[float]:
-        doc_list = "\n".join(
-            f"[{i}] {doc.get('text', '')[:500]}"
-            for i, doc in enumerate(docs)
-        )
+    async def _batch_score(self, query: str, docs: list[dict[str, Any]]) -> list[float]:
+        doc_list = "\n".join(f"[{i}] {doc.get('text', '')[:500]}" for i, doc in enumerate(docs))
         prompt = (
             f"Rate the relevance of each document to the query "
             f"on a scale of 0.0 to 10.0.\n\n"
@@ -87,8 +82,7 @@ class Reranker:
         logger.warning("Could not parse rerank scores, using defaults")
         return [5.0] * expected
 
-    async def _score_relevance(self, client: httpx.AsyncClient,
-                               query: str, text: str) -> float:
+    async def _score_relevance(self, client: httpx.AsyncClient, query: str, text: str) -> float:
         """Single-doc fallback scoring (0-10)."""
         prompt = (
             f"Rate the relevance of the following document to the query "
@@ -98,12 +92,15 @@ class Reranker:
             f"Relevance score (0-10):"
         )
         try:
-            resp = await client.post(f"{self.mlx_url}/chat/completions", json={
-                "model": self.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 10,
-                "temperature": 0.0,
-            })
+            resp = await client.post(
+                f"{self.mlx_url}/chat/completions",
+                json={
+                    "model": self.model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 10,
+                    "temperature": 0.0,
+                },
+            )
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"]["content"].strip()
             return float(content[:4])
@@ -114,15 +111,19 @@ class Reranker:
 class HybridSearch:
     """Combines vector similarity and keyword search with weighted or RRF fusion."""
 
-    def __init__(self, vector_store, alpha: float = 0.7,
-                 method: str = "alpha"):
+    def __init__(self, vector_store, alpha: float = 0.7, method: str = "alpha"):
         self.vector_store = vector_store
         self.alpha = alpha
         self.method = method
 
-    async def search(self, query_vector: list[float], query_text: str,
-                     top_k: int = 10, threshold: float = 0.0,
-                     filters: dict | None = None) -> list[dict[str, Any]]:
+    async def search(
+        self,
+        query_vector: list[float],
+        query_text: str,
+        top_k: int = 10,
+        threshold: float = 0.0,
+        filters: dict | None = None,
+    ) -> list[dict[str, Any]]:
         vector_results = self.vector_store.search(query_vector, top_k=top_k * 2, threshold=0.0)
         keyword_results = self.vector_store.keyword_search(query_text, top_k=top_k * 2)
 
@@ -134,8 +135,9 @@ class HybridSearch:
             return self._rrf_fusion(vector_results, keyword_results, top_k, threshold)
         return self._alpha_fusion(vector_results, keyword_results, top_k, threshold)
 
-    def _alpha_fusion(self, vector_results: list[dict], keyword_results: list[dict],
-                      top_k: int, threshold: float) -> list[dict[str, Any]]:
+    def _alpha_fusion(
+        self, vector_results: list[dict], keyword_results: list[dict], top_k: int, threshold: float
+    ) -> list[dict[str, Any]]:
         scores: dict[str, float] = {}
         for r in vector_results:
             rid = r.get("id", "")
@@ -158,8 +160,9 @@ class HybridSearch:
         return ranked[:top_k]
 
     @staticmethod
-    def _rrf_fusion(vector_results: list[dict], keyword_results: list[dict],
-                    top_k: int, threshold: float, k: int = 60) -> list[dict[str, Any]]:
+    def _rrf_fusion(
+        vector_results: list[dict], keyword_results: list[dict], top_k: int, threshold: float, k: int = 60
+    ) -> list[dict[str, Any]]:
         scores: dict[str, float] = {}
         for rank, r in enumerate(vector_results, 1):
             rid = r.get("id", "")

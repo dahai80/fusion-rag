@@ -1,4 +1,5 @@
 """Metadata store — SQLite-based metadata for knowledge bases, documents, and chunks."""
+
 from __future__ import annotations
 
 import json
@@ -75,9 +76,15 @@ class MetadataStore:
                 except Exception as e:
                     logger.warning("migration check for %s: %s", table, e)
 
-    def add_document(self, doc_id: str, file_path: str, file_name: str,
-                     doc_type: str, file_size: int = 0,
-                     metadata: dict[str, Any] | None = None) -> None:
+    def add_document(
+        self,
+        doc_id: str,
+        file_path: str,
+        file_name: str,
+        doc_type: str,
+        file_size: int = 0,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         now = time.time()
         meta_json = json.dumps(metadata or {}, ensure_ascii=False)
         with self._cursor() as conn:
@@ -140,9 +147,16 @@ class MetadataStore:
                 (count, chars, now, doc_id),
             )
 
-    def add_chunk(self, chunk_id: str, doc_id: str, doc_path: str,
-                  chunk_index: int, text: str, tokens: int = 0,
-                  metadata: dict[str, Any] | None = None) -> None:
+    def add_chunk(
+        self,
+        chunk_id: str,
+        doc_id: str,
+        doc_path: str,
+        chunk_index: int,
+        text: str,
+        tokens: int = 0,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         meta_json = json.dumps(metadata or {}, ensure_ascii=False)
         with self._cursor() as conn:
             conn.execute(
@@ -158,9 +172,7 @@ class MetadataStore:
 
     def get_chunks_by_doc(self, doc_id: str) -> list[dict[str, Any]]:
         with self._cursor() as conn:
-            rows = conn.execute(
-                "SELECT * FROM chunks WHERE doc_id = ? ORDER BY chunk_index", (doc_id,)
-            ).fetchall()
+            rows = conn.execute("SELECT * FROM chunks WHERE doc_id = ? ORDER BY chunk_index", (doc_id,)).fetchall()
         results = []
         for r in rows:
             d = dict(r)

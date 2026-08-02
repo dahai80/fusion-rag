@@ -5,6 +5,7 @@ API: MCP tool definitions for kb_list, kb_search, kb_ask, kb_create
 schema: JSON-RPC 2.0 protocol, tools following MCP specification
 user instruction: "按照你的方案和计划落地所有phase阶段的需求"
 """
+
 from __future__ import annotations
 
 import json
@@ -100,38 +101,46 @@ async def mcp_handler(request: Request) -> JSONResponse:
     params = body.get("params", {})
 
     if method == "initialize":
-        return JSONResponse({
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "fusion-rag", "version": "0.3.0"},
-            },
-        })
+        return JSONResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {"listChanged": False}},
+                    "serverInfo": {"name": "fusion-rag", "version": "0.3.0"},
+                },
+            }
+        )
 
     if method == "tools/list":
-        return JSONResponse({
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {"tools": MCP_TOOLS},
-        })
+        return JSONResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {"tools": MCP_TOOLS},
+            }
+        )
 
     if method == "tools/call":
         tool_name = params.get("name", "")
         arguments = params.get("arguments", {})
         result = await _dispatch_tool(tool_name, arguments)
-        return JSONResponse({
+        return JSONResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]},
+            }
+        )
+
+    return JSONResponse(
+        {
             "jsonrpc": "2.0",
             "id": request_id,
-            "result": {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]},
-        })
-
-    return JSONResponse({
-        "jsonrpc": "2.0",
-        "id": request_id,
-        "error": {"code": -32601, "message": f"Method not found: {method}"},
-    })
+            "error": {"code": -32601, "message": f"Method not found: {method}"},
+        }
+    )
 
 
 async def _dispatch_tool(name: str, args: dict) -> Any:
@@ -164,6 +173,7 @@ async def _dispatch_tool(name: str, args: dict) -> Any:
 
         if name == "kb_ask":
             from .routes import _generate_answer
+
             kb_id = args["kb_id"]
             kb = _get_base(kb_id)
             embed = _get_embed_client()
@@ -181,6 +191,7 @@ async def _dispatch_tool(name: str, args: dict) -> Any:
 
         if name == "kb_upload":
             from .routes import upload_document
+
             return await upload_document(args["kb_id"], args)
 
         if name == "kb_status":

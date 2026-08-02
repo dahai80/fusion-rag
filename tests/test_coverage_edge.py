@@ -14,25 +14,12 @@ from fusion_rag.store.vector_store import VectorStore
 # ── Vector Store: lazy imports ──
 
 class TestVectorStoreLazy:
-    def test_lancedb_import_error(self):
-        with patch.dict("sys.modules", {"lancedb": None}):
-            from fusion_rag.store.vector_store import _lancedb
-            with pytest.raises(ImportError):
-                _lancedb()
-
-    def test_pyarrow_import_error(self):
-        with patch.dict("sys.modules", {"pyarrow": None}):
-            from fusion_rag.store.vector_store import _pa
-            with pytest.raises(ImportError):
-                _pa()
-
     @pytest.mark.asyncio
     async def test_vector_store_close(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = VectorStore(tmpdir, dimension=4)
             store.close()
-            assert store._db is None
-            assert store._table is None
+            assert store._backend._db is None
 
     @pytest.mark.asyncio
     async def test_vector_store_delete_by_doc_escape(self):

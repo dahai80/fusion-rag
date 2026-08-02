@@ -126,6 +126,7 @@ class KnowledgeBaseManager:
                 meta_file = kb_dir / "kb_meta.json"
                 if meta_file.exists():
                     import json
+
                     try:
                         data = json.loads(meta_file.read_text(encoding="utf-8"))
                         kb = KnowledgeBase.from_dict(data)
@@ -136,21 +137,29 @@ class KnowledgeBaseManager:
     def _save_meta(self, kb: KnowledgeBase) -> None:
         """Save knowledge base metadata to disk."""
         import json
+
         path = Path(kb.storage_path)
         path.mkdir(parents=True, exist_ok=True)
         meta_file = path / "kb_meta.json"
         meta_file.write_text(json.dumps(kb.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
 
-    def create(self, name: str, description: str = "",
-               chunk_strategy: str = "semantic", embedding_model: str = "BGE-M3",
-               kb_id: str = "") -> KnowledgeBase:
+    def create(
+        self,
+        name: str,
+        description: str = "",
+        chunk_strategy: str = "semantic",
+        embedding_model: str = "BGE-M3",
+        kb_id: str = "",
+    ) -> KnowledgeBase:
         """Create a new knowledge base. If kb_id given and already exists, return existing (idempotent)."""
         if kb_id and kb_id in self._bases:
             logger.info("KB '%s' already exists, returning existing", kb_id)
             return self._bases[kb_id]
         config = KnowledgeBaseConfig(
-            name=name, description=description,
-            chunk_strategy=chunk_strategy, embedding_model=embedding_model,
+            name=name,
+            description=description,
+            chunk_strategy=chunk_strategy,
+            embedding_model=embedding_model,
         )
         kb = KnowledgeBase(id=kb_id or "", config=config, storage_dir=str(self._storage_dir))
         self._bases[kb.id] = kb
@@ -174,6 +183,7 @@ class KnowledgeBaseManager:
             return False
         kb = self._bases[kb_id]
         import shutil
+
         shutil.rmtree(Path(kb.storage_path), ignore_errors=True)
         del self._bases[kb_id]
         return True

@@ -1,4 +1,5 @@
 """Connectors — data source connectors for databases and web content."""
+
 from __future__ import annotations
 
 import logging
@@ -32,6 +33,7 @@ class DatabaseConnector:
 
     def _list_sqlite_tables(self) -> list[dict[str, Any]]:
         import sqlite3
+
         try:
             conn = sqlite3.connect(self.connection_string)
             cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -39,11 +41,13 @@ class DatabaseConnector:
             for row in cursor.fetchall():
                 tname = row[0]
                 cols = conn.execute(f"PRAGMA table_info({tname})").fetchall()
-                tables.append({
-                    "name": tname,
-                    "columns": [{"name": c[1], "type": c[2]} for c in cols],
-                    "row_count": conn.execute(f"SELECT COUNT(*) FROM {tname}").fetchone()[0],
-                })
+                tables.append(
+                    {
+                        "name": tname,
+                        "columns": [{"name": c[1], "type": c[2]} for c in cols],
+                        "row_count": conn.execute(f"SELECT COUNT(*) FROM {tname}").fetchone()[0],
+                    }
+                )
             conn.close()
             return tables
         except Exception as e:
@@ -52,6 +56,7 @@ class DatabaseConnector:
 
     def _fetch_sqlite(self, table_name: str, limit: int) -> list[dict[str, Any]]:
         import sqlite3
+
         try:
             conn = sqlite3.connect(self.connection_string)
             conn.row_factory = sqlite3.Row
@@ -66,12 +71,16 @@ class DatabaseConnector:
     async def _list_postgres_tables(self, schema: str) -> list[dict[str, Any]]:
         try:
             import asyncpg
+
             conn = await asyncpg.connect(self.connection_string)
-            rows = await conn.fetch("""
+            rows = await conn.fetch(
+                """
                 SELECT table_name, column_name, data_type
                 FROM information_schema.columns
                 WHERE table_schema = $1 ORDER BY table_name, ordinal_position
-            """, schema)
+            """,
+                schema,
+            )
             await conn.close()
             tables = {}
             for row in rows:
@@ -90,6 +99,7 @@ class DatabaseConnector:
     async def _fetch_postgres(self, table_name: str, limit: int) -> list[dict[str, Any]]:
         try:
             import asyncpg
+
             conn = await asyncpg.connect(self.connection_string)
             rows = await conn.fetch(f"SELECT * FROM {table_name} LIMIT $1", limit)
             await conn.close()
@@ -105,6 +115,7 @@ class WebLoader:
     async def load(self, url: str, max_chars: int = 10000) -> dict[str, Any]:
         """Fetch a URL and extract its text content."""
         import httpx
+
         try:
             async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
                 resp = await client.get(url)
@@ -123,6 +134,7 @@ class WebLoader:
     def _extract_text(html: str) -> str:
         """Simple HTML to text extraction."""
         import re
+
         text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL)
         text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL)
         text = re.sub(r"<[^>]+>", " ", text)

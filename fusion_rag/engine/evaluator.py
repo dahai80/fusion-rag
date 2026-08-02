@@ -6,6 +6,7 @@ schema: test_cases list[dict(query, expected_answer, expected_docs)],
         results with faithfulness/relevance/context_recall scores
 user instruction: "按照你的方案和计划落地所有phase阶段的需求"
 """
+
 from __future__ import annotations
 
 import json
@@ -23,13 +24,13 @@ logger = logging.getLogger(__name__)
 FAITHFULNESS_PROMPT = (
     "Given the following context and answer, determine if the answer is "
     "faithful to the context (i.e., all claims in the answer are supported by the context). "
-    "Output a JSON object: {\"faithful\": true/false, \"reason\": \"...\"}\n\n"
+    'Output a JSON object: {"faithful": true/false, "reason": "..."}\n\n'
     "Context: {context}\n\nAnswer: {answer}\n\nJSON:"
 )
 
 RELEVANCE_PROMPT = (
     "Rate the relevance of the following answer to the question on a scale of 0 to 10. "
-    "Output ONLY a JSON object: {\"score\": <0-10>, \"reason\": \"...\"}\n\n"
+    'Output ONLY a JSON object: {"score": <0-10>, "reason": "..."}\n\n'
     "Question: {query}\n\nAnswer: {answer}\n\nJSON:"
 )
 
@@ -37,9 +38,7 @@ RELEVANCE_PROMPT = (
 class RAGEvaluator:
     """Evaluates RAG pipeline quality with automated metrics."""
 
-    def __init__(self, mlx_url: str = "http://localhost:11434/v1",
-                 model: str = "qwen3.5-9b",
-                 db_path: str = ""):
+    def __init__(self, mlx_url: str = "http://localhost:11434/v1", model: str = "qwen3.5-9b", db_path: str = ""):
         self.mlx_url = mlx_url.rstrip("/")
         self.model = model
         if not db_path:
@@ -74,8 +73,7 @@ class RAGEvaluator:
         conn.commit()
         conn.close()
 
-    async def evaluate(self, kb_id: str,
-                       test_cases: list[dict[str, str]]) -> dict[str, Any]:
+    async def evaluate(self, kb_id: str, test_cases: list[dict[str, str]]) -> dict[str, Any]:
         """Run evaluation on test cases against a knowledge base."""
 
         results = []
@@ -89,14 +87,16 @@ class RAGEvaluator:
 
             start = time.time()
             try:
-                eval_result = await self._evaluate_single(
-                    kb_id, query, expected, expected_docs)
+                eval_result = await self._evaluate_single(kb_id, query, expected, expected_docs)
                 eval_result["latency_ms"] = (time.time() - start) * 1000
             except Exception as e:
                 logger.warning("Evaluation failed for query '%s': %s", query[:50], e)
                 eval_result = {
-                    "query": query, "error": str(e),
-                    "faithfulness": 0, "relevance": 0, "context_recall": 0,
+                    "query": query,
+                    "error": str(e),
+                    "faithfulness": 0,
+                    "relevance": 0,
+                    "context_recall": 0,
                     "latency_ms": (time.time() - start) * 1000,
                 }
 
@@ -118,25 +118,34 @@ class RAGEvaluator:
             "results": results,
         }
 
-    async def _evaluate_single(self, kb_id: str, query: str,
-                                expected: str,
-                                expected_docs: list[str]) -> dict[str, Any]:
+    async def _evaluate_single(self, kb_id: str, query: str, expected: str, expected_docs: list[str]) -> dict[str, Any]:
         """Evaluate a single query."""
+        from ..embed.client import EmbeddingClient
+        from ..engine.knowledge_base import KnowledgeBaseManager
         from ..store.vector_store import VectorStore
-        from .routes import _generate_answer, _get_base, _get_embed_client
 
-        kb = _get_base(kb_id)
-        embed = _get_embed_client()
+        try:
+            kbm = KnowledgeBaseManager()
+            kb = kbm.get(kb_id)
+        except KeyError:
+            return {
+                "query": query,
+                "error": f"KB '{kb_id}' not found",
+                "faithfulness": 0,
+                "relevance": 0,
+                "context_recall": 0,
+            }
+
+        embed = EmbeddingClient()
         vec_store = VectorStore(kb.vector_path)
 
         query_vector = await embed.embed(query)
         if not query_vector or all(v == 0.0 for v in query_vector):
-            return {"query": query, "error": "Embedding failed",
-                    "faithfulness": 0, "relevance": 0, "context_recall": 0}
+            return {"query": query, "error": "Embedding failed", "faithfulness": 0, "relevance": 0, "context_recall": 0}
 
         chunks = vec_store.search(query_vector, top_k=kb.config.max_results)
         context = "\n\n".join(f"[{c['doc_name']}] {c['text'][:2000]}" for c in chunks)
-        answer_result = await _generate_answer(query, context, chunks)
+        answer_result = await self._generate_answer(query, context, chunks)
         actual_answer = answer_result.get("answer", "")
 
         # Compute metrics
@@ -153,6 +162,52 @@ class RAGEvaluator:
             "relevance": relevance,
             "context_recall": context_recall,
         }
+
+    async def _generate_answer(self, question: str, context: str, chunks: list[dict]) -> dict[str, Any]:
+        import os
+
+        system_prompt = os.environ.get(
+            "FUSION_RAG_SYSTEM_PROMPT",
+            "You are a knowledge base assistant. Answer the user's question based "
+            "on the provided context. If the context doesn't contain the answer, "
+            "say so. Always cite the source document names.",
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"},
+        ]
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    f"{self.mlx_url}/chat/completions",
+                    json={
+                        "model": self.model,
+                        "messages": messages,
+                        "max_tokens": 4096,
+                        "temperature": 0.3,
+                    },
+                )
+                resp.raise_for_status()
+                answer_text = resp.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            logger.error("eval RAG answer generation failed: %s", e)
+            answer_text = f"Failed to generate answer: {e}"
+
+        seen = set()
+        sources = []
+        for c in chunks:
+            doc_name = c.get("doc_name", "unknown")
+            if doc_name not in seen:
+                seen.add(doc_name)
+                sources.append(
+                    {
+                        "doc_name": doc_name,
+                        "doc_path": c.get("doc_path", ""),
+                        "score": c.get("score", 0),
+                        "snippet": c.get("text", "")[:200],
+                    }
+                )
+        return {"answer": answer_text, "sources": sources}
 
     async def _score_faithfulness(self, context: str, answer: str) -> float:
         if not answer or not context:
@@ -205,8 +260,7 @@ class RAGEvaluator:
         return 0.5
 
     @staticmethod
-    def _compute_context_recall(retrieved: list[dict],
-                                 expected_docs: list[str]) -> float:
+    def _compute_context_recall(retrieved: list[dict], expected_docs: list[str]) -> float:
         if not expected_docs:
             return 1.0
         if not retrieved:
@@ -224,12 +278,18 @@ class RAGEvaluator:
                     faithfulness, relevance, context_recall,
                     retrieval_count, latency_ms, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (kb_id, result.get("query", ""),
-                 result.get("expected_answer", ""), result.get("actual_answer", ""),
-                 result.get("faithfulness", 0), result.get("relevance", 0),
-                 result.get("context_recall", 0),
-                 result.get("retrieval_count", 0), result.get("latency_ms", 0),
-                 time.time()),
+                (
+                    kb_id,
+                    result.get("query", ""),
+                    result.get("expected_answer", ""),
+                    result.get("actual_answer", ""),
+                    result.get("faithfulness", 0),
+                    result.get("relevance", 0),
+                    result.get("context_recall", 0),
+                    result.get("retrieval_count", 0),
+                    result.get("latency_ms", 0),
+                    time.time(),
+                ),
             )
             conn.commit()
         except Exception as e:

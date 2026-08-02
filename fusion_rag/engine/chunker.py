@@ -6,16 +6,20 @@ and code-specific splitting (by function/class).
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from .document import ParseResult
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class Chunk:
     """A single chunk of text from a document."""
+
     text: str
     index: int
     doc_path: str = ""
@@ -28,8 +32,7 @@ class Chunk:
 class Chunker:
     """Split document text into chunks for embedding."""
 
-    def __init__(self, strategy: str = "semantic", chunk_size: int = 512,
-                 chunk_overlap: int = 64):
+    def __init__(self, strategy: str = "semantic", chunk_size: int = 512, chunk_overlap: int = 64):
         self.strategy = strategy
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
@@ -42,12 +45,18 @@ class Chunker:
         if result.error:
             return []
 
-        if self.strategy == "code" or DocumentParser.is_code_file(result.doc_type):
+        if self.strategy == "ast" or self._should_use_ast(result):
+            return self._chunk_ast(result)
+        elif self.strategy == "code" or DocumentParser.is_code_file(result.doc_type):
             return self._chunk_code(result)
         elif self.strategy == "semantic":
             return self._chunk_semantic(result)
         else:
             return self._chunk_fixed(result)
+
+    def _should_use_ast(self, result: ParseResult) -> bool:
+        dtype = result.doc_type.value if hasattr(result.doc_type, "value") else str(result.doc_type)
+        return dtype == "CODE_PYTHON" and self.strategy != "code"
 
     def _chunk_semantic(self, result: ParseResult) -> list[Chunk]:
         """Split by semantic boundaries (paragraphs, sections)."""
@@ -97,16 +106,50 @@ class Chunker:
                 break
         return chunks if chunks else [self._make_chunk(text, result, 0)]
 
+    def _chunk_ast(self, result: ParseResult) -> list[Chunk]:
+        """AST-based chunking for Python files — uses built-in ast module."""
+        try:
+            from .ast_chunker import ASTChunker
+
+            ast_chunker = ASTChunker()
+            ast_chunks = ast_chunker.chunk(result.content, result.file_path)
+            chunks = []
+            for ac in ast_chunks:
+                chunks.append(
+                    Chunk(
+                        text=ac.text.strip(),
+                        index=len(chunks),
+                        doc_path=result.file_path,
+                        doc_name=result.file_name,
+                        doc_type=result.doc_type.value,
+                        metadata={
+                            **result.metadata,
+                            "symbol_name": ac.symbol_name,
+                            "symbol_type": ac.symbol_type,
+                            "line_start": ac.line_start,
+                            "line_end": ac.line_end,
+                            "decorators": ac.decorators,
+                        },
+                        tokens=len(ac.text) // 4,
+                    )
+                )
+            if not chunks:
+                return self._chunk_code(result)
+            return chunks
+        except Exception as e:
+            logger.warning("AST chunking failed, falling back to code chunking: %s", e)
+            return self._chunk_code(result)
+
     def _chunk_code(self, result: ParseResult) -> list[Chunk]:
         """Split code files by function/class boundaries."""
         text = result.content
         # Try to split by function/class definitions
         patterns = [
-            r"(?=^def\s+\w+\s*\()",      # Python
-            r"(?=^class\s+\w+)",           # Python/Java/C++
-            r"(?=^func\s+\w+\s*\()",       # Go/Swift
+            r"(?=^def\s+\w+\s*\()",  # Python
+            r"(?=^class\s+\w+)",  # Python/Java/C++
+            r"(?=^func\s+\w+\s*\()",  # Go/Swift
             r"(?=^public\s+(static\s+)?\w+\s+\w+\s*\()",  # Java/C#
-            r"(?=^function\s+\w+\s*\()",   # JS/TS
+            r"(?=^function\s+\w+\s*\()",  # JS/TS
             r"(?=^\w+\s*:\s*function\s*\()",  # JS object method
         ]
 
@@ -119,10 +162,14 @@ class Chunker:
                     if part:
                         if len(part) > self.chunk_size:
                             # Sub-chunk large functions
-                            sub_chunks = self._chunk_fixed(ParseResult(
-                                file_path=result.file_path, file_name=result.file_name,
-                                doc_type=result.doc_type, content=part,
-                            ))
+                            sub_chunks = self._chunk_fixed(
+                                ParseResult(
+                                    file_path=result.file_path,
+                                    file_name=result.file_name,
+                                    doc_type=result.doc_type,
+                                    content=part,
+                                )
+                            )
                             chunks.extend(sub_chunks)
                         else:
                             chunks.append(self._make_chunk(part, result, len(chunks)))

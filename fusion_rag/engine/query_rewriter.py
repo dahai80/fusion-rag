@@ -5,6 +5,7 @@ API: QueryRewriter.rewrite(query, history=None, mode="hyde") -> str | list[str]
 schema: input query str, output rewritten query or list of expanded queries
 user instruction: "按照你的方案和计划落地所有phase阶段的需求"
 """
+
 from __future__ import annotations
 
 import logging
@@ -39,14 +40,14 @@ CONDENSE_PROMPT = (
 class QueryRewriter:
     """Rewrites queries using LLM for better retrieval."""
 
-    def __init__(self, mlx_url: str = "http://localhost:11434/v1",
-                 model: str = "qwen3.5-9b", enabled: bool = True):
+    def __init__(self, mlx_url: str = "http://localhost:11434/v1", model: str = "qwen3.5-9b", enabled: bool = True):
         self.mlx_url = mlx_url.rstrip("/")
         self.model = model
         self.enabled = enabled
 
-    async def rewrite(self, query: str, history: list[dict[str, str]] | None = None,
-                      mode: str = "hyde") -> str | list[str]:
+    async def rewrite(
+        self, query: str, history: list[dict[str, str]] | None = None, mode: str = "hyde"
+    ) -> str | list[str]:
         if not self.enabled or not query.strip():
             return query
         try:
@@ -104,10 +105,7 @@ class QueryRewriter:
     async def _condense(self, query: str, history: list[dict[str, str]]) -> str:
         if not history:
             return query
-        hist_text = "\n".join(
-            f"{h.get('role', 'user')}: {h.get('content', '')}"
-            for h in history[-6:]
-        )
+        hist_text = "\n".join(f"{h.get('role', 'user')}: {h.get('content', '')}" for h in history[-6:])
         prompt = CONDENSE_PROMPT.format(history=hist_text, query=query)
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
@@ -134,7 +132,7 @@ class QueryRewriter:
                 continue
             for prefix in ("1.", "2.", "3.", "1)", "2)", "3)"):
                 if line.startswith(prefix):
-                    line = line[len(prefix):].strip()
+                    line = line[len(prefix) :].strip()
                     break
             if line:
                 variants.append(line)

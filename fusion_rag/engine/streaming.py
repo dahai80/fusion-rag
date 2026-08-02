@@ -1,4 +1,5 @@
 """Streaming SSE support and metadata extraction for RAG responses."""
+
 from __future__ import annotations
 
 import json
@@ -12,33 +13,39 @@ class SSEStreamer:
     """Server-Sent Events streaming for RAG responses."""
 
     @staticmethod
-    async def stream_response(question: str, context: str,
-                                mlx_url: str = "http://localhost:11434/v1") -> str:
+    async def stream_response(question: str, context: str, mlx_url: str = "http://localhost:11434/v1") -> str:
         """Stream a RAG response as SSE events."""
         import httpx
+
         messages = [
             {"role": "system", "content": "Answer based on the context. Cite sources."},
             {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"},
         ]
         events = []
-        async with httpx.AsyncClient(timeout=60.0) as client, \
-                client.stream("POST", f"{mlx_url}/chat/completions", json={
-                "model": "qwen3.5-9b",
-                "messages": messages,
-                "max_tokens": 4096,
-                "stream": True,
-            }) as resp:
-                async for line in resp.aiter_lines():
-                    if line.startswith("data: "):
-                        data = line[6:]
-                        if data != "[DONE]":
-                            try:
-                                chunk = json.loads(data)
-                                content = chunk["choices"][0]["delta"].get("content", "")
-                                if content:
-                                    events.append(f"data: {json.dumps({'content': content})}\n\n")
-                            except (json.JSONDecodeError, KeyError):
-                                pass
+        async with (
+            httpx.AsyncClient(timeout=60.0) as client,
+            client.stream(
+                "POST",
+                f"{mlx_url}/chat/completions",
+                json={
+                    "model": "qwen3.5-9b",
+                    "messages": messages,
+                    "max_tokens": 4096,
+                    "stream": True,
+                },
+            ) as resp,
+        ):
+            async for line in resp.aiter_lines():
+                if line.startswith("data: "):
+                    data = line[6:]
+                    if data != "[DONE]":
+                        try:
+                            chunk = json.loads(data)
+                            content = chunk["choices"][0]["delta"].get("content", "")
+                            if content:
+                                events.append(f"data: {json.dumps({'content': content})}\n\n")
+                        except (json.JSONDecodeError, KeyError):
+                            pass
         events.append("data: [DONE]\n\n")
         return "".join(events)
 
@@ -52,6 +59,7 @@ class MetadataExtractor:
     async def extract(self, text: str, doc_name: str = "") -> dict[str, Any]:
         """Extract metadata from document text."""
         import httpx
+
         prompt = (
             f"Extract metadata from the following document. "
             f"Return ONLY a JSON object with these fields:\n"
@@ -66,15 +74,19 @@ class MetadataExtractor:
         )
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(f"{self.mlx_url}/chat/completions", json={
-                    "model": "qwen3.5-9b",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 512,
-                    "temperature": 0.1,
-                })
+                resp = await client.post(
+                    f"{self.mlx_url}/chat/completions",
+                    json={
+                        "model": "qwen3.5-9b",
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 512,
+                        "temperature": 0.1,
+                    },
+                )
                 content = resp.json()["choices"][0]["message"]["content"]
                 # Extract JSON from response
                 import re
+
                 match = re.search(r"\{.*\}", content, re.DOTALL)
                 if match:
                     return json.loads(match.group())
@@ -88,6 +100,7 @@ class ResultCache:
 
     def __init__(self, db_path: str = ""):
         from pathlib import Path
+
         if not db_path:
             db_path = str(Path.home() / ".fusion-rag" / "cache.db")
         self.db_path = db_path
@@ -96,6 +109,7 @@ class ResultCache:
 
     def _get_conn(self):
         import sqlite3
+
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         return conn
@@ -119,6 +133,7 @@ class ResultCache:
     def get(self, query: str, context: str = "") -> dict | None:
         import hashlib
         import json
+
         qh = hashlib.md5(query.encode()).hexdigest()
         ch = hashlib.md5(context.encode()).hexdigest() if context else ""
         conn = self._get_conn()
@@ -135,6 +150,7 @@ class ResultCache:
         import hashlib
         import json
         import time
+
         qh = hashlib.md5(query.encode()).hexdigest()
         ch = hashlib.md5(context.encode()).hexdigest() if context else ""
         conn = self._get_conn()
