@@ -32,7 +32,7 @@ ENTITY_PROMPT = (
 class GraphRAG:
     """Lightweight graph-based RAG with entity extraction via LLM."""
 
-    def __init__(self, db_path: str = "", mlx_url: str = "http://localhost:11434/v1", model: str = "qwen3.5-9b"):
+    def __init__(self, db_path: str = "", mlx_url: str = "http://localhost:11432/v1", model: str = "qwen3.5-9b"):
         if not db_path:
             db_path = str(Path.home() / ".fusion-rag" / "graph.db")
         self.db_path = db_path

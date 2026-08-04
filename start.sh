@@ -10,7 +10,7 @@ cd "$SCRIPT_DIR"
 # Config
 PORT=${FUSION_RAG_PORT:-11436}
 HOST=${FUSION_RAG_HOST:-"127.0.0.1"}
-MLX_URL=${FUSION_MLX_URL:-"http://localhost:11434/v1"}
+MLX_URL=${FUSION_MLX_URL:-"http://localhost:11432/v1"}
 EMBED_MODEL=${FUSION_RAG_EMBED:-"BGE-M3"}
 PID_FILE="$SCRIPT_DIR/.fusion-rag.pid"
 LOG_DIR="$SCRIPT_DIR/logs"
@@ -142,7 +142,7 @@ case "${1:-status}" in
         echo "Environment variables:"
         echo "  FUSION_RAG_PORT     Port (default: 11436)"
         echo "  FUSION_RAG_HOST     Host (default: 127.0.0.1)"
-        echo "  FUSION_MLX_URL     fusion-mlx URL (default: http://localhost:11434/v1)"
+        echo "  FUSION_MLX_URL     fusion-mlx URL (default: http://localhost:11432/v1)"
         echo "  FUSION_RAG_EMBED    Embedding model (default: BGE-M3)"
         exit 1
         ;;

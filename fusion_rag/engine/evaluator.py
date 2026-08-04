@@ -38,7 +38,7 @@ RELEVANCE_PROMPT = (
 class RAGEvaluator:
     """Evaluates RAG pipeline quality with automated metrics."""
 
-    def __init__(self, mlx_url: str = "http://localhost:11434/v1", model: str = "qwen3.5-9b", db_path: str = ""):
+    def __init__(self, mlx_url: str = "http://localhost:11432/v1", model: str = "qwen3.5-9b", db_path: str = ""):
         self.mlx_url = mlx_url.rstrip("/")
         self.model = model
         if not db_path:

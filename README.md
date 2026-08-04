@@ -7,9 +7,9 @@
 Local vector knowledge base service for the Fusion-MLX ecosystem — 100% offline, no data leaves your device.
 
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB.svg)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/Tests-164-success.svg)](tests/)
-[![Version](https://img.shields.io/badge/Version-0.6.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/Version-0.6.3-blue.svg)]()
 
 [Quick Start](#quick-start) · [API Reference](#api-reference) · [Architecture](#architecture) · [Documentation](docs/)
 
@@ -51,7 +51,7 @@ Local vector knowledge base service for the Fusion-MLX ecosystem — 100% offlin
 
 - macOS with Apple Silicon (M1–M5)
 - Python 3.12+
-- [fusion-mlx](https://github.com/dahai80/fusion-mlx) running on `localhost:11434`
+- [fusion-mlx](https://github.com/dahai80/fusion-mlx) running on `localhost:11432`
 
 ### Install
 
@@ -309,7 +309,7 @@ Fusion-RAG provides a REST API at `/kb/*` for knowledge base operations.
 |----------|---------|-------------|
 | `FUSION_RAG_PORT` | 11436 | Server port |
 | `FUSION_RAG_HOST` | 127.0.0.1 | Listen address |
-| `FUSION_MLX_URL` | http://localhost:11434/v1 | fusion-mlx URL |
+| `FUSION_MLX_URL` | http://localhost:11432/v1 | fusion-mlx URL |
 | `FUSION_RAG_EMBED` | BGE-M3 | Embedding model |
 | `FUSION_RAG_API_KEY` | (empty) | API key auth (disabled if empty) |
 | `FUSION_RAG_AUTH_BACKEND` | apikey | Auth backend: `apikey` or `none` |
@@ -364,7 +364,7 @@ ruff check fusion_rag/
 
 ## License
 
-MIT
+Apache License 2.0 — see [LICENSE](LICENSE) for details.
 
 ## Acknowledgments
 

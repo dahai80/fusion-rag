@@ -37,12 +37,14 @@ class TestAPIExtra:
         assert resp.status_code == 400
 
     def test_search_with_mocked_embed(self, client):
-        """Test search with mocked embedding."""
+        """Test search on empty KB returns empty results."""
         create = client.post("/kb/bases", json={"name": "test"}).json()
         resp = client.post(f"/kb/bases/{create['id']}/search",
                            json={"query": "test", "top_k": 5, "threshold": 0.5})
-        # Should fail because embedding client can't connect
-        assert resp.status_code in (500, 503)
+        assert resp.status_code == 200
+        data = resp.json()
+        results = data if isinstance(data, list) else data.get("results", [])
+        assert results == []
 
 
 # ── Document Parser Extra ──

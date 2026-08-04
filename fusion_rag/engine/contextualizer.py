@@ -30,7 +30,7 @@ class Contextualizer:
 
     def __init__(
         self,
-        mlx_url: str = "http://localhost:11434/v1",
+        mlx_url: str = "http://localhost:11432/v1",
         model: str = "qwen3.5-9b",
         enabled: bool = True,
         api_key: str = "",

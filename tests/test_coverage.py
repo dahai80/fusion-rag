@@ -114,7 +114,7 @@ class TestAPIRoutes:
 class TestEmbeddingClientAdvanced:
     @pytest.mark.asyncio
     async def test_embed_batch_with_retry(self):
-        client = EmbeddingClient(base_url="http://localhost:11434/v1")
+        client = EmbeddingClient(base_url="http://localhost:11432/v1")
         mock_http = MagicMock()
         mock_http.post = AsyncMock()
         # First call fails, second succeeds
@@ -130,7 +130,7 @@ class TestEmbeddingClientAdvanced:
 
     @pytest.mark.asyncio
     async def test_embed_batch_all_fail(self):
-        client = EmbeddingClient(base_url="http://localhost:11434/v1", max_retries=1)
+        client = EmbeddingClient(base_url="http://localhost:11432/v1", max_retries=1)
         mock_http = MagicMock()
         mock_http.post = AsyncMock(side_effect=RuntimeError("always fail"))
         client._client = mock_http
@@ -141,7 +141,7 @@ class TestEmbeddingClientAdvanced:
 
     @pytest.mark.asyncio
     async def test_embed_single(self):
-        client = EmbeddingClient(base_url="http://localhost:11434/v1")
+        client = EmbeddingClient(base_url="http://localhost:11432/v1")
         mock_http = MagicMock()
         mock_http.post = AsyncMock(return_value=MagicMock(
             status_code=200, json=lambda: {
@@ -154,8 +154,11 @@ class TestEmbeddingClientAdvanced:
 
     @pytest.mark.asyncio
     async def test_health_check(self):
+        from unittest.mock import patch
+
         client = EmbeddingClient(base_url="http://localhost:19999/v1", timeout=1.0)
-        ok = await client.health()
+        with patch("fusion_rag.embed.local.get_local_model", side_effect=ImportError):
+            ok = await client.health()
         assert ok is False
 
 

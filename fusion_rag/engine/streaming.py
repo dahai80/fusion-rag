@@ -13,7 +13,7 @@ class SSEStreamer:
     """Server-Sent Events streaming for RAG responses."""
 
     @staticmethod
-    async def stream_response(question: str, context: str, mlx_url: str = "http://localhost:11434/v1") -> str:
+    async def stream_response(question: str, context: str, mlx_url: str = "http://localhost:11432/v1") -> str:
         """Stream a RAG response as SSE events."""
         import httpx
 
@@ -53,7 +53,7 @@ class SSEStreamer:
 class MetadataExtractor:
     """Automatically extracts metadata from documents using LLM."""
 
-    def __init__(self, mlx_url: str = "http://localhost:11434/v1"):
+    def __init__(self, mlx_url: str = "http://localhost:11432/v1"):
         self.mlx_url = mlx_url
 
     async def extract(self, text: str, doc_name: str = "") -> dict[str, Any]:

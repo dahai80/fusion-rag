@@ -203,7 +203,7 @@ async def ingest_content(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
 
     contextualize = data.get("contextualize", True)
     embed = _get_embed_client()
-    contextualizer = Contextualizer(enabled=contextualize)
+    contextualizer = Contextualizer(enabled=contextualize, api_key=embed.api_key)
     chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
     chunk_dicts = await contextualizer.contextualize(chunk_dicts, content)
 

@@ -250,8 +250,11 @@ class TestEmbeddingClient:
 
     @pytest.mark.asyncio
     async def test_health_no_server(self):
+        from unittest.mock import patch
+
         client = EmbeddingClient(base_url="http://localhost:19999/v1", timeout=1.0)
-        ok = await client.health()
+        with patch("fusion_rag.embed.local.get_local_model", side_effect=ImportError):
+            ok = await client.health()
         assert ok is False
 
     @pytest.mark.asyncio
