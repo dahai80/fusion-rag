@@ -33,7 +33,7 @@ class MultiTurnRAG:
 
     def __init__(
         self,
-        mlx_url: str = "http://127.0.0.1:11434/v1",
+        mlx_url: str = "http://127.0.0.1:11432/v1",
         model: str = "qwen3.5-9b",
         token_budget: int = 8192,
         max_history_turns: int = 10,
@@ -146,7 +146,7 @@ class DocumentChain:
     """Processes multiple documents with chain strategies."""
 
     @staticmethod
-    async def stuff(docs: list[str], query: str, mlx_url: str = "http://127.0.0.1:11434/v1") -> str:
+    async def stuff(docs: list[str], query: str, mlx_url: str = "http://127.0.0.1:11432/v1") -> str:
         """Stuff all docs into a single prompt."""
         context = "\n\n".join(docs)
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -161,7 +161,7 @@ class DocumentChain:
             return resp.json()["choices"][0]["message"]["content"]
 
     @staticmethod
-    async def refine(docs: list[str], query: str, mlx_url: str = "http://127.0.0.1:11434/v1") -> str:
+    async def refine(docs: list[str], query: str, mlx_url: str = "http://127.0.0.1:11432/v1") -> str:
         """Refine answer iteratively with each document."""
         answer = ""
         for doc in docs:
@@ -181,7 +181,7 @@ class DocumentChain:
         return answer
 
     @staticmethod
-    async def map_reduce(docs: list[str], query: str, mlx_url: str = "http://127.0.0.1:11434/v1") -> str:
+    async def map_reduce(docs: list[str], query: str, mlx_url: str = "http://127.0.0.1:11432/v1") -> str:
         """Map each doc, then reduce to final answer."""
         import asyncio
 

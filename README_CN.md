@@ -37,7 +37,7 @@ Fusion-MLX 生态的统一本地向量知识库服务——100% 离线，数据�
 
 - macOS Apple Silicon (M1–M5)
 - Python 3.12+
-- [fusion-mlx](https://github.com/dahai80/fusion-mlx) 运行在 `localhost:11434`
+- [fusion-mlx](https://github.com/dahai80/fusion-mlx) 运行在 `localhost:11432`
 
 ### 安装
 
@@ -182,7 +182,7 @@ Fusion-RAG 通过 `/kb/*` 提供 REST API。
 |------|--------|------|
 | `FUSION_RAG_PORT` | 11436 | 服务端口 |
 | `FUSION_RAG_HOST` | 127.0.0.1 | 监听地址 |
-| `FUSION_MLX_URL` | http://127.0.0.1:11434/v1 | fusion-mlx 地址 |
+| `FUSION_MLX_URL` | http://127.0.0.1:11432/v1 | fusion-mlx 地址 |
 | `FUSION_RAG_EMBED` | BGE-M3 | Embedding 模型 |
 
 ### 使用 start.sh

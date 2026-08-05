@@ -26,7 +26,7 @@ class EmbeddingClient:
     # user instruction: "按照你的方案和计划落地所有phase阶段的需求"
     def __init__(
         self,
-        base_url: str = "http://127.0.0.1:11434/v1",
+        base_url: str = "http://127.0.0.1:11432/v1",
         model: str = "BGE-M3",
         api_key: str = "",
         timeout: float = 30.0,
