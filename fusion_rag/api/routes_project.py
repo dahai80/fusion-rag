@@ -10,7 +10,7 @@ from .auth import verify_api_key
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/kb", tags=["project"])
+router = APIRouter(tags=["project"])
 
 _kb_manager: KnowledgeBaseManager | None = None
 _project_kb_map: dict[str, str] = {}
