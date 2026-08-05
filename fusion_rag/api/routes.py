@@ -122,8 +122,12 @@ async def _generate_answer(
 ) -> dict[str, Any]:
     import os as _os
 
-    mlx_base = _get_embed_client().base_url.replace("/v1", "")
+    embed = _get_embed_client()
+    mlx_base = embed.base_url.replace("/v1", "")
     mlx_url = f"{mlx_base}/v1/chat/completions"
+    headers = {}
+    if embed.api_key:
+        headers["Authorization"] = f"Bearer {embed.api_key}"
     if not system_prompt:
         system_prompt = _os.environ.get("FUSION_RAG_SYSTEM_PROMPT", _DEFAULT_SYSTEM_PROMPT)
     messages = [
@@ -133,7 +137,7 @@ async def _generate_answer(
     import httpx
 
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=60.0, headers=headers) as client:
             resp = await client.post(
                 mlx_url,
                 json={
