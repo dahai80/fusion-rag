@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 import httpx
 
@@ -25,7 +26,7 @@ class EmbeddingClient:
     # user instruction: "按照你的方案和计划落地所有phase阶段的需求"
     def __init__(
         self,
-        base_url: str = "http://localhost:11432/v1",
+        base_url: str = "http://127.0.0.1:11434/v1",
         model: str = "BGE-M3",
         api_key: str = "",
         timeout: float = 30.0,
@@ -35,9 +36,17 @@ class EmbeddingClient:
         fallback_url: str = "",
         fallback_api_key: str = "",
     ):
+        if not api_key:
+            api_key = os.environ.get("FUSION_MLX_API_KEY", "")
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
+        if not self.api_key:
+            logger.warning(
+                "EmbeddingClient started without FUSION_MLX_API_KEY; MLX calls will 401 if gateway auth is on"
+            )
+        else:
+            logger.info("EmbeddingClient api_key loaded from FUSION_MLX_API_KEY (len=%d)", len(self.api_key))
         self.timeout = timeout
         self.max_retries = max_retries
         self.batch_size = batch_size

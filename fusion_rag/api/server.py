@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 def create_app(
     kb_storage_dir: str = "",
-    mlx_base_url: str = "http://localhost:11432/v1",
+    mlx_base_url: str = "http://127.0.0.1:11434/v1",
     embedding_model: str = "BGE-M3",
     mlx_api_key: str = "",
     fallback_url: str = "",
@@ -58,7 +58,7 @@ def run_server(
     host: str = "127.0.0.1",
     port: int = 11436,
     kb_storage_dir: str = "",
-    mlx_base_url: str = "http://localhost:11432/v1",
+    mlx_base_url: str = "http://127.0.0.1:11434/v1",
     embedding_model: str = "BGE-M3",
     mlx_api_key: str = "",
     log_level: str = "INFO",
@@ -80,7 +80,7 @@ def run_server(
 if __name__ == "__main__":
     host = os.environ.get("FUSION_RAG_HOST", "127.0.0.1")
     port = int(os.environ.get("FUSION_RAG_PORT", "11436"))
-    mlx_url = os.environ.get("FUSION_MLX_URL", "http://localhost:11432/v1")
+    mlx_url = os.environ.get("FUSION_MLX_URL", "http://127.0.0.1:11434/v1")
     embed_model = os.environ.get("FUSION_RAG_EMBED", "BGE-M3")
     mlx_api_key = os.environ.get("FUSION_MLX_API_KEY", "")
     if not mlx_api_key:

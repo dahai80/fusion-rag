@@ -40,7 +40,7 @@ CONDENSE_PROMPT = (
 class QueryRewriter:
     """Rewrites queries using LLM for better retrieval."""
 
-    def __init__(self, mlx_url: str = "http://localhost:11432/v1", model: str = "qwen3.5-9b", enabled: bool = True):
+    def __init__(self, mlx_url: str = "http://127.0.0.1:11434/v1", model: str = "qwen3.5-9b", enabled: bool = True):
         self.mlx_url = mlx_url.rstrip("/")
         self.model = model
         self.enabled = enabled

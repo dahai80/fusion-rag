@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -11,6 +12,33 @@ from ..engine.reranker import HybridSearch
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["search"])
+
+
+def _audit_and_trajectory(
+    kb_id: str,
+    query: str,
+    caller: str,
+    results: list[dict],
+    latency_ms: float,
+    metadata: dict | None = None,
+) -> None:
+    from ..engine.audit_logger import AuditLogger
+    from ..engine.trajectory_writer import TrajectoryWriter
+    from .routes import _get_kb_storage_path
+
+    top_sources = [
+        {"doc_name": r.get("doc_name", ""), "score": r.get("score", 0.0), "id": r.get("id", "")} for r in results[:5]
+    ]
+    try:
+        al = AuditLogger(f"{_get_kb_storage_path(kb_id)}/audit.db")
+        al.log_search(kb_id, query, caller, len(results), top_sources, latency_ms, metadata)
+    except Exception as e:
+        logger.warning("audit log_search failed: %s", e)
+    try:
+        tw = TrajectoryWriter()
+        tw.write(kb_id, query, caller, len(results), top_sources, latency_ms, metadata)
+    except Exception as e:
+        logger.warning("trajectory write failed: %s", e)
 
 
 @router.post("/bases/{kb_id}/search")
@@ -54,6 +82,7 @@ async def search(kb_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
 
     embed = _get_embed_client()
     vec_store = _get_vector_store(kb_id)
+    _start = time.time()
 
     if rewrite_mode:
         rewriter = QueryRewriter(enabled=True)
@@ -75,6 +104,7 @@ async def search(kb_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
                 results = [r for r in results if r.get("doc_type", "") in doc_type_filter]
             if use_rerank:
                 results = await _do_rerank(query, results, top_k)
+            _audit_and_trajectory(kb_id, query, "search", results, (time.time() - _start) * 1000)
             return results
         query = rewritten
 
@@ -104,6 +134,7 @@ async def search(kb_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
     if use_rerank:
         results = await _do_rerank(query, results, top_k)
 
+    _audit_and_trajectory(kb_id, query, "search", results, (time.time() - _start) * 1000)
     return results
 
 
@@ -135,6 +166,7 @@ async def ask(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
 
     embed = _get_embed_client()
     vec_store = _get_vector_store(kb_id)
+    _start = time.time()
 
     rewrite_mode = data.get("rewrite_mode")
     history = data.get("history")
@@ -166,6 +198,7 @@ async def ask(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
         chunks = _apply_search_filters(chunks, folder_prefix, metadata_filter)
 
     if not chunks:
+        _audit_and_trajectory(kb_id, question, "ask", [], (time.time() - _start) * 1000)
         return {"answer": "No relevant documents found.", "sources": []}
 
     if use_rerank:
@@ -181,5 +214,13 @@ async def ask(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
         max_tokens=max_tokens,
         temperature=temperature,
         system_prompt=system_prompt,
+    )
+    _audit_and_trajectory(
+        kb_id,
+        question,
+        "ask",
+        chunks,
+        (time.time() - _start) * 1000,
+        {"model": model, "has_answer": bool(answer.get("answer"))},
     )
     return answer

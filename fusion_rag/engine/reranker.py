@@ -24,7 +24,7 @@ class Reranker:
     Uses batch LLM scoring — single API call for all documents.
     """
 
-    def __init__(self, mlx_url: str = "http://localhost:11432/v1", model: str = "qwen3.5-9b", batch_size: int = 20):
+    def __init__(self, mlx_url: str = "http://127.0.0.1:11434/v1", model: str = "qwen3.5-9b", batch_size: int = 20):
         self.mlx_url = mlx_url.rstrip("/")
         self.model = model
         self.batch_size = batch_size

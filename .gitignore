@@ -13,3 +13,5 @@ rag-oss-analysis.md
 logs/
 docs/
 .codegraph/
+
+.fusion-rag.pid
