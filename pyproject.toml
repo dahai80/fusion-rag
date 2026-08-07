@@ -1,6 +1,6 @@
 [project]
 name = "fusion-rag"
-version = "0.6.5"
+version = "0.6.6"
 description = "Fusion-RAG — Apple Silicon native offline vector knowledge base backend"
 license = "Apache-2.0"
 requires-python = ">=3.12"
