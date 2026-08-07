@@ -9,7 +9,7 @@ Local vector knowledge base service for the Fusion-MLX ecosystem — 100% offlin
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/Tests-164-success.svg)](tests/)
-[![Version](https://img.shields.io/badge/Version-0.6.5-blue.svg)]()
+[![Version](https://img.shields.io/badge/Version-0.6.6-blue.svg)]()
 
 [Quick Start](#quick-start) · [API Reference](#api-reference) · [Architecture](#architecture) · [Documentation](docs/)
 
@@ -348,6 +348,10 @@ ruff check fusion_rag/
 ```
 
 ---
+
+## What's New in v0.6.6
+
+- **RRF Hybrid Search Fix** — `_rrf_fusion` no longer applies a cosine-scaled `similarity_threshold` (0.3) to rank-fusion scores (max ~0.066); hybrid RRF search now returns matches instead of silently empty results. Regression test added.
 
 ## What's New in v0.6.0
 

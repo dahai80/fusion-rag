@@ -176,11 +176,13 @@ class HybridSearch:
             if r["id"] not in result_map:
                 result_map[r["id"]] = r
 
+        logger.debug(
+            "RRF fusion: threshold=%.4f ignored (RRF scores are rank-based, not cosine-scaled)",
+            threshold,
+        )
         ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         results = []
         for rid, s in ranked:
-            if s < threshold:
-                continue
             entry = dict(result_map.get(rid, {"id": rid}))
             entry["score"] = s
             results.append(entry)

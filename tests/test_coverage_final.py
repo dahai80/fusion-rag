@@ -149,6 +149,15 @@ class TestRerankerFinal:
         results = await hs.search([1.0, 0.0], "test", threshold=0.5)
         assert len(results) == 1
 
+    @pytest.mark.asyncio
+    async def test_rrf_ignores_cosine_threshold(self):
+        store = MagicMock()
+        store.search = MagicMock(return_value=[{"id": "1", "score": 0.9}])
+        store.keyword_search = MagicMock(return_value=[{"id": "1", "score": 0.8}])
+        hs = HybridSearch(store, method="rrf")
+        results = await hs.search([1.0, 0.0], "test", top_k=5, threshold=0.3)
+        assert len(results) == 1, "RRF must not be wiped by a cosine-scaled threshold"
+
 
 # ── Retrievers Extra ──
 
