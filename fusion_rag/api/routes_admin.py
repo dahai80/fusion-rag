@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from .._validators import validate_identifier
 from .app_state import get_kb_manager
@@ -215,12 +215,15 @@ async def get_audit_log(kb_id: str, log_id: int) -> dict[str, Any]:
 
 
 @router.get("/bases/{kb_id}/audit/export", dependencies=[Depends(verify_api_key)])
-async def export_audit_logs(kb_id: str, format: str = "json") -> str:
+async def export_audit_logs(kb_id: str, output_format: str = Query("json", alias="format")) -> str:
+    # M7: param was named `format`, shadowing the builtin. Renamed to
+    # output_format; Query(alias="format") keeps the public ?format= query
+    # param name unchanged.
     _get_base(kb_id)
     from ..engine.audit_logger import AuditLogger
 
     al = AuditLogger(f"{_get_kb_storage_path(kb_id)}/audit.db")
-    return al.export_logs(kb_id, format=format)
+    return al.export_logs(kb_id, fmt=output_format)
 
 
 # ── Incremental Sync ──

@@ -126,9 +126,18 @@ class Reranker:
             )
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"]["content"].strip()
+            if not content:
+                logger.warning("Reranker _score_relevance empty content, query=%s", query[:50])
+                raise ValueError("empty_content")
             return float(content[:4])
-        except Exception:
-            return 5.0
+        except Exception as e:
+            # M2/L1: do NOT return a 5.0 magic midpoint — that makes total LLM
+            # failure look like a confident mediocre score and (per M2) gets
+            # locked in by a test asserting 5.0, so a future fix to fail loudly
+            # would be blocked by the test. Propagate so the caller knows the
+            # single-doc fallback is unavailable.
+            logger.warning("Reranker _score_relevance failed (propagating, no 5.0 fallback): %s", e)
+            raise LLMUnavailable("single-doc relevance scoring failed") from e
 
 
 class HybridSearch:

@@ -135,55 +135,60 @@ class LocalBackend(StoreBackend):
         self.bm25.add_documents(records)
 
     def search(self, query_vector: list[float], top_k: int = 10, threshold: float = 0.0) -> list[dict[str, Any]]:
+        # M3: a genuine search failure (corrupt index, IO) used to return [],
+        # indistinguishable from a legitimate "no matches". Callers (HybridSearch,
+        # routes_search) cannot tell a broken store from an empty one. Let it
+        # raise — an empty table returns [] normally (verified), so only real
+        # errors propagate. metadata-JSON parse stays a per-row warning (one
+        # bad row shouldn't fail the whole search).
         try:
             results = self.table.search(query_vector).metric("cosine").limit(top_k).to_list()
-            filtered = []
-            for r in results:
-                score = 1.0 - r.get("_distance", 0.0)
-                if score < threshold:
-                    continue
-                r["score"] = score
-                r.pop("_distance", None)
-                try:
-                    r["metadata"] = json.loads(r.get("metadata_json", "{}"))
-                except Exception as e:
-                    logger.warning("Failed to parse metadata JSON: %s", e)
-                    r["metadata"] = {}
-                r.pop("metadata_json", None)
-                filtered.append(r)
-            return filtered
         except Exception as e:
-            logger.error("LocalBackend search failed: %s", e)
-            return []
+            logger.error("LocalBackend search failed (propagating, no silent []): %s", e)
+            raise
+        filtered = []
+        for r in results:
+            score = 1.0 - r.get("_distance", 0.0)
+            if score < threshold:
+                continue
+            r["score"] = score
+            r.pop("_distance", None)
+            try:
+                r["metadata"] = json.loads(r.get("metadata_json", "{}"))
+            except Exception as e:
+                logger.warning("Failed to parse metadata JSON: %s", e)
+                r["metadata"] = {}
+            r.pop("metadata_json", None)
+            filtered.append(r)
+        return filtered
 
     def keyword_search(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
         return self.bm25.search(query, top_k)
 
     def delete_by_doc(self, doc_path: str) -> int:
+        # M3: failure used to return 0, indistinguishable from "no matching doc".
+        # Callers (routes_docs delete/replace/scan) ignored the return and
+        # reported success either way — a broken delete looked like "deleted 0".
+        # Let it raise so the route surfaces a real failure. The return value
+        # still means "matched rows" on success.
         safe = doc_path.replace("'", "''")
-        try:
-            result = self.table.delete(f"doc_path = '{safe}'")
-            if isinstance(result, int):
-                count = result
-            elif hasattr(result, "__int__"):
-                count = int(result)
-            elif hasattr(result, "rows_deleted"):
-                count = result.rows_deleted
-            else:
-                logger.debug("delete_by_doc returned unexpected type: %s", type(result))
-                count = 0
-            self.bm25.remove_document(doc_path)
-            return count
-        except Exception as e:
-            logger.warning("LocalBackend delete_by_doc failed: %s", e)
-            return 0
+        result = self.table.delete(f"doc_path = '{safe}'")
+        if isinstance(result, int):
+            count = result
+        elif hasattr(result, "__int__"):
+            count = int(result)
+        elif hasattr(result, "rows_deleted"):
+            count = result.rows_deleted
+        else:
+            logger.debug("delete_by_doc returned unexpected type: %s", type(result))
+            count = 0
+        self.bm25.remove_document(doc_path)
+        return count
 
     def count(self) -> int:
-        try:
-            return self.table.count_rows()
-        except Exception as e:
-            logger.warning("LocalBackend count failed: %s", e)
-            return 0
+        # M3: failure used to return 0, indistinguishable from an empty store.
+        # Stats endpoints would report "0 vectors" on a corrupt index. Raise.
+        return self.table.count_rows()
 
     def clear(self) -> None:
         try:

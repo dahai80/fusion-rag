@@ -7,6 +7,8 @@ import subprocess
 import tempfile
 from typing import Any
 
+import pathspec
+
 from .._validators import validate_git_url
 
 logger = logging.getLogger(__name__)
@@ -47,18 +49,18 @@ class GitLoader:
         self, repo_path: str, patterns: list[str] | None = None, ignore_file: str = ".gitignore"
     ) -> list[str]:
         gitignore_path = os.path.join(repo_path, ignore_file)
-        ignore_patterns = self._parse_gitignore(gitignore_path)
+        ignore_spec = self._parse_gitignore(gitignore_path)
         all_files = []
         for root, dirs, files in os.walk(repo_path):
             if ".git" in dirs:
                 dirs.remove(".git")
             rel_root = os.path.relpath(root, repo_path)
-            if self._is_ignored(rel_root, ignore_patterns):
+            if self._is_ignored(rel_root, ignore_spec):
                 dirs.clear()
                 continue
             for f in files:
                 rel_path = os.path.join(rel_root, f) if rel_root != "." else f
-                if self._is_ignored(rel_path, ignore_patterns):
+                if self._is_ignored(rel_path, ignore_spec):
                     continue
                 if patterns and not any(rel_path.endswith(p.lstrip("*")) for p in patterns):
                     continue
@@ -117,29 +119,24 @@ class GitLoader:
         except FileNotFoundError:
             raise RuntimeError("git is not installed or not in PATH")
 
-    def _parse_gitignore(self, path: str) -> list[str]:
-        patterns = []
+    def _parse_gitignore(self, path: str) -> pathspec.GitIgnoreSpec:
+        # M6: the old naive matcher used substring/basename compares and
+        # ignored gitignore semantics — `!important.log` negation was dropped
+        # (an un-ignored file stayed ignored), `**/glob` and anchored paths
+        # were unsupported. Use pathspec.GitIgnoreSpec for full gitignore
+        # semantics including negation.
         if not os.path.exists(path):
-            return patterns
+            return pathspec.GitIgnoreSpec.from_lines([])
         with open(path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                patterns.append(line)
-        return patterns
+            lines = [ln for ln in f.read().splitlines() if ln.strip() and not ln.strip().startswith("#")]
+        return pathspec.GitIgnoreSpec.from_lines(lines)
 
-    def _is_ignored(self, rel_path: str, patterns: list[str]) -> bool:
-        if not patterns:
+    def _is_ignored(self, rel_path: str, ignore_spec: pathspec.GitIgnoreSpec) -> bool:
+        # M6: normalize to forward slashes (pathspec matches git-style paths);
+        # rel_root == "." for the repo root must not be treated as ignored.
+        if not ignore_spec.patterns:
             return False
-        name = os.path.basename(rel_path)
-        for p in patterns:
-            if p.endswith("/"):
-                if rel_path.startswith(p) or name == p.rstrip("/"):
-                    return True
-            elif p.startswith("*"):
-                if name.endswith(p.lstrip("*")):
-                    return True
-            elif p in (name, rel_path):
-                return True
-        return False
+        norm = rel_path.replace(os.sep, "/")
+        if norm in (".", ""):
+            return False
+        return ignore_spec.match_file(norm)

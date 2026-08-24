@@ -198,22 +198,6 @@ async def status() -> dict[str, Any]:
     }
 
 
-@router.get("/bases/{kb_id}/stats")
-async def kb_stats(kb_id: str) -> dict[str, Any]:
-    kb = _get_base(kb_id)
-    meta_store = _get_meta_store(kb_id)
-    vec_store = _get_vector_store(kb_id)
-    return {
-        "id": kb.id,
-        "name": kb.config.name,
-        "documents": meta_store.doc_count(),
-        "chunks": meta_store.chunk_count(),
-        "vectors": vec_store.count(),
-        "file_count": kb.file_count,
-        "chunk_count": kb.chunk_count,
-    }
-
-
 # ── Mount sub-routers ──
 
 from .routes_admin import router as _admin_router

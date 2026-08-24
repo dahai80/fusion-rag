@@ -274,6 +274,7 @@ All LLM chat calls (`/v1/chat/completions`) go through **fusion-core**'s HTTP cl
 - `with_retry(fn, retries=2)` — automatic retry on 429/5xx and transient connection errors (backoff + jitter)
 - Auth headers passed **per request**, not baked into the pooled client (avoids header leak between instances sharing a base_url)
 - **D-H3 guard**: success path checks for empty/whitespace content and degrades explicitly (logged error/fallback) rather than returning empty content as a valid result
+- **Pool-key timeout caveat (A7)**: the pool key is `loop + base_url` only — the per-call `timeout` is not part of the key, so the first caller's timeout wins for that base_url on a given loop. fusion-rag mitigates by unifying all LLM `_call` timeouts to a shared 60s (`DocumentChain._CALL_TIMEOUT`), making first-call-wins benign. Root cause tracked upstream: [fusion-core#16](https://github.com/dahai80/fusion-core/issues/16)
 
 Modules migrated to fusion-core: `contextualizer`, `query_rewriter`, `reranker`, `rag_chain` (MultiTurnRAG + DocumentChain), `graph_rag`, `streaming` (MetadataExtractor; SSEStreamer keeps raw `httpx.stream`), `evaluator`, `api/routes._generate_answer`.
 

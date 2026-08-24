@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from .document import ParseResult
+from .document import DocumentParser, ParseResult
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +197,3 @@ class Chunker:
             metadata=result.metadata,
             tokens=len(text) // 4,  # Rough token estimate
         )
-
-
-from .document import DocumentParser

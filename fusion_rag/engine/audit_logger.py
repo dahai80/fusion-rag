@@ -136,9 +136,11 @@ class AuditLogger:
             count = cur.fetchone()[0]
         return count
 
-    def export_logs(self, kb_id: str, format: str = "json") -> str:
+    def export_logs(self, kb_id: str, fmt: str = "json") -> str:
+        # M7: param renamed from `format` to `fmt` to avoid shadowing the
+        # builtin. Behavior unchanged.
         rows = self.query_logs(kb_id, limit=100000, offset=0)
-        if format == "csv":
+        if fmt == "csv":
             buf = io.StringIO()
             writer = csv.writer(buf)
             writer.writerow(["id", "kb_id", "query", "caller", "results_count", "latency_ms", "created_at"])
@@ -154,9 +156,9 @@ class AuditLogger:
                         row["created_at"],
                     ]
                 )
-            logger.info("export_logs: kb_id=%s format=csv rows=%d", kb_id, len(rows))
+            logger.info("export_logs: kb_id=%s fmt=csv rows=%d", kb_id, len(rows))
             return buf.getvalue()
-        logger.info("export_logs: kb_id=%s format=json rows=%d", kb_id, len(rows))
+        logger.info("export_logs: kb_id=%s fmt=json rows=%d", kb_id, len(rows))
         return json.dumps(rows, ensure_ascii=False, indent=2)
 
     def delete_old_logs(self, kb_id: str, before_time: float) -> int:
