@@ -220,8 +220,13 @@ class RAGEvaluator:
                 logger.warning("eval RAG empty content, question=%s", question[:50])
                 raise ValueError("empty_content")
         except Exception as e:
-            logger.error("eval RAG answer generation failed: %s", e)
-            answer_text = f"Failed to generate answer: {e}"
+            # L1 residual: do NOT return "Failed to generate answer: {e}" as a
+            # real answer — that string got scored by _score_faithfulness as if
+            # it were the model's output, polluting the metrics. Propagate so
+            # _evaluate_case's outer except records this case as an error
+            # (excluded from the L14 averages), not a 0-score "answer".
+            logger.error("eval RAG answer generation failed (propagating): %s", e)
+            raise LLMUnavailable("eval answer generation failed") from e
 
         seen = set()
         sources = []

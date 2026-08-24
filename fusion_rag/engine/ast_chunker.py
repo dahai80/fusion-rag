@@ -21,17 +21,18 @@ class ASTChunker:
         try:
             tree = ast.parse(source_code)
         except SyntaxError as e:
-            logger.warning("Syntax error in %s at line %s: %s", file_path, e.lineno, e.msg)
-            line_count = source_code.count("\n") + 1
-            return [
-                ASTChunk(
-                    text=source_code,
-                    symbol_name="module_level",
-                    symbol_type="constants",
-                    line_start=1,
-                    line_end=line_count,
-                )
-            ]
+            # L18: AST parse failure previously returned the WHOLE file as one
+            # chunk — a large broken file exceeded embed context and got
+            # silently truncated. Fall back to RecursiveChunker so the text is
+            # split into embed-sized pieces, then map each piece back to line
+            # ranges for ASTChunk.
+            logger.warning(
+                "Syntax error in %s at line %s: %s, falling back to recursive chunker",
+                file_path,
+                e.lineno,
+                e.msg,
+            )
+            return self._recursive_fallback(source_code, file_path)
 
         source_lines = source_code.splitlines()
         chunks: list[ASTChunk] = []
@@ -67,6 +68,54 @@ class ASTChunker:
             chunks.append(self._build_constants_chunk(constant_ranges, source_lines, source_code))
 
         chunks.sort(key=lambda c: c.line_start)
+        return chunks
+
+    def _recursive_fallback(self, source_code: str, file_path: str) -> list[ASTChunk]:
+        # L18: AST parse failed — split with RecursiveChunker instead of
+        # returning the whole file as one chunk. Map each piece to a line
+        # range by accumulating character offsets.
+        from .preprocessor import RecursiveChunker
+
+        if not source_code or not source_code.strip():
+            return []
+        pieces = RecursiveChunker(chunk_size=512, chunk_overlap=64).chunk(source_code)
+        if not pieces:
+            return []
+        line_starts = [1]
+        for ch in source_code:
+            if ch == "\n":
+                line_starts.append(line_starts[-1] + 1)
+        # char offset → line number
+        line_offsets = {}
+        offset = 0
+        for idx, line in enumerate(source_code.splitlines(keepends=True), start=1):
+            line_offsets[offset] = idx
+            offset += len(line)
+        line_offsets[offset] = len(line_starts)
+
+        def _line_at(char_pos: int) -> int:
+            keys = [k for k in line_offsets if k <= char_pos]
+            return line_offsets[max(keys)] if keys else 1
+
+        chunks = []
+        search_from = 0
+        for i, piece in enumerate(pieces):
+            pos = source_code.find(piece, search_from)
+            if pos == -1:
+                pos = search_from
+            ls = _line_at(pos)
+            le = _line_at(pos + len(piece) - 1) if piece else ls
+            chunks.append(
+                ASTChunk(
+                    text=piece,
+                    symbol_name=f"fallback_{i}",
+                    symbol_type="constants",
+                    line_start=ls,
+                    line_end=max(le, ls),
+                )
+            )
+            search_from = pos + len(piece)
+        logger.info("AST fallback produced %d recursive chunks for %s", len(chunks), file_path)
         return chunks
 
     def _extract_class_chunk(

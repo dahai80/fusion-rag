@@ -96,18 +96,40 @@ async def search(kb_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
             logger.warning("search rewrite LLM unavailable, using original query: %s", e)
             rewritten = query
         if isinstance(rewritten, list):
+            # L15: the rewrite-list path previously ran plain vec_store.search
+            # per sub-query, silently dropping hybrid when the client asked for
+            # hybrid=True + rewrite_mode=... (behavior fork vs the non-rewrite
+            # path). Honor use_hybrid per sub-query, and over-fetch so the
+            # post-fusion _apply_search_filters (L10) doesn't truncate below
+            # top_k when many rows are filtered out.
+            fetch_k = max(top_k * 4, top_k)
             all_results = []
             for q in rewritten:
                 qv = await embed.embed(q)
-                if qv and not all(v == 0.0 for v in qv):
-                    all_results.extend(vec_store.search(qv, top_k=top_k, threshold=threshold))
+                if not qv or all(v == 0.0 for v in qv):
+                    continue
+                if use_hybrid:
+                    hs = HybridSearch(vec_store, alpha=hybrid_alpha, method=hybrid_method)
+                    sub_filters = {}
+                    if folder_prefix:
+                        sub_filters["folder_prefix"] = folder_prefix
+                    sub = await hs.search(
+                        qv,
+                        q,
+                        top_k=fetch_k,
+                        threshold=threshold,
+                        filters=sub_filters if sub_filters else None,
+                    )
+                else:
+                    sub = vec_store.search(qv, top_k=fetch_k, threshold=threshold)
+                    sub = _apply_search_filters(sub, folder_prefix, metadata_filter)
+                all_results.extend(sub)
             seen = {}
             for r in all_results:
                 rid = r.get("id", "")
                 if rid not in seen or r.get("score", 0) > seen[rid].get("score", 0):
                     seen[rid] = r
             results = sorted(seen.values(), key=lambda x: x.get("score", 0), reverse=True)[:top_k]
-            results = _apply_search_filters(results, folder_prefix, metadata_filter)
             if doc_type_filter:
                 results = [r for r in results if r.get("doc_type", "") in doc_type_filter]
             if use_rerank:
@@ -133,8 +155,14 @@ async def search(kb_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
             filters=filters if filters else None,
         )
     else:
-        results = vec_store.search(query_vector, top_k=top_k, threshold=threshold)
+        # L10: fetch wider than top_k so _apply_search_filters (folder_prefix /
+        # metadata_filter, applied client-side AFTER the top_k truncation) does
+        # not silently shrink the result set below top_k when many rows are
+        # filtered out. Matching rows may sit just past top_k.
+        fetch_k = top_k * 4 if (folder_prefix or metadata_filter) else top_k
+        results = vec_store.search(query_vector, top_k=fetch_k, threshold=threshold)
         results = _apply_search_filters(results, folder_prefix, metadata_filter)
+        results = results[:top_k]
 
     if doc_type_filter:
         results = [r for r in results if r.get("doc_type", "") in doc_type_filter]
@@ -207,8 +235,10 @@ async def ask(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
             filters=filters if filters else None,
         )
     else:
-        chunks = vec_store.search(query_vector, top_k=top_k, threshold=kb.config.similarity_threshold)
+        fetch_k = top_k * 4 if (folder_prefix or metadata_filter) else top_k
+        chunks = vec_store.search(query_vector, top_k=fetch_k, threshold=kb.config.similarity_threshold)
         chunks = _apply_search_filters(chunks, folder_prefix, metadata_filter)
+        chunks = chunks[:top_k]
 
     if not chunks:
         _audit_and_trajectory(kb_id, question, "ask", [], (time.time() - _start) * 1000)

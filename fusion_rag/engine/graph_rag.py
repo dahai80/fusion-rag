@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -248,10 +247,39 @@ class GraphRAG:
 
     @staticmethod
     def _parse_extraction(content: str) -> dict[str, Any]:
-        match = re.search(r"\{.*\}", content, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
+        # L13: greedy `re.search(r"\{.*\}", content, re.DOTALL)` spanned from the
+        # first `{` to the LAST `}` — LLM preamble/postscript like
+        # "Here is JSON: {...} notes:{...}" captured garbage and JSONDecodeError
+        # returned an empty graph. Scan for the first balanced `{...}` object and
+        # parse that; fall back to empty only if no balanced object exists.
+        start = content.find("{")
+        while start != -1:
+            depth = 0
+            in_str = False
+            esc = False
+            for i in range(start, len(content)):
+                ch = content[i]
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif ch == "\\":
+                        esc = True
+                    elif ch == '"':
+                        in_str = False
+                    continue
+                if ch == '"':
+                    in_str = True
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        candidate = content[start : i + 1]
+                        try:
+                            parsed = json.loads(candidate)
+                            if isinstance(parsed, dict):
+                                return parsed
+                        except json.JSONDecodeError:
+                            break
+            start = content.find("{", start + 1)
         return {"entities": [], "relations": []}

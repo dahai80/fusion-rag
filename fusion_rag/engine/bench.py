@@ -67,7 +67,14 @@ class BenchRunner:
         for q in queries:
             query_text = q.get("query", "")
             expected_doc = q.get("expected_doc", "")
+            # L18: cap top_k so a bench query can't trigger an unbounded vector
+            # scan. 100 is well above any sane retrieval depth and keeps bench
+            # runs bounded.
             top_k = q.get("top_k", 10)
+            if not isinstance(top_k, int) or top_k <= 0:
+                logger.warning("bench query has invalid top_k=%r, defaulting to 10", top_k)
+                top_k = 10
+            top_k = min(top_k, 100)
 
             t0 = time.monotonic()
             try:

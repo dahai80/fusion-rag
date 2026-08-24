@@ -3,6 +3,7 @@ import os
 import shutil
 import sqlite3
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -53,9 +54,16 @@ class VersionManager:
             """)
 
     def create_snapshot(self, kb_id: str, kb_storage_path: str, description: str = "") -> dict:
-        version_id = "v_" + str(int(time.time()))
+        # L8: second snapshot in the same second collided on the timestamp-only
+        # version_id → same dir → second copytree clobbered the first's hard
+        # links. Append a uuid8 so same-second snapshots get distinct dirs;
+        # assert the dir does not exist before writing.
+        version_id = f"v_{int(time.time())}_{uuid.uuid4().hex[:8]}"
         snapshot_dir = Path(kb_storage_path) / "snapshots" / version_id
-        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        if snapshot_dir.exists():
+            logger.error("Snapshot dir already exists (unexpected): %s", snapshot_dir)
+            raise FileExistsError(f"snapshot dir already exists: {snapshot_dir}")
+        snapshot_dir.mkdir(parents=True, exist_ok=False)
 
         logger.info("Creating snapshot %s for kb %s at %s", version_id, kb_id, snapshot_dir)
 

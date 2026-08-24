@@ -152,6 +152,23 @@ class SearchTemplateManager:
         d["doc_type_filter"] = json.loads(d.get("doc_type_filter", "[]"))
         return d
 
+    @staticmethod
+    def _validate_template(template: SearchTemplate) -> None:
+        # L18: custom templates had no param validation — a client could inject
+        # alpha=99 or threshold=-5 and break hybrid fusion / filtering. Reject
+        # out-of-range values loudly rather than persisting poison config.
+        if not template.name or not template.name.strip():
+            raise ValueError("template name is required")
+        if not 0.0 <= template.alpha <= 1.0:
+            raise ValueError(f"alpha must be in [0.0, 1.0], got {template.alpha}")
+        if not 0.0 <= template.threshold <= 1.0:
+            raise ValueError(f"threshold must be in [0.0, 1.0], got {template.threshold}")
+        if not isinstance(template.top_k, int) or not 1 <= template.top_k <= 200:
+            raise ValueError(f"top_k must be an int in [1, 200], got {template.top_k!r}")
+        valid_modes = {"", "hyde", "expand", "condense"}
+        if template.rewrite_mode not in valid_modes:
+            raise ValueError(f"rewrite_mode must be one of {sorted(valid_modes)}, got {template.rewrite_mode!r}")
+
     def list_templates(self, kb_id: str) -> list[dict]:
         with self._cursor() as cur:
             cur.execute(
@@ -185,6 +202,7 @@ class SearchTemplateManager:
         return self._row_to_dict(row)
 
     def create_template(self, kb_id: str, template: SearchTemplate) -> dict:
+        self._validate_template(template)
         now = time.time()
         with self._cursor() as cur:
             cur.execute(
