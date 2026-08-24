@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI
@@ -26,12 +27,6 @@ def create_app(
     fallback_url: str = "",
     fallback_api_key: str = "",
 ) -> FastAPI:
-    app = FastAPI(
-        title="Fusion-RAG",
-        description="Apple Silicon native offline vector knowledge base backend",
-        version="0.6.0",
-    )
-
     kb_manager = KnowledgeBaseManager(storage_dir=kb_storage_dir)
     embed_client = EmbeddingClient(
         base_url=mlx_base_url,
@@ -41,7 +36,35 @@ def create_app(
         fallback_api_key=fallback_api_key,
     )
 
-    set_kb_context(kb_manager, embed_client)
+    # A1/A6: own the resource lifecycle. Without a lifespan the pooled
+    # httpx clients (fusion_core.http_client) and EmbeddingClient's own
+    # clients are never aclose'd on shutdown/reload — FDs leak across reloads
+    # and the LRU pool's eviction tasks never run if the loop is exiting.
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        set_kb_context(kb_manager, embed_client)
+        logger.info("lifespan: startup complete, kb_manager=%d bases", kb_manager.count)
+        try:
+            yield
+        finally:
+            logger.info("lifespan: shutdown — closing clients and pooled connections")
+            try:
+                await embed_client.close()
+            except Exception as e:
+                logger.warning("lifespan: embed_client close failed: %s", e)
+            try:
+                from fusion_core.http_client import close_all
+
+                await close_all()
+            except Exception as e:
+                logger.warning("lifespan: fusion_core close_all failed: %s", e)
+
+    app = FastAPI(
+        title="Fusion-RAG",
+        description="Apple Silicon native offline vector knowledge base backend",
+        version="0.6.0",
+        lifespan=lifespan,
+    )
 
     app.include_router(kb_router)
     app.include_router(mcp_router)

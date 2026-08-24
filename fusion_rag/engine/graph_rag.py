@@ -18,6 +18,8 @@ from typing import Any
 import httpx
 from fusion_core.http_client import get_async_client, with_retry
 
+from .llm_errors import LLMUnavailable
+
 logger = logging.getLogger(__name__)
 
 ENTITY_PROMPT = (
@@ -112,8 +114,11 @@ class GraphRAG:
                 raise ValueError("empty_content")
             return self._parse_extraction(content)
         except Exception as e:
-            logger.warning("Entity extraction failed: %s", e)
-            return {"entities": [], "relations": []}
+            # L1: do not return {"entities": [], "relations": []} — that makes
+            # total LLM failure look like "this text has no entities", silently
+            # producing an empty graph. Propagate so build_graph/caller knows.
+            logger.warning("Entity extraction failed (propagating, no fabricated empty graph): %s", e)
+            raise LLMUnavailable("entity extraction failed") from e
 
     async def build_graph(self, chunks: list[dict], kb_id: str = "") -> dict[str, int]:
         """Extract entities from chunks and store in graph DB."""

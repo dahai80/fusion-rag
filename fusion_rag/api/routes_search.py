@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
+from ..engine.llm_errors import LLMUnavailable
 from ..engine.query_rewriter import QueryRewriter
 from ..engine.reranker import HybridSearch
 
@@ -86,7 +87,14 @@ async def search(kb_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
 
     if rewrite_mode:
         rewriter = QueryRewriter(enabled=True)
-        rewritten = await rewriter.rewrite(query, mode=rewrite_mode)
+        try:
+            rewritten = await rewriter.rewrite(query, mode=rewrite_mode)
+        except LLMUnavailable as e:
+            # L1/L15: rewrite is an enhancement — fall back to the original
+            # query (logged), do NOT 503. The user still gets retrieval; they
+            # just lose the query-expansion lift.
+            logger.warning("search rewrite LLM unavailable, using original query: %s", e)
+            rewritten = query
         if isinstance(rewritten, list):
             all_results = []
             for q in rewritten:
@@ -173,9 +181,14 @@ async def ask(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     if rewrite_mode or history:
         rewriter = QueryRewriter(enabled=True)
         mode = rewrite_mode or ("condense" if history else "hyde")
-        rewritten = await rewriter.rewrite(question, history=history, mode=mode)
-        if isinstance(rewritten, str) and rewritten:
-            question = rewritten
+        try:
+            rewritten = await rewriter.rewrite(question, history=history, mode=mode)
+            if isinstance(rewritten, str) and rewritten:
+                question = rewritten
+        except LLMUnavailable as e:
+            # L1: rewrite is an enhancement; condense failure on multi-turn
+            # means we lose history context — keep original question, log it.
+            logger.warning("ask rewrite LLM unavailable, using original question: %s", e)
 
     query_vector = await embed.embed(question)
     if not query_vector or all(v == 0.0 for v in query_vector):
@@ -206,15 +219,20 @@ async def ask(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
 
     context = "\n\n".join(f"[{c['doc_name']}] {c['text'][:2000]}" for c in chunks)
 
-    answer = await _generate_answer(
-        question,
-        context,
-        chunks,
-        model=model,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        system_prompt=system_prompt,
-    )
+    try:
+        answer = await _generate_answer(
+            question,
+            context,
+            chunks,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system_prompt=system_prompt,
+        )
+    except LLMUnavailable as e:
+        # L9: fusion-mlx down → no fabricated 200 answer. Surface as 502 so
+        # the caller knows generation failed, not "answered with no info".
+        raise HTTPException(502, "Answer generation failed (upstream LLM unavailable)") from e
     _audit_and_trajectory(
         kb_id,
         question,

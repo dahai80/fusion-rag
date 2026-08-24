@@ -90,10 +90,14 @@ class TestQueryRewriter:
 
     @pytest.mark.asyncio
     async def test_rewrite_fallback_on_error(self):
+        # L1: LLM failure raises LLMUnavailable (route layer logs + falls back to
+        # the original query); it no longer silently returns the original query
+        # as if rewrite succeeded.
+        from fusion_rag.engine.llm_errors import LLMUnavailable
+
         rw = QueryRewriter(enabled=True)
-        with patch("httpx.AsyncClient.post", side_effect=Exception("API error")):
-            result = await rw.rewrite("test", mode="hyde")
-            assert result == "test"
+        with patch("httpx.AsyncClient.post", side_effect=Exception("API error")), pytest.raises(LLMUnavailable):
+            await rw.rewrite("test", mode="hyde")
 
     @pytest.mark.asyncio
     async def test_unknown_mode(self):

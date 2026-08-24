@@ -20,6 +20,8 @@ from typing import Any
 import httpx
 from fusion_core.http_client import get_async_client, with_retry
 
+from .llm_errors import LLMUnavailable
+
 logger = logging.getLogger(__name__)
 
 FAITHFULNESS_PROMPT = (
@@ -119,12 +121,21 @@ class RAGEvaluator:
         if not results:
             return {"total": 0, "avg_faithfulness": 0, "avg_relevance": 0}
 
-        avg_f = sum(r.get("faithfulness", 0) for r in results) / len(results)
-        avg_r = sum(r.get("relevance", 0) for r in results) / len(results)
-        avg_cr = sum(r.get("context_recall", 0) for r in results) / len(results)
+        # L14: averages must exclude errored cases — including them
+        # (faithfulness=0) drags the mean down and masks LLM-side failures as
+        # "low-quality answers". Errors are reported per-case, not averaged.
+        scored = [r for r in results if "error" not in r]
+        if scored:
+            avg_f = sum(r.get("faithfulness", 0) for r in scored) / len(scored)
+            avg_r = sum(r.get("relevance", 0) for r in scored) / len(scored)
+            avg_cr = sum(r.get("context_recall", 0) for r in scored) / len(scored)
+        else:
+            avg_f = avg_r = avg_cr = 0.0
 
         return {
             "total": len(results),
+            "scored": len(scored),
+            "errors": len(results) - len(scored),
             "avg_faithfulness": round(avg_f, 3),
             "avg_relevance": round(avg_r, 3),
             "avg_context_recall": round(avg_cr, 3),
@@ -252,12 +263,17 @@ class RAGEvaluator:
                 logger.warning("Faithfulness empty content, answer=%s", answer[:50])
                 raise ValueError("empty_content")
             match = re.search(r"\{.*\}", content, re.DOTALL)
-            if match:
-                data = json.loads(match.group())
-                return 1.0 if data.get("faithful", False) else 0.0
+            if not match:
+                logger.warning("Faithfulness no JSON in content: %s", content[:80])
+                raise ValueError("no_json")
+            data = json.loads(match.group())
+            return 1.0 if data.get("faithful", False) else 0.0
         except Exception as e:
-            logger.warning("Faithfulness scoring failed: %s", e)
-        return 0.5
+            # L1: do not return 0.5 — a magic midpoint makes a failed LLM
+            # score look like a real mediocre faithfulness. Propagate so the
+            # per-test catch in evaluate() records it as an error, not a score.
+            logger.warning("Faithfulness scoring failed (propagating): %s", e)
+            raise LLMUnavailable("faithfulness scoring failed") from e
 
     async def _score_relevance(self, query: str, answer: str) -> float:
         if not answer:
@@ -283,12 +299,15 @@ class RAGEvaluator:
                 logger.warning("Relevance empty content, query=%s", query[:50])
                 raise ValueError("empty_content")
             match = re.search(r"\{.*\}", content, re.DOTALL)
-            if match:
-                data = json.loads(match.group())
-                return min(data.get("score", 0) / 10.0, 1.0)
+            if not match:
+                logger.warning("Relevance no JSON in content: %s", content[:80])
+                raise ValueError("no_json")
+            data = json.loads(match.group())
+            return min(data.get("score", 0) / 10.0, 1.0)
         except Exception as e:
-            logger.warning("Relevance scoring failed: %s", e)
-        return 0.5
+            # L1: do not return 0.5 — magic midpoint masks failed scoring.
+            logger.warning("Relevance scoring failed (propagating): %s", e)
+            raise LLMUnavailable("relevance scoring failed") from e
 
     @staticmethod
     def _compute_context_recall(retrieved: list[dict], expected_docs: list[str]) -> float:

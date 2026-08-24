@@ -15,6 +15,8 @@ from typing import Any
 import httpx
 from fusion_core.http_client import get_async_client, with_retry
 
+from .llm_errors import LLMUnavailable
+
 logger = logging.getLogger(__name__)
 
 CHARS_PER_TOKEN_EN = 4.0
@@ -62,6 +64,10 @@ class MultiTurnRAG:
 
     async def ask(self, question: str, context: str = "", session_id: str = "") -> dict[str, Any]:
         history = self._resolve_history(session_id)
+        # L4: trim BEFORE building messages — otherwise this turn consumes an
+        # unbounded history (the token-budget break in _build_messages is the
+        # only guard) and trimming only takes effect next turn.
+        self._trim_history(history)
         messages = self._build_messages(question, context, history)
 
         try:
@@ -86,13 +92,17 @@ class MultiTurnRAG:
                 raise ValueError("empty_content")
             usage = data.get("usage", {})
         except Exception as e:
-            logger.error("MultiTurnRAG ask failed: %s", e)
-            answer = f"Error: {e}"
-            usage = {}
+            # L1/L3: do NOT return "Error: {e}" as a 200 answer — that makes an
+            # LLM failure look like a valid (if terse) response AND gets written
+            # into history as an assistant message, poisoning subsequent turns.
+            # Propagate so the caller maps to an error response; history stays
+            # unchanged (no user/assistant pair appended on failure).
+            logger.error("MultiTurnRAG ask failed (propagating, not poisoning history): %s", e)
+            raise LLMUnavailable("multi-turn ask failed") from e
 
+        # Success — record the turn. Only real answers enter history.
         history.append({"role": "user", "content": question})
         history.append({"role": "assistant", "content": answer})
-        self._trim_history(history)
 
         result = {
             "answer": answer,
@@ -135,14 +145,25 @@ class MultiTurnRAG:
             )
             messages.append({"role": "system", "content": prompt})
 
-        # Add history within token budget (most recent first)
+        # L2: explicit 3-segment build — system → history (chronological) → user.
+        # Before: `messages.insert(len(messages) - 0 if not context else 1, h)`
+        # — `len-0` is a no-op, so without context history was appended at the
+        # END (then a user message appended after it), producing reversed
+        # history plus a duplicated user question. Iterate history in forward
+        # order, within the token budget, so the earliest affordable turns drop
+        # first and the most-recent context is kept.
         remaining = self.token_budget - estimate_tokens(context) - 500
+        # Keep the most-recent turns that fit: scan from newest to oldest to
+        # find the cut, then append the kept slice in chronological order.
+        kept_rev = []
         for h in reversed(history):
             h_tokens = estimate_tokens(h.get("content", ""))
             if remaining - h_tokens < 0:
                 break
-            messages.insert(len(messages) - 0 if not context else 1, h)
+            kept_rev.append(h)
             remaining -= h_tokens
+        for h in reversed(kept_rev):
+            messages.append(h)
 
         if context:
             messages.append({"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"})

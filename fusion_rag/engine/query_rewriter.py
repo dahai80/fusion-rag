@@ -13,6 +13,8 @@ import logging
 import httpx
 from fusion_core.http_client import get_async_client, with_retry
 
+from .llm_errors import LLMUnavailable
+
 logger = logging.getLogger(__name__)
 
 HYDE_PROMPT = (
@@ -73,8 +75,12 @@ class QueryRewriter:
             logger.warning("Unknown rewrite mode '%s', returning original query", mode)
             return query
         except Exception as e:
-            logger.warning("Query rewrite failed (mode=%s): %s", mode, e)
-            return query
+            # L1: do not silently return the original query — that makes LLM
+            # failure look like a successful (no-op) rewrite, degrading
+            # retrieval quality invisibly. Propagate so the route layer logs
+            # the degradation and decides: proceed with original query or 503.
+            logger.warning("Query rewrite failed (mode=%s, propagating): %s", mode, e)
+            raise LLMUnavailable(f"query rewrite failed (mode={mode})") from e
 
     async def _hyde(self, query: str) -> str:
         prompt = HYDE_PROMPT.format(query=query)

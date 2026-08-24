@@ -16,6 +16,8 @@ from typing import Any
 import httpx
 from fusion_core.http_client import get_async_client, with_retry
 
+from .llm_errors import LLMUnavailable
+
 logger = logging.getLogger(__name__)
 
 
@@ -85,8 +87,12 @@ class Reranker:
                 raise ValueError("empty_content")
             return self._parse_scores(content, len(docs))
         except Exception as e:
-            logger.warning("Batch rerank failed, fallback to original scores: %s", e)
-            return [doc.get("score", 5.0) for doc in docs]
+            # L1: do NOT return a 5.0 magic array — that makes total LLM
+            # failure look like a successful rerank with confident scores.
+            # Propagate so the route layer maps to a logged fallback (original
+            # order) rather than a silent fabricated rerank.
+            logger.warning("Batch rerank failed (propagating, no fabricated scores): %s", e)
+            raise LLMUnavailable() from e
 
     def _parse_scores(self, content: str, expected: int) -> list[float]:
         try:

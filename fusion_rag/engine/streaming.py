@@ -9,6 +9,8 @@ from typing import Any
 import httpx
 from fusion_core.http_client import get_async_client, with_retry
 
+from .llm_errors import LLMUnavailable
+
 logger = logging.getLogger(__name__)
 
 
@@ -105,12 +107,16 @@ class MetadataExtractor:
             import re
 
             match = re.search(r"\{.*\}", content, re.DOTALL)
-            if match:
-                return json.loads(match.group())
-            logger.warning("MetadataExtractor no JSON in content, doc_name=%s", doc_name)
+            if not match:
+                logger.warning("MetadataExtractor no JSON in content, doc_name=%s", doc_name)
+                raise ValueError("no_json")
+            return json.loads(match.group())
         except Exception as e:
-            logger.debug("Metadata extraction failed: %s", e)
-        return {"title": doc_name, "language": "unknown", "topics": []}
+            # L1: do not return fabricated default metadata — that makes LLM
+            # failure look like a successful extraction with placeholder
+            # fields. Propagate so the caller knows extraction is unavailable.
+            logger.warning("Metadata extraction failed (propagating, no fabricated metadata): %s", e)
+            raise LLMUnavailable("metadata extraction failed") from e
 
 
 class ResultCache:

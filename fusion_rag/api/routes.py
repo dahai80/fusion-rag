@@ -9,6 +9,7 @@ from fusion_core.http_client import get_async_client, with_retry
 from .._validators import validate_identifier
 from ..embed.client import EmbeddingClient
 from ..engine.knowledge_base import KnowledgeBaseManager
+from ..engine.llm_errors import LLMUnavailable
 from ..engine.reranker import Reranker
 from ..store.metadata_store import MetadataStore
 from ..store.vector_store import VectorStore
@@ -114,8 +115,12 @@ async def _do_rerank(query: str, results: list[dict], top_k: int) -> list[dict]:
         mlx_base = _get_embed_client().base_url.replace("/v1", "")
         reranker = Reranker(mlx_url=mlx_base)
         return await reranker.rerank(query, results, top_k=top_k)
-    except Exception as e:
-        logger.error("rerank failed: %s", e)
+    except LLMUnavailable as e:
+        # L1: rerank is an enhancement. On LLM failure fall back to original
+        # retrieval order — logged, not silent. Narrow catch: programmer bugs
+        # (AttributeError etc.) must surface as 500, not be masked as rerank
+        # failure.
+        logger.warning("rerank LLM unavailable, returning original order: %s", e)
         return results[:top_k]
 
 
@@ -167,8 +172,11 @@ async def _generate_answer(
             logger.warning("RAG answer empty content, question=%s", question[:50])
             raise ValueError("empty_content")
     except Exception as e:
+        # L9: do not return "Failed to generate answer: {e}" with HTTP 200 —
+        # that makes a down upstream (fusion-mlx) look like a successful (if
+        # unhelpful) answer. Propagate so the ask endpoint maps to 502.
         logger.error("RAG answer generation failed: %s", e)
-        answer_text = f"Failed to generate answer: {e}"
+        raise LLMUnavailable("answer generation failed") from e
 
     seen = set()
     sources = []

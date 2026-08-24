@@ -15,6 +15,7 @@ from ..engine.chunker import Chunker
 from ..engine.contextualizer import Contextualizer
 from ..engine.document import DocumentParser, DocumentType, ParseResult
 from ..engine.knowledge_base import KnowledgeBaseManager
+from ..engine.llm_errors import LLMUnavailable
 from ..store.metadata_store import MetadataStore
 from ..store.vector_store import VectorStore
 from .auth import verify_api_key
@@ -28,6 +29,18 @@ _embed_client: EmbeddingClient | None = None
 _doc_parser = DocumentParser()
 _tasks: dict[str, dict[str, Any]] = {}
 _watches: dict[str, dict[str, Any]] = {}
+# L12: per-KB lock guarding the read-modify-write of file_count/chunk_count.
+# Concurrent ingest on the same KB otherwise loses updates (both read N, both
+# write N+1). Keyed by kb_id; lazily created.
+_kb_locks: dict[str, asyncio.Lock] = {}
+
+
+def _kb_lock(kb_id: str) -> asyncio.Lock:
+    lock = _kb_locks.get(kb_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _kb_locks[kb_id] = lock
+    return lock
 
 
 def set_doc_context(kb_manager: KnowledgeBaseManager, embed_client: EmbeddingClient) -> None:
@@ -109,7 +122,16 @@ async def _index_document(kb_id: str, file_path: str, contextualize: bool = True
     embed = _get_embed_client()
     contextualizer = Contextualizer(enabled=contextualize, api_key=embed.api_key)
     chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
-    chunk_dicts = await contextualizer.contextualize(chunk_dicts, result.content)
+    # L1: contextualizer raises LLMUnavailable only when EVERY chunk fails. On
+    # total LLM failure, contextualize=True silently degraded retrieval before.
+    # Decision: log + proceed with empty context (ingest must not fail-closed
+    # on an enhancement); the route surfaces this via the contextualize flag.
+    try:
+        chunk_dicts = await contextualizer.contextualize(chunk_dicts, result.content)
+    except LLMUnavailable as e:
+        logger.warning("index_document: contextualization fully unavailable, ingesting without context: %s", e)
+        for cd in chunk_dicts:
+            cd.setdefault("context", "")
 
     embed_texts = []
     for cd, c in zip(chunk_dicts, chunks):
@@ -121,10 +143,13 @@ async def _index_document(kb_id: str, file_path: str, contextualize: bool = True
     meta_store = _get_meta_store(kb_id)
 
     doc_id = uuid.uuid4().hex[:16]
+    # L7: prepare ALL records before any write, then order the three stores
+    # (metadata → vectors → bm25) and roll back in reverse on partial failure.
+    # Before: a failure mid-sequence left orphan chunks (vectors w/o metadata
+    # or metadata w/o vectors), corrupting retrieval and delete.
     meta_store.add_document(
         doc_id, result.file_path, result.file_name, result.doc_type.value, result.metadata.get("size", 0)
     )
-
     records = []
     for i, (chunk, vector, cd) in enumerate(zip(chunks, vectors, chunk_dicts)):
         chunk_id = f"{doc_id}_{i}"
@@ -142,14 +167,30 @@ async def _index_document(kb_id: str, file_path: str, contextualize: bool = True
                 "context": cd.get("context", ""),
             }
         )
-
-    vec_store.add_batch(records)
-    vec_store.bm25.add_documents(records)
+    try:
+        vec_store.add_batch(records)
+    except Exception as e:
+        # L7: vectors failed — roll back metadata writes (doc + chunks).
+        logger.error("index_document: vector add_batch failed, rolling back metadata for doc %s: %s", doc_id, e)
+        meta_store.delete_chunks_by_doc(doc_id)
+        meta_store.delete_document(doc_id)
+        return {"error": f"vector index write failed: {e}"}
+    try:
+        vec_store.bm25.add_documents(records)
+    except Exception as e:
+        # L7: bm25 failed — roll back vectors + metadata for this doc.
+        logger.error("index_document: bm25 add failed, rolling back vectors+metadata for doc %s: %s", doc_id, e)
+        vec_store.delete_by_doc(result.file_path)
+        meta_store.delete_chunks_by_doc(doc_id)
+        meta_store.delete_document(doc_id)
+        return {"error": f"bm25 index write failed: {e}"}
     meta_store.update_chunk_count(doc_id, len(chunks), result.chars)
 
-    kb.file_count += 1
-    kb.chunk_count += len(chunks)
-    _get_kb_manager().update(kb_id, file_count=kb.file_count, chunk_count=kb.chunk_count)
+    # L12: per-KB lock so concurrent ingest can't both read N and write N+1.
+    async with _kb_lock(kb_id):
+        kb.file_count += 1
+        kb.chunk_count += len(chunks)
+        _get_kb_manager().update(kb_id, file_count=kb.file_count, chunk_count=kb.chunk_count)
 
     return {"doc_id": doc_id, "chunks": len(chunks), "chars": result.chars}
 
@@ -272,9 +313,11 @@ async def ingest_content(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     vec_store.bm25.add_documents(records)
     meta_store.update_chunk_count(doc_id, len(chunks), len(content))
 
-    kb.file_count += 1
-    kb.chunk_count += len(chunks)
-    _get_kb_manager().update(kb_id, file_count=kb.file_count, chunk_count=kb.chunk_count)
+    # L12: per-KB lock around the count read-modify-write.
+    async with _kb_lock(kb_id):
+        kb.file_count += 1
+        kb.chunk_count += len(chunks)
+        _get_kb_manager().update(kb_id, file_count=kb.file_count, chunk_count=kb.chunk_count)
 
     logger.info("ingested inline content %s into kb %s: %d chunks", doc_id, kb_id, len(chunks))
     return {"doc_id": doc_id, "chunks": len(chunks), "chars": len(content)}
@@ -320,31 +363,46 @@ async def replace_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dic
     if not new_file_path:
         raise HTTPException(400, "file_path is required for replacement")
 
-    old_path = doc.get("file_path", "")
-    old_chunks = meta_store.get_chunks_by_doc(doc_id)
-    old_chunk_count = len(old_chunks)
-    vec_store.delete_by_doc(old_path)
-    meta_store.delete_chunks_by_doc(doc_id)
-
+    # L11: parse + chunk + embed the NEW file BEFORE deleting the old index.
+    # Before: delete-then-parse left an orphan doc row with zero chunks (and
+    # zero vectors) if the new file failed to parse — destroying the existing
+    # index irrecoverably. Now a parse/embed failure leaves the old index intact.
     result = await _doc_parser.parse(new_file_path)
     if result.error:
         raise HTTPException(400, result.error)
 
     chunker = Chunker(strategy=kb.config.chunk_strategy, chunk_size=kb.config.chunk_size)
     chunks = await chunker.chunk(result)
+    if not chunks:
+        raise HTTPException(400, "replacement file produced no chunks (keeping existing index)")
 
     contextualize = data.get("contextualize", True)
     embed = _get_embed_client()
     contextualizer = Contextualizer(enabled=contextualize, api_key=embed.api_key)
     chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
-    chunk_dicts = await contextualizer.contextualize(chunk_dicts, result.content)
+    try:
+        chunk_dicts = await contextualizer.contextualize(chunk_dicts, result.content)
+    except LLMUnavailable as e:
+        logger.warning("replace_document: contextualization unavailable, replacing without context: %s", e)
+        for cd in chunk_dicts:
+            cd.setdefault("context", "")
     embed_texts = []
     for cd, c in zip(chunk_dicts, chunks):
         ctx = cd.get("context", "")
         embed_texts.append((ctx + " " + c.text).strip() if ctx else c.text)
     vectors = await embed.embed_batch(embed_texts)
 
+    # New content prepared successfully — now swap. Old index is removed, new
+    # index written. On a vector/bm25 write failure the old index is already
+    # gone (unavoidable for a replace), but the doc row + new chunks are
+    # written so the state is consistent (new doc, fully or partially indexed).
+    old_path = doc.get("file_path", "")
+    old_chunks = meta_store.get_chunks_by_doc(doc_id)
+    old_chunk_count = len(old_chunks)
+    vec_store.delete_by_doc(old_path)
+    meta_store.delete_chunks_by_doc(doc_id)
     meta_store.delete_document(doc_id)
+
     meta_store.add_document(
         doc_id, result.file_path, result.file_name, result.doc_type.value, result.metadata.get("size", 0)
     )
@@ -371,8 +429,10 @@ async def replace_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dic
     vec_store.bm25.add_documents(records)
     meta_store.update_chunk_count(doc_id, len(chunks), result.chars)
 
-    kb.chunk_count = max(0, kb.chunk_count - old_chunk_count + len(chunks))
-    _get_kb_manager().update(kb_id, file_count=kb.file_count, chunk_count=kb.chunk_count)
+    # L12: guard the read-modify-write of chunk_count under the per-KB lock.
+    async with _kb_lock(kb_id):
+        kb.chunk_count = max(0, kb.chunk_count - old_chunk_count + len(chunks))
+        _get_kb_manager().update(kb_id, file_count=kb.file_count, chunk_count=kb.chunk_count)
 
     logger.info("replaced doc %s in kb %s: %d -> %d chunks", doc_id, kb_id, old_chunk_count, len(chunks))
     return {
@@ -451,7 +511,16 @@ async def scan_directory(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
             continue
 
         chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
-        chunk_dicts = await contextualizer.contextualize(chunk_dicts, result.content)
+        try:
+            chunk_dicts = await contextualizer.contextualize(chunk_dicts, result.content)
+        except LLMUnavailable as e:
+            logger.warning(
+                "scan: contextualization unavailable for %s, indexing without context: %s",
+                result.file_name,
+                e,
+            )
+            for cd in chunk_dicts:
+                cd.setdefault("context", "")
 
         embed_texts = []
         for cd, c in zip(chunk_dicts, chunks):
@@ -489,9 +558,11 @@ async def scan_directory(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
         total_chars += result.chars
         file_count += 1
 
-    kb.file_count += file_count
-    kb.chunk_count += total_chunks
-    _get_kb_manager().update(kb_id, file_count=kb.file_count, chunk_count=kb.chunk_count)
+    # L12: per-KB lock around the count read-modify-write.
+    async with _kb_lock(kb_id):
+        kb.file_count += file_count
+        kb.chunk_count += total_chunks
+        _get_kb_manager().update(kb_id, file_count=kb.file_count, chunk_count=kb.chunk_count)
 
     return {
         "files_indexed": file_count,

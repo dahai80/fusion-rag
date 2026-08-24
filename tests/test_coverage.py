@@ -351,13 +351,16 @@ class TestPreprocessorAdvanced:
 class TestRerankerAdvanced:
     @pytest.mark.asyncio
     async def test_rerank_failure_neutral_score(self):
+        # L1: total LLM failure must propagate as LLMUnavailable, not a 5.0
+        # magic-score array that looks like a confident rerank. The route layer
+        # (_do_rerank) catches this and falls back to original order.
+        from fusion_rag.engine.llm_errors import LLMUnavailable
         from fusion_rag.engine.reranker import Reranker
         r = Reranker()
         with patch("httpx.AsyncClient.post", new=AsyncMock(side_effect=RuntimeError("fail"))):
             docs = [{"id": "1", "text": "test"}]
-            results = await r.rerank("query", docs, top_k=1)
-            assert len(results) == 1
-            assert results[0]["score"] == 5.0  # Neutral score
+            with pytest.raises(LLMUnavailable):
+                await r.rerank("query", docs, top_k=1)
 
 
 # ── Connectors ──
@@ -438,11 +441,13 @@ class TestStreamingAdvanced:
 
     @pytest.mark.asyncio
     async def test_metadata_extractor_failure(self):
+        # L1: total LLM failure must propagate as LLMUnavailable, not return a
+        # fabricated default-metadata dict that looks like a successful extraction.
+        from fusion_rag.engine.llm_errors import LLMUnavailable
         from fusion_rag.engine.streaming import MetadataExtractor
         extractor = MetadataExtractor()
-        with patch("httpx.AsyncClient.post", side_effect=RuntimeError("fail")):
-            meta = await extractor.extract("text", "doc.md")
-            assert meta["language"] == "unknown"
+        with patch("httpx.AsyncClient.post", side_effect=RuntimeError("fail")), pytest.raises(LLMUnavailable):
+            await extractor.extract("text", "doc.md")
 
 
 # ── Retrievers ──
