@@ -8,8 +8,8 @@ Local vector knowledge base service for the Fusion-MLX ecosystem — 100% offlin
 
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-164-success.svg)](tests/)
-[![Version](https://img.shields.io/badge/Version-0.6.7-blue.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-234-success.svg)](tests/)
+[![Version](https://img.shields.io/badge/Version-0.6.8-blue.svg)]()
 
 [Quick Start](#quick-start) · [API Reference](#api-reference) · [Architecture](#architecture) · [Documentation](docs/)
 
@@ -274,6 +274,7 @@ All LLM chat calls (`/v1/chat/completions`) go through **fusion-core**'s HTTP cl
 - `with_retry(fn, retries=2)` — automatic retry on 429/5xx and transient connection errors (backoff + jitter)
 - Auth headers passed **per request**, not baked into the pooled client (avoids header leak between instances sharing a base_url)
 - **D-H3 guard**: success path checks for empty/whitespace content and degrades explicitly (logged error/fallback) rather than returning empty content as a valid result
+- **Pool-key timeout caveat (A7)**: the pool key is `loop + base_url` only — the per-call `timeout` is not part of the key, so the first caller's timeout wins for that base_url on a given loop. fusion-rag mitigates by unifying all LLM `_call` timeouts to a shared 60s (`DocumentChain._CALL_TIMEOUT`), making first-call-wins benign. Root cause tracked upstream: [fusion-core#16](https://github.com/dahai80/fusion-core/issues/16)
 
 Modules migrated to fusion-core: `contextualizer`, `query_rewriter`, `reranker`, `rag_chain` (MultiTurnRAG + DocumentChain), `graph_rag`, `streaming` (MetadataExtractor; SSEStreamer keeps raw `httpx.stream`), `evaluator`, `api/routes._generate_answer`.
 
@@ -326,6 +327,7 @@ Modules migrated to fusion-core: `contextualizer`, `query_rewriter`, `reranker`,
 | `FUSION_RAG_EMBED` | BGE-M3 | Embedding model |
 | `FUSION_RAG_API_KEY` | (empty) | API key auth (disabled if empty) |
 | `FUSION_RAG_AUTH_BACKEND` | apikey | Auth backend: `apikey` or `none` |
+| `FUSION_RAG_INGEST_ROOTS` | (empty) | Colon-separated allowed roots for file ingest/scan/watch. Empty = no confinement (local-first, unrestricted). Set to confine reads and block path traversal / LFI |
 | `FUSION_RAG_SYSTEM_PROMPT` | (built-in) | Custom system prompt for RAG answer generation |
 | `FUSION_RAG_FALLBACK_URL` | (empty) | Cloud embedding fallback URL |
 | `FUSION_RAG_FALLBACK_API_KEY` | (empty) | Cloud fallback API key |

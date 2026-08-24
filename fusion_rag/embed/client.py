@@ -15,6 +15,14 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+class EmbeddingError(RuntimeError):
+    """Raised when embedding fails after all providers (F7 fail-loud).
+
+    Distinguished from generic errors so callers can surface a clear
+    "embedding unavailable" message instead of persisting zero vectors.
+    """
+
+
 class EmbeddingClient:
     """Generates text embeddings by calling fusion-mlx's /v1/embeddings.
 
@@ -97,12 +105,24 @@ class EmbeddingClient:
             self._fallback_client = None
 
     async def embed(self, text: str) -> list[float]:
-        """Embed a single text string. Returns a vector of floats."""
+        """Embed a single text string. Returns a vector of floats.
+
+        Raises EmbeddingError on total failure (never returns a zero vector).
+        """
         results = await self.embed_batch([text])
-        return results[0] if results else []
+        if not results:
+            raise EmbeddingError("embed_batch returned no vectors")
+        vec = results[0]
+        if not vec or all(v == 0.0 for v in vec):
+            raise EmbeddingError("embedding produced a zero vector (all providers failed)")
+        return vec
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """Embed a batch of texts. Returns a list of vectors."""
+        """Embed a batch of texts. Returns a list of vectors.
+
+        Raises EmbeddingError if any provider path yields zero vectors, so
+        callers never persist poison into the cache or vector store (F7).
+        """
         if not texts:
             return []
 
@@ -127,10 +147,14 @@ class EmbeddingClient:
         for i in range(0, len(uncached_texts), self.batch_size):
             batch = uncached_texts[i : i + self.batch_size]
             vectors = await self._call_embed_api(batch)
+            # F7: reject zero vectors from failure paths before they reach the cache/store.
+            for v in vectors:
+                if not v or all(x == 0.0 for x in v):
+                    raise EmbeddingError("embedding produced a zero vector (provider failure)")
             all_vectors.extend(vectors)
 
-        # Cache new results
-        if self._cache and all_vectors:
+        # Cache new results — only non-zero vectors (guard repeated in loop above)
+        if self._cache and all_vectors and all(any(x != 0.0 for x in v) for v in all_vectors):
             self._cache.set_batch(uncached_texts, all_vectors, self.model)
 
         # Merge cached + new
@@ -211,7 +235,9 @@ class EmbeddingClient:
             logger.warning("Local embedding returned zero vectors")
         except Exception as e:
             logger.error("Local embedding failed: %s", e)
-        return [[0.0] * 1024 for _ in texts]
+        # F7: never return zero vectors — raise so callers fail loud instead of
+        # persisting poison into cache + vector store.
+        raise EmbeddingError("all embedding providers failed (MLX + fallback + local)")
 
     async def health(self) -> bool:
         """Check if embedding is available (MLX HTTP or local sentence-transformers)."""

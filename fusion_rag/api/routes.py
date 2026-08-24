@@ -6,18 +6,16 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from fusion_core.http_client import get_async_client, with_retry
 
-from ..embed.client import EmbeddingClient
-from ..engine.knowledge_base import KnowledgeBaseManager
+from .._validators import validate_identifier
+from ..engine.llm_errors import LLMUnavailable
 from ..engine.reranker import Reranker
 from ..store.metadata_store import MetadataStore
 from ..store.vector_store import VectorStore
+from .app_state import get_embed_client, get_kb_manager
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/kb", tags=["knowledge-base"])
-
-_kb_manager: KnowledgeBaseManager | None = None
-_embed_client: EmbeddingClient | None = None
 
 _DEFAULT_SYSTEM_PROMPT = (
     "You are a knowledge base assistant. Answer the user's question based "
@@ -26,35 +24,23 @@ _DEFAULT_SYSTEM_PROMPT = (
 )
 
 
-def set_kb_context(kb_manager: KnowledgeBaseManager, embed_client: EmbeddingClient) -> None:
-    global _kb_manager, _embed_client
-    _kb_manager = kb_manager
-    _embed_client = embed_client
-
-    from .routes_admin import set_admin_kb_manager as _set_admin
-    from .routes_docs import set_doc_context as _set_doc
-    from .routes_kb import set_kb_context as _set_kb
-    from .routes_project import set_project_context as _set_proj
-
-    _set_kb(kb_manager, embed_client)
-    _set_doc(kb_manager, embed_client)
-    _set_admin(kb_manager)
-    _set_proj(kb_manager)
-
-
-def _get_kb_manager() -> KnowledgeBaseManager:
-    if _kb_manager is None:
-        raise HTTPException(503, "Knowledge base manager not initialized")
-    return _kb_manager
-
-
-def _get_embed_client() -> EmbeddingClient:
-    if _embed_client is None:
-        raise HTTPException(503, "Embedding client not initialized")
-    return _embed_client
+# 硬伤1: per-app state lives on app.state (populated by init_app_state in the
+# lifespan) and is read per-request via a contextvar. These no-arg accessors
+# delegate to app_state so existing callers (_get_base, _do_rerank,
+# _generate_answer, and the `from .routes import _get_embed_client` in
+# routes_search) keep working without a Request parameter.
+_get_kb_manager = get_kb_manager
+_get_embed_client = get_embed_client
 
 
 def _get_base(kb_id: str):
+    # F12: confine kb_id to the identifier charset before it reaches any path
+    # construction (vector_path / metadata_path). Without this, a kb_id of
+    # "../etc" traverses out of the stores root.
+    try:
+        validate_identifier(kb_id, field="kb_id")
+    except ValueError:
+        raise HTTPException(400, f"Invalid kb_id: {kb_id}")
     try:
         return _get_kb_manager().get(kb_id)
     except KeyError:
@@ -106,8 +92,12 @@ async def _do_rerank(query: str, results: list[dict], top_k: int) -> list[dict]:
         mlx_base = _get_embed_client().base_url.replace("/v1", "")
         reranker = Reranker(mlx_url=mlx_base)
         return await reranker.rerank(query, results, top_k=top_k)
-    except Exception as e:
-        logger.error("rerank failed: %s", e)
+    except LLMUnavailable as e:
+        # L1: rerank is an enhancement. On LLM failure fall back to original
+        # retrieval order — logged, not silent. Narrow catch: programmer bugs
+        # (AttributeError etc.) must surface as 500, not be masked as rerank
+        # failure.
+        logger.warning("rerank LLM unavailable, returning original order: %s", e)
         return results[:top_k]
 
 
@@ -159,8 +149,11 @@ async def _generate_answer(
             logger.warning("RAG answer empty content, question=%s", question[:50])
             raise ValueError("empty_content")
     except Exception as e:
+        # L9: do not return "Failed to generate answer: {e}" with HTTP 200 —
+        # that makes a down upstream (fusion-mlx) look like a successful (if
+        # unhelpful) answer. Propagate so the ask endpoint maps to 502.
         logger.error("RAG answer generation failed: %s", e)
-        answer_text = f"Failed to generate answer: {e}"
+        raise LLMUnavailable("answer generation failed") from e
 
     seen = set()
     sources = []
@@ -184,28 +177,24 @@ async def _generate_answer(
 
 @router.get("/status")
 async def status() -> dict[str, Any]:
-    kb_count = _get_kb_manager().count if _kb_manager else 0
-    embed_ok = await _get_embed_client().health() if _embed_client else False
+    # 硬伤1: read via contextvar accessors. /status is a readiness probe, so
+    # if the app state isn't bound yet (startup race / direct call) degrade
+    # gracefully to "not ready" rather than 503-ing the probe.
+    try:
+        kb_count = _get_kb_manager().count
+    except HTTPException:
+        kb_count = 0
+    try:
+        embed_ok = await _get_embed_client().health()
+    except HTTPException:
+        embed_ok = False
+    except Exception as e:
+        logger.warning("/status: embed health check failed: %s", e)
+        embed_ok = False
     return {
         "status": "ok",
         "knowledge_bases": kb_count,
         "embedding_available": embed_ok,
-    }
-
-
-@router.get("/bases/{kb_id}/stats")
-async def kb_stats(kb_id: str) -> dict[str, Any]:
-    kb = _get_base(kb_id)
-    meta_store = _get_meta_store(kb_id)
-    vec_store = _get_vector_store(kb_id)
-    return {
-        "id": kb.id,
-        "name": kb.config.name,
-        "documents": meta_store.doc_count(),
-        "chunks": meta_store.chunk_count(),
-        "vectors": vec_store.count(),
-        "file_count": kb.file_count,
-        "chunk_count": kb.chunk_count,
     }
 
 

@@ -9,6 +9,8 @@ from typing import Any
 import httpx
 from fusion_core.http_client import get_async_client, with_retry
 
+from .llm_errors import LLMUnavailable
+
 logger = logging.getLogger(__name__)
 
 
@@ -56,18 +58,16 @@ class MetadataExtractor:
 
     def __init__(self, mlx_url: str = "http://127.0.0.1:11432/v1"):
         self.mlx_url = mlx_url.rstrip("/")
-        self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            self._client = get_async_client(self.mlx_url, timeout=30.0)
-            logger.debug("Pooled httpx.AsyncClient via fusion_core, base=%s", self.mlx_url)
-        return self._client
+        # A8: pool is the single source of truth (dedup + is_closed check).
+        # Drop the self._client check-then-assign cache that could hold a
+        # pool-evicted/closed reference.
+        return get_async_client(self.mlx_url, timeout=30.0)
 
     async def aclose(self) -> None:
-        if self._client is not None:
-            logger.debug("Releasing reference to pooled httpx.AsyncClient (pool-managed, not closed)")
-        self._client = None
+        # Pool-managed: nothing to close here.
+        return None
 
     async def extract(self, text: str, doc_name: str = "") -> dict[str, Any]:
         """Extract metadata from document text."""
@@ -105,12 +105,16 @@ class MetadataExtractor:
             import re
 
             match = re.search(r"\{.*\}", content, re.DOTALL)
-            if match:
-                return json.loads(match.group())
-            logger.warning("MetadataExtractor no JSON in content, doc_name=%s", doc_name)
+            if not match:
+                logger.warning("MetadataExtractor no JSON in content, doc_name=%s", doc_name)
+                raise ValueError("no_json")
+            return json.loads(match.group())
         except Exception as e:
-            logger.debug("Metadata extraction failed: %s", e)
-        return {"title": doc_name, "language": "unknown", "topics": []}
+            # L1: do not return fabricated default metadata — that makes LLM
+            # failure look like a successful extraction with placeholder
+            # fields. Propagate so the caller knows extraction is unavailable.
+            logger.warning("Metadata extraction failed (propagating, no fabricated metadata): %s", e)
+            raise LLMUnavailable("metadata extraction failed") from e
 
 
 class ResultCache:

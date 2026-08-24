@@ -114,7 +114,9 @@ class TestAPIRoutes:
 class TestEmbeddingClientAdvanced:
     @pytest.mark.asyncio
     async def test_embed_batch_with_retry(self):
-        client = EmbeddingClient(base_url="http://localhost:11432/v1")
+        # M1: cache_enabled=False — shared EmbeddingCache SQLite would otherwise
+        # serve a stale vector and the HTTP mock would never be exercised.
+        client = EmbeddingClient(base_url="http://localhost:11432/v1", cache_enabled=False)
         mock_http = MagicMock()
         mock_http.post = AsyncMock()
         # First call fails, second succeeds
@@ -130,18 +132,25 @@ class TestEmbeddingClientAdvanced:
 
     @pytest.mark.asyncio
     async def test_embed_batch_all_fail(self):
-        client = EmbeddingClient(base_url="http://localhost:11432/v1", max_retries=1)
+        # F7/M1: total failure (HTTP + local both fail) must raise EmbeddingError,
+        # never return zero vectors that get cached/persisted as search poison.
+        # cache_enabled=False so the shared cache can't mask the failure.
+        from fusion_rag.embed.client import EmbeddingError
+
+        client = EmbeddingClient(
+            base_url="http://localhost:11432/v1", max_retries=1, cache_enabled=False
+        )
         mock_http = MagicMock()
         mock_http.post = AsyncMock(side_effect=RuntimeError("always fail"))
         client._client = mock_http
-        results = await client.embed_batch(["test"])
-        # Should return zero vectors on failure
-        assert len(results) == 1
-        assert len(results[0]) == 1024
+        # Block the local sentence-transformers fallback so all providers fail.
+        with patch("fusion_rag.embed.local.get_local_model", return_value=None), pytest.raises(EmbeddingError):
+            await client.embed_batch(["test"])
 
     @pytest.mark.asyncio
     async def test_embed_single(self):
-        client = EmbeddingClient(base_url="http://localhost:11432/v1")
+        # M1: cache_enabled=False to force the HTTP path.
+        client = EmbeddingClient(base_url="http://localhost:11432/v1", cache_enabled=False)
         mock_http = MagicMock()
         mock_http.post = AsyncMock(return_value=MagicMock(
             status_code=200, json=lambda: {
@@ -342,13 +351,16 @@ class TestPreprocessorAdvanced:
 class TestRerankerAdvanced:
     @pytest.mark.asyncio
     async def test_rerank_failure_neutral_score(self):
+        # L1: total LLM failure must propagate as LLMUnavailable, not a 5.0
+        # magic-score array that looks like a confident rerank. The route layer
+        # (_do_rerank) catches this and falls back to original order.
+        from fusion_rag.engine.llm_errors import LLMUnavailable
         from fusion_rag.engine.reranker import Reranker
         r = Reranker()
         with patch("httpx.AsyncClient.post", new=AsyncMock(side_effect=RuntimeError("fail"))):
             docs = [{"id": "1", "text": "test"}]
-            results = await r.rerank("query", docs, top_k=1)
-            assert len(results) == 1
-            assert results[0]["score"] == 5.0  # Neutral score
+            with pytest.raises(LLMUnavailable):
+                await r.rerank("query", docs, top_k=1)
 
 
 # ── Connectors ──
@@ -356,22 +368,40 @@ class TestRerankerAdvanced:
 class TestConnectorsAdvanced:
     @pytest.mark.asyncio
     async def test_web_loader_success(self):
+        # M1 fix: deterministic content via MockTransport (no network, no fake-green).
+        # Capture the real class before patching, then re-enter the mock transport.
+        import httpx
+
+        real_async_client = httpx.AsyncClient
+
+        def fake_client(*args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(
+                lambda req: httpx.Response(200, content=b"<html><body><p>Hello world</p></body></html>")
+            )
+            return real_async_client(**kwargs)
+
         from fusion_rag.connectors import WebLoader
         loader = WebLoader()
-        with patch("httpx.AsyncClient.get", new=AsyncMock()) as mock_get:
-            mock_resp = MagicMock()
-            mock_resp.status_code = 200
-            mock_resp.text = "<html><body><p>Hello world</p></body></html>"
-            mock_resp.raise_for_status = MagicMock()
-            mock_get.return_value = mock_resp
+        with patch("httpx.AsyncClient", new=fake_client):
             result = await loader.load("http://example.com")
             assert "Hello" in result["content"]
 
     @pytest.mark.asyncio
     async def test_web_loader_error(self):
+        import httpx
+
+        real_async_client = httpx.AsyncClient
+
+        def handler(req):
+            raise httpx.ConnectError("fail")
+
+        def fake_client(*args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(handler)
+            return real_async_client(**kwargs)
+
         from fusion_rag.connectors import WebLoader
         loader = WebLoader()
-        with patch("httpx.AsyncClient.get", side_effect=RuntimeError("fail")):
+        with patch("httpx.AsyncClient", new=fake_client):
             result = await loader.load("http://example.com")
             assert "error" in result
 
@@ -411,11 +441,13 @@ class TestStreamingAdvanced:
 
     @pytest.mark.asyncio
     async def test_metadata_extractor_failure(self):
+        # L1: total LLM failure must propagate as LLMUnavailable, not return a
+        # fabricated default-metadata dict that looks like a successful extraction.
+        from fusion_rag.engine.llm_errors import LLMUnavailable
         from fusion_rag.engine.streaming import MetadataExtractor
         extractor = MetadataExtractor()
-        with patch("httpx.AsyncClient.post", side_effect=RuntimeError("fail")):
-            meta = await extractor.extract("text", "doc.md")
-            assert meta["language"] == "unknown"
+        with patch("httpx.AsyncClient.post", side_effect=RuntimeError("fail")), pytest.raises(LLMUnavailable):
+            await extractor.extract("text", "doc.md")
 
 
 # ── Retrievers ──
@@ -438,3 +470,97 @@ class TestRetrieversAdvanced:
         retriever.base_retriever.search = AsyncMock(return_value=[])
         results = await retriever.search([1.0, 0.0], "query")
         assert results == []
+
+
+# ── F11-F17 Security regression ──
+
+
+class TestSecurityRegression:
+    """P0 audit fixes F11-F17: verify the trust boundary holds."""
+
+    def test_f12_kb_id_traversal_rejected(self, client):
+        # F12: kb_id with path separators is blocked by routing (404 — the
+        # segment never matches). kb_id with other invalid chars (space) that
+        # decode to a single segment reaches the validator -> 400. Either way
+        # it never builds a path or returns a real KB.
+        for bad in ("../etc", "a/b", ".."):
+            resp = client.get(f"/kb/bases/{bad}")
+            assert resp.status_code == 404, f"kb_id={bad!r} returned {resp.status_code}"
+        resp = client.get("/kb/bases/a%20b")
+        assert resp.status_code == 400
+
+    def test_f12_kb_id_traversal_on_delete(self, client):
+        # encoded slash still a single segment? No — Starlette won't match it.
+        resp = client.delete("/kb/bases/..%2Fetc")
+        assert resp.status_code == 404
+
+    def test_f12_kb_id_invalid_on_create(self, client):
+        # F12: body-supplied kb_id reaches the validator and is rejected 400.
+        for bad in ("../evil", "a/b", "..", "a:b", "a b"):
+            resp = client.post("/kb/bases", json={"name": "x", "kb_id": bad})
+            assert resp.status_code == 400, f"kb_id={bad!r} returned {resp.status_code}"
+
+    def test_f12_project_id_body_traversal_rejected(self, client):
+        # F12: project route validates both project_id (path) and kb_id (body).
+        # Body kb_id traversal reaches the validator -> 400.
+        resp = client.post("/kb/projects/proj1/kb", json={"kb_id": "../evil"})
+        assert resp.status_code == 400
+
+    def test_f15_ingest_root_blocks_outside(self, client, tmp_path, monkeypatch):
+        # F15: with FUSION_RAG_INGEST_ROOTS set, a path outside it is 403.
+        root = tmp_path / "allowed"
+        root.mkdir()
+        outside = tmp_path / "secret.txt"
+        outside.write_text("x")
+        monkeypatch.setenv("FUSION_RAG_INGEST_ROOTS", str(root))
+        resp = client.post("/kb/bases/abc123/documents", json={"file_path": str(outside)})
+        # 400 because kb 'abc123' not found OR 403 from root confinement —
+        # either way never 200 and never reads the file. Assert not 2xx.
+        assert resp.status_code >= 400
+
+    def test_f15_ingest_root_unset_allows_anywhere(self, client, tmp_path, monkeypatch):
+        # F15: local-first — unset env means no confinement, so the request
+        # proceeds to KB lookup (404) rather than being blocked by roots.
+        monkeypatch.delenv("FUSION_RAG_INGEST_ROOTS", raising=False)
+        target = tmp_path / "anywhere.txt"
+        target.write_text("x")
+        resp = client.post("/kb/bases/nonexist01/documents", json={"file_path": str(target)})
+        # Not blocked by confinement — reaches KB-not-found (404), not 403.
+        assert resp.status_code != 403
+
+    def test_f11_invalid_api_key_rejected(self, client, monkeypatch):
+        # F11: when an admin key is set, a wrong key gets 401, not 200.
+        from fusion_rag.api import auth as auth_mod
+
+        monkeypatch.setenv("FUSION_RAG_API_KEY", "secret-admin-key")
+        auth_mod._auth_backend = None  # reset so get_auth_backend rebuilds
+        resp = client.post("/kb/bases", json={"name": "x"}, headers={"X-API-Key": "wrong"})
+        assert resp.status_code == 401
+        auth_mod._auth_backend = None  # cleanup for other tests
+
+    def test_f11_no_key_when_required_rejected(self, client, monkeypatch):
+        from fusion_rag.api import auth as auth_mod
+
+        monkeypatch.setenv("FUSION_RAG_API_KEY", "secret-admin-key")
+        auth_mod._auth_backend = None
+        resp = client.post("/kb/bases", json={"name": "x"})
+        assert resp.status_code == 401
+        auth_mod._auth_backend = None
+
+    def test_f13_mcp_tools_call_requires_key(self, client, monkeypatch):
+        # F13: MCP tools/call must enforce the same API-key auth.
+        from fusion_rag.api import auth as auth_mod
+
+        monkeypatch.setenv("FUSION_RAG_API_KEY", "secret-admin-key")
+        auth_mod._auth_backend = None
+        resp = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                          "params": {"name": "kb_list", "arguments": {}}})
+        assert resp.status_code == 401
+        body = resp.json()
+        assert body.get("error", {}).get("code") == -32001
+        auth_mod._auth_backend = None
+
+    def test_f13_mcp_initialize_stays_open(self, client):
+        # F13: initialize/tools/list stay open per MCP discovery.
+        resp = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+        assert resp.status_code == 200

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -20,23 +21,38 @@ class MetadataStore:
         self.db_path = db_path
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn: sqlite3.Connection | None = None
+        # F9: FastAPI serves across worker threads; a single shared connection
+        # without check_same_thread=False raises "SQLite objects created in a
+        # thread can only be used in that same thread". Lock serializes writes
+        # so concurrent requests don't interleave commit/rollback.
+        self._lock = threading.Lock()
         self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
-            self._conn = sqlite3.connect(str(self.db_path))
+            # F9: check_same_thread=False allows cross-thread use; the Lock
+            # below guarantees no two threads execute on the conn simultaneously.
+            self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
+            # A3/F9: WAL gives concurrent readers + a single writer without
+            # "database is locked" under the FastAPI request fan-out.
+            try:
+                self._conn.execute("PRAGMA journal_mode=WAL")
+                self._conn.execute("PRAGMA busy_timeout=5000")
+            except sqlite3.DatabaseError as e:
+                logger.warning("MetadataStore WAL pragma failed: %s", e)
         return self._conn
 
     @contextmanager
     def _cursor(self):
         conn = self._get_conn()
-        try:
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
+        with self._lock:
+            try:
+                yield conn
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
     def _init_db(self) -> None:
         with self._cursor() as conn:

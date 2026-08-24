@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import sqlite3
 from pathlib import Path
 from typing import Any
 
 import httpx
 from fusion_core.http_client import get_async_client, with_retry
+
+from .llm_errors import LLMUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -41,18 +42,16 @@ class GraphRAG:
         self.model = model
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
-        self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            self._client = get_async_client(self.mlx_url, timeout=30.0)
-            logger.debug("Pooled httpx.AsyncClient via fusion_core, base=%s", self.mlx_url)
-        return self._client
+        # A8: pool is the single source of truth (dedup + is_closed check).
+        # Drop the self._client check-then-assign cache that could hold a
+        # pool-evicted/closed reference.
+        return get_async_client(self.mlx_url, timeout=30.0)
 
     async def aclose(self) -> None:
-        if self._client is not None:
-            logger.debug("Releasing reference to pooled httpx.AsyncClient (pool-managed, not closed)")
-        self._client = None
+        # Pool-managed: nothing to close here.
+        return None
 
     def _get_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -112,19 +111,46 @@ class GraphRAG:
                 raise ValueError("empty_content")
             return self._parse_extraction(content)
         except Exception as e:
-            logger.warning("Entity extraction failed: %s", e)
-            return {"entities": [], "relations": []}
+            # L1: do not return {"entities": [], "relations": []} — that makes
+            # total LLM failure look like "this text has no entities", silently
+            # producing an empty graph. Propagate so build_graph/caller knows.
+            logger.warning("Entity extraction failed (propagating, no fabricated empty graph): %s", e)
+            raise LLMUnavailable("entity extraction failed") from e
 
     async def build_graph(self, chunks: list[dict], kb_id: str = "") -> dict[str, int]:
         """Extract entities from chunks and store in graph DB."""
+        import asyncio
+
         total_entities = 0
         total_relations = 0
+        # P6: extract entities concurrently (semaphore-bounded) instead of a
+        # serial `for chunk: await extract_entities`. N chunks = N serial
+        # 30s-timeout LLM calls; a 500-chunk ingest could run for hours.
+        # The semaphore caps in-flight extractions (each carries retries=2, so
+        # an overload spiral is bounded). Extraction is LLM-bound; the sqlite
+        # writes run serially after all extractions return.
+        sem = asyncio.Semaphore(4)
+
+        async def extract_one(chunk: dict) -> dict[str, Any]:
+            text = chunk.get("text", "")
+            chunk_id = chunk.get("id", "")
+            if not text.strip():
+                return {"chunk_id": chunk_id, "result": {"entities": [], "relations": []}}
+            async with sem:
+                try:
+                    result = await self.extract_entities(text)
+                except LLMUnavailable as e:
+                    logger.warning("build_graph: extract failed for chunk %s, skipping: %s", chunk_id, e)
+                    result = {"entities": [], "relations": []}
+            return {"chunk_id": chunk_id, "result": result}
+
+        extractions = await asyncio.gather(*[extract_one(c) for c in chunks])
+
         conn = self._get_conn()
         try:
-            for chunk in chunks:
-                text = chunk.get("text", "")
-                chunk_id = chunk.get("id", "")
-                result = await self.extract_entities(text)
+            for ex in extractions:
+                chunk_id = ex["chunk_id"]
+                result = ex["result"]
                 for ent in result.get("entities", []):
                     try:
                         conn.execute(
@@ -243,10 +269,39 @@ class GraphRAG:
 
     @staticmethod
     def _parse_extraction(content: str) -> dict[str, Any]:
-        match = re.search(r"\{.*\}", content, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
+        # L13: greedy `re.search(r"\{.*\}", content, re.DOTALL)` spanned from the
+        # first `{` to the LAST `}` — LLM preamble/postscript like
+        # "Here is JSON: {...} notes:{...}" captured garbage and JSONDecodeError
+        # returned an empty graph. Scan for the first balanced `{...}` object and
+        # parse that; fall back to empty only if no balanced object exists.
+        start = content.find("{")
+        while start != -1:
+            depth = 0
+            in_str = False
+            esc = False
+            for i in range(start, len(content)):
+                ch = content[i]
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif ch == "\\":
+                        esc = True
+                    elif ch == '"':
+                        in_str = False
+                    continue
+                if ch == '"':
+                    in_str = True
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        candidate = content[start : i + 1]
+                        try:
+                            parsed = json.loads(candidate)
+                            if isinstance(parsed, dict):
+                                return parsed
+                        except json.JSONDecodeError:
+                            break
+            start = content.find("{", start + 1)
         return {"entities": [], "relations": []}

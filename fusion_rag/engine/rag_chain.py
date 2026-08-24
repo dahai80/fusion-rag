@@ -15,6 +15,8 @@ from typing import Any
 import httpx
 from fusion_core.http_client import get_async_client, with_retry
 
+from .llm_errors import LLMUnavailable
+
 logger = logging.getLogger(__name__)
 
 CHARS_PER_TOKEN_EN = 4.0
@@ -47,21 +49,23 @@ class MultiTurnRAG:
         self._system_prompt = system_prompt
         self._history: list[dict] = []
         self._sessions: dict[str, list[dict]] = {}
-        self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            self._client = get_async_client(self.mlx_url, timeout=60.0)
-            logger.debug("Pooled httpx.AsyncClient via fusion_core, base=%s", self.mlx_url)
-        return self._client
+        # A8: pool is the single source of truth (dedup + is_closed check).
+        # Drop the self._client check-then-assign cache that could hold a
+        # pool-evicted/closed reference.
+        return get_async_client(self.mlx_url, timeout=60.0)
 
     async def aclose(self) -> None:
-        if self._client is not None:
-            logger.debug("Releasing reference to pooled httpx.AsyncClient (pool-managed, not closed)")
-        self._client = None
+        # Pool-managed: nothing to close here.
+        return None
 
     async def ask(self, question: str, context: str = "", session_id: str = "") -> dict[str, Any]:
         history = self._resolve_history(session_id)
+        # L4: trim BEFORE building messages — otherwise this turn consumes an
+        # unbounded history (the token-budget break in _build_messages is the
+        # only guard) and trimming only takes effect next turn.
+        self._trim_history(history)
         messages = self._build_messages(question, context, history)
 
         try:
@@ -86,13 +90,17 @@ class MultiTurnRAG:
                 raise ValueError("empty_content")
             usage = data.get("usage", {})
         except Exception as e:
-            logger.error("MultiTurnRAG ask failed: %s", e)
-            answer = f"Error: {e}"
-            usage = {}
+            # L1/L3: do NOT return "Error: {e}" as a 200 answer — that makes an
+            # LLM failure look like a valid (if terse) response AND gets written
+            # into history as an assistant message, poisoning subsequent turns.
+            # Propagate so the caller maps to an error response; history stays
+            # unchanged (no user/assistant pair appended on failure).
+            logger.error("MultiTurnRAG ask failed (propagating, not poisoning history): %s", e)
+            raise LLMUnavailable("multi-turn ask failed") from e
 
+        # Success — record the turn. Only real answers enter history.
         history.append({"role": "user", "content": question})
         history.append({"role": "assistant", "content": answer})
-        self._trim_history(history)
 
         result = {
             "answer": answer,
@@ -135,14 +143,25 @@ class MultiTurnRAG:
             )
             messages.append({"role": "system", "content": prompt})
 
-        # Add history within token budget (most recent first)
+        # L2: explicit 3-segment build — system → history (chronological) → user.
+        # Before: `messages.insert(len(messages) - 0 if not context else 1, h)`
+        # — `len-0` is a no-op, so without context history was appended at the
+        # END (then a user message appended after it), producing reversed
+        # history plus a duplicated user question. Iterate history in forward
+        # order, within the token budget, so the earliest affordable turns drop
+        # first and the most-recent context is kept.
         remaining = self.token_budget - estimate_tokens(context) - 500
+        # Keep the most-recent turns that fit: scan from newest to oldest to
+        # find the cut, then append the kept slice in chronological order.
+        kept_rev = []
         for h in reversed(history):
             h_tokens = estimate_tokens(h.get("content", ""))
             if remaining - h_tokens < 0:
                 break
-            messages.insert(len(messages) - 0 if not context else 1, h)
+            kept_rev.append(h)
             remaining -= h_tokens
+        for h in reversed(kept_rev):
+            messages.append(h)
 
         if context:
             messages.append({"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"})
@@ -164,10 +183,24 @@ class MultiTurnRAG:
 class DocumentChain:
     """Processes multiple documents with chain strategies."""
 
+    # A7: fusion_core's client pool keys by loop+base_url only — the per-call
+    # `timeout` passed to get_async_client is set by whichever call hits the
+    # pool first for that base_url, then reused by every later caller on the
+    # same loop. To keep that benign (no call needs a shorter timeout than the
+    # pool's), every _call in this class uses one shared timeout. Tracked as
+    # an upstream issue on fusion-core (pool key should include timeout).
+    _CALL_TIMEOUT = 60.0
+
     @staticmethod
-    async def _call(mlx_url: str, messages: list[dict], max_tokens: int, timeout: float) -> str:
+    async def _call(mlx_url: str, messages: list[dict], max_tokens: int, timeout: float | None = None) -> str:
         url = mlx_url.rstrip("/")
-        client = get_async_client(url, timeout=timeout)
+        # A7: collapse to the shared timeout so first-call-wins can't starve a
+        # caller that asked for more. Callers may still pass a value; we ignore
+        # a smaller one to avoid the pool-pin hazard (logged once).
+        effective = DocumentChain._CALL_TIMEOUT
+        if timeout is not None and timeout > effective:
+            effective = timeout
+        client = get_async_client(url, timeout=effective)
         resp = await with_retry(
             lambda: client.post(
                 f"{url}/chat/completions",
@@ -194,7 +227,6 @@ class DocumentChain:
             mlx_url,
             [{"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}"}],
             4096,
-            60.0,
         )
 
     @staticmethod
@@ -209,7 +241,6 @@ class DocumentChain:
                 mlx_url,
                 [{"role": "user", "content": prompt}],
                 4096,
-                60.0,
             )
         return answer
 
@@ -218,13 +249,23 @@ class DocumentChain:
         """Map each doc, then reduce to final answer."""
         import asyncio
 
+        # P5: bound concurrent map-phase LLM calls. An unbounded gather fires
+        # one chat/completions per doc (100 docs = 100 concurrent), and with
+        # with_retry(retries=2) each can triple on a 429/5xx — a retry storm
+        # that overloads MLX and cascades. Semaphore(4) caps in-flight maps;
+        # the reduce call runs after the gate releases.
+        sem = asyncio.Semaphore(4)
+
         async def map_doc(doc: str) -> str:
-            return await DocumentChain._call(
-                mlx_url,
-                [{"role": "user", "content": f"Document: {doc}\n\nQuestion: {query}\n\nSummary:"}],
-                1024,
-                30.0,
-            )
+            async with sem:
+                # A7: no per-call timeout — _call uses the shared _CALL_TIMEOUT
+                # (60s) so the map phase can't pin the pool to a shorter value
+                # that would starve the reduce call.
+                return await DocumentChain._call(
+                    mlx_url,
+                    [{"role": "user", "content": f"Document: {doc}\n\nQuestion: {query}\n\nSummary:"}],
+                    1024,
+                )
 
         summaries = await asyncio.gather(*[map_doc(d) for d in docs])
         combined = "\n\n".join(summaries)
@@ -233,5 +274,4 @@ class DocumentChain:
             mlx_url,
             [{"role": "user", "content": f"Summaries:\n{combined}\n\nQuestion: {query}\n\nFinal answer:"}],
             4096,
-            60.0,
         )

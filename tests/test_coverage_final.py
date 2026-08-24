@@ -20,8 +20,10 @@ from fusion_rag.store.vector_store import VectorStore
 class TestAPIExtra:
     @pytest.fixture
     def client(self):
-        app = create_app(kb_storage_dir=tempfile.mkdtemp())
+        storage_dir = tempfile.mkdtemp()
+        app = create_app(kb_storage_dir=storage_dir)
         with TestClient(app) as tc:
+            tc.kb_storage_dir = storage_dir  # for tests that reopen the store
             yield tc
 
     def test_search_with_vectors(self, client):
@@ -37,17 +39,54 @@ class TestAPIExtra:
         assert resp.status_code == 400
 
     def test_search_with_mocked_embed(self, client):
-        """Test search on empty KB returns empty results (embed mocked, no network)."""
+        # M1: de-fake-green. Old mock returned a 3-dim vector ([0.1,0.2,0.3])
+        # — wrong contract (real BGE-M3 is 1024-dim) AND only ever exercised the
+        # trivial "empty KB -> empty results" path. Use a real-dimension vector
+        # (1024) so the mock matches the production embed contract; the empty-KB
+        # invariant still holds, but the mock no longer hides a dimension change.
         from fusion_rag.embed.client import EmbeddingClient
 
         create = client.post("/kb/bases", json={"name": "test"}).json()
-        with patch.object(EmbeddingClient, "embed", new=AsyncMock(return_value=[0.1, 0.2, 0.3])):
+        real_dim = 1024
+        fake_vec = [0.01] * real_dim
+        with patch.object(EmbeddingClient, "embed", new=AsyncMock(return_value=fake_vec)):
             resp = client.post(f"/kb/bases/{create['id']}/search",
                                json={"query": "test", "top_k": 5, "threshold": 0.5})
         assert resp.status_code == 200
         data = resp.json()
         results = data if isinstance(data, list) else data.get("results", [])
         assert results == []
+        assert len(fake_vec) == real_dim  # guard: mock must stay real-dimension
+
+    def test_search_nonempty_kb_returns_topk(self, client):
+        # M1: the missing half — a NON-empty store with real-dimension vectors
+        # must return ranked results, not just "empty -> empty". This is the
+        # invariant the old 3-dim mock could never catch.
+        # Reopen the same storage dir to read kb.vector_path (the app_state
+        # contextvar accessor only works inside a request, not a test body).
+        from fusion_rag.embed.client import EmbeddingClient
+        from fusion_rag.engine.knowledge_base import KnowledgeBaseManager
+        from fusion_rag.store.vector_store import VectorStore
+
+        create = client.post("/kb/bases", json={"name": "test"}).json()
+        kb_id = create["id"]
+        real_dim = 1024
+        kb = KnowledgeBaseManager(storage_dir=client.kb_storage_dir).get(kb_id)
+        vs = VectorStore(kb.vector_path, dimension=real_dim)
+        query_vec = [1.0] + [0.0] * (real_dim - 1)
+        match_vec = [1.0] + [0.0] * (real_dim - 1)   # aligned -> high score
+        miss_vec = [0.0] * real_dim                   # orthogonal -> low score
+        vs.add("c_match", match_vec, "aligned doc", doc_name="aligned.md", doc_path="/aligned.md")
+        vs.add("c_miss", miss_vec, "unrelated doc", doc_name="unrelated.md", doc_path="/unrelated.md")
+        with patch.object(EmbeddingClient, "embed", new=AsyncMock(return_value=query_vec)):
+            resp = client.post(f"/kb/bases/{kb_id}/search",
+                               json={"query": "test", "top_k": 5, "threshold": 0.0})
+        assert resp.status_code == 200
+        data = resp.json()
+        results = data if isinstance(data, list) else data.get("results", [])
+        assert len(results) >= 1
+        # The aligned chunk must outrank the orthogonal one.
+        assert results[0]["id"] == "c_match"
 
 
 # ── Document Parser Extra ──
@@ -118,15 +157,20 @@ class TestDocumentParserFinal:
 class TestRerankerFinal:
     @pytest.mark.asyncio
     async def test_score_relevance_parse_error(self):
+        # M2: de-fake-green. The old test asserted score==5.0 on parse failure,
+        # locking the L1 defect (failure returns a magic midpoint) in as
+        # "expected behavior" — so a future fix to fail loudly would break the
+        # test. _score_relevance now propagates LLMUnavailable; assert that.
+        from fusion_rag.engine.llm_errors import LLMUnavailable
+
         r = Reranker()
-        with patch("httpx.AsyncClient.post", new=AsyncMock()) as mock_post:
-            mock_resp = MagicMock()
-            mock_resp.json.return_value = {"choices": [{"message": {"content": "not a number"}}]}
-            mock_post.return_value = mock_resp
-            client = MagicMock()
-            client.post = AsyncMock(return_value=mock_resp)
-            score = await r._score_relevance(client, "query", "doc")
-            assert score == 5.0  # fallback score
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"choices": [{"message": {"content": "not a number"}}]}
+        mock_resp.raise_for_status = MagicMock()
+        client = MagicMock()
+        client.post = AsyncMock(return_value=mock_resp)
+        with pytest.raises(LLMUnavailable):
+            await r._score_relevance(client, "query", "doc")
 
     @pytest.mark.asyncio
     async def test_hybrid_search_with_filters(self):

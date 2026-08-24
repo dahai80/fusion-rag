@@ -14,6 +14,8 @@ from typing import Any
 import httpx
 from fusion_core.http_client import get_async_client, with_retry
 
+from .llm_errors import LLMUnavailable
+
 logger = logging.getLogger(__name__)
 
 CONTEXT_PROMPT = (
@@ -35,18 +37,19 @@ class Contextualizer:
         model: str = "qwen3.5-9b",
         enabled: bool = True,
         api_key: str = "",
+        max_context_chars: int = 300,
     ):
         self.mlx_url = mlx_url.rstrip("/")
         self.model = model
         self.enabled = enabled
         self.api_key = api_key
-        self._client: httpx.AsyncClient | None = None
+        self.max_context_chars = max_context_chars
 
     async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            self._client = get_async_client(self.mlx_url, timeout=30.0)
-            logger.debug("Pooled httpx.AsyncClient via fusion_core, base=%s", self.mlx_url)
-        return self._client
+        # A8: pool is the single source of truth (dedup + is_closed check).
+        # Drop the self._client check-then-assign cache that could hold a
+        # pool-evicted/closed reference.
+        return get_async_client(self.mlx_url, timeout=30.0)
 
     def _auth_headers(self) -> dict[str, str]:
         if self.api_key:
@@ -54,27 +57,54 @@ class Contextualizer:
         return {}
 
     async def aclose(self) -> None:
-        if self._client is not None:
-            logger.debug("Releasing reference to pooled httpx.AsyncClient (pool-managed, not closed)")
-        self._client = None
+        # Pool-managed: nothing to close here.
+        return None
 
     async def contextualize(self, chunks: list[dict[str, Any]], doc_text: str) -> list[dict[str, Any]]:
         if not self.enabled or not doc_text or not chunks:
             return chunks
-        doc_truncated = doc_text[:8000]
+        # L17: anchor the context window around each chunk instead of always
+        # truncating to the document head — a chunk at offset 15000 otherwise
+        # gets context from the (unrelated) document beginning.
         client = await self._get_client()
+        failures = 0
         for chunk in chunks:
             try:
-                context = await self._generate_context(client, chunk.get("text", ""), doc_truncated)
+                windowed = self._window_doc_text(doc_text, chunk.get("text", ""))
+                context = await self._generate_context(client, chunk.get("text", ""), windowed)
                 chunk["context"] = context
             except Exception as e:
+                # L1: record the failure. If EVERY chunk fails the LLM is down
+                # — propagate LLMUnavailable so the caller knows contextual
+                # retrieval silently degraded to plain retrieval. Per-chunk
+                # partial failures (some ok, some not) keep empty context but
+                # are counted so the signal is visible.
+                failures += 1
                 logger.warning(
                     "Context generation failed for chunk %s: %s",
                     chunk.get("id", "?"),
                     e,
                 )
                 chunk["context"] = ""
+        if failures and failures == len(chunks):
+            logger.warning("Contextualizer: all %d chunks failed — LLM unavailable", failures)
+            raise LLMUnavailable("contextualization failed for all chunks")
+        if failures:
+            logger.info("Contextualizer: %d/%d chunks had no context (partial)", failures, len(chunks))
         return chunks
+
+    @staticmethod
+    def _window_doc_text(doc_text: str, chunk_text: str, half_window: int = 4000) -> str:
+        # L17: take ±half_window chars around the chunk's first occurrence so
+        # deep chunks get locally relevant context, not the document head.
+        if len(doc_text) <= half_window * 2:
+            return doc_text
+        idx = doc_text.find(chunk_text[:64])
+        if idx < 0:
+            return doc_text[: half_window * 2]
+        start = max(0, idx - half_window)
+        end = min(len(doc_text), idx + half_window)
+        return doc_text[start:end]
 
     async def _generate_context(self, client: httpx.AsyncClient, chunk_text: str, doc_text: str) -> str:
         prompt = CONTEXT_PROMPT.format(
@@ -99,4 +129,6 @@ class Contextualizer:
         if not content:
             logger.warning("Contextualizer empty content, chunk_text=%s", chunk_text[:50])
             raise ValueError("empty_content")
-        return content[:200]
+        # L17: configurable output cap (was hard 200). Long chunks benefit from
+        # more context; callers can pass max_context_chars to tune.
+        return content[: self.max_context_chars]

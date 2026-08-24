@@ -5,31 +5,24 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from ..engine.knowledge_base import KnowledgeBaseManager
+from .._validators import validate_identifier
+from .app_state import get_kb_manager
 from .auth import verify_api_key
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["kb-crud"])
 
-_kb_manager: KnowledgeBaseManager | None = None
-
-
-def set_kb_manager(kb_manager: KnowledgeBaseManager, embed_client: Any = None) -> None:
-    global _kb_manager
-    _kb_manager = kb_manager
-
-
-set_kb_context = set_kb_manager
-
-
-def _get_kb_manager() -> KnowledgeBaseManager:
-    if _kb_manager is None:
-        raise HTTPException(503, "Knowledge base manager not initialized")
-    return _kb_manager
+# 硬伤1: read kb_manager from app.state via contextvar, not a module global.
+_get_kb_manager = get_kb_manager
 
 
 def _get_base(kb_id: str):
+    # F12: validate kb_id before any path construction (path-traversal guard).
+    try:
+        validate_identifier(kb_id, field="kb_id")
+    except ValueError:
+        raise HTTPException(400, f"Invalid kb_id: {kb_id}")
     try:
         return _get_kb_manager().get(kb_id)
     except KeyError:
@@ -47,6 +40,13 @@ async def create_knowledge_base(data: dict[str, Any]) -> dict[str, Any]:
     kb_id = data.get("kb_id", "")
     if not name and not kb_id:
         raise HTTPException(400, "name or kb_id is required")
+    # F12: a caller-supplied kb_id must match the identifier charset or it would
+    # be unreadable later (and could carry path separators). Reject at the gate.
+    if kb_id:
+        try:
+            validate_identifier(kb_id, field="kb_id")
+        except ValueError:
+            raise HTTPException(400, f"Invalid kb_id: {kb_id}")
     if not name:
         name = kb_id
     description = data.get("description", "")
@@ -66,14 +66,16 @@ async def create_knowledge_base(data: dict[str, Any]) -> dict[str, Any]:
 
 @router.get("/bases/{kb_id}")
 async def get_knowledge_base(kb_id: str) -> dict[str, Any]:
-    try:
-        return _get_kb_manager().get(kb_id).to_dict()
-    except KeyError:
-        raise HTTPException(404, f"Knowledge base '{kb_id}' not found")
+    return _get_base(kb_id).to_dict()
 
 
 @router.delete("/bases/{kb_id}", dependencies=[Depends(verify_api_key)])
 async def delete_knowledge_base(kb_id: str) -> dict[str, str]:
+    # F12: validate kb_id before delete (path-traversal guard, same charset rule).
+    try:
+        validate_identifier(kb_id, field="kb_id")
+    except ValueError:
+        raise HTTPException(400, f"Invalid kb_id: {kb_id}")
     if _get_kb_manager().delete(kb_id):
         return {"id": kb_id, "status": "deleted"}
     raise HTTPException(404, f"Knowledge base '{kb_id}' not found")

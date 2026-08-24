@@ -3,30 +3,26 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
-from ..engine.knowledge_base import KnowledgeBaseManager
+from .._validators import validate_identifier
+from .app_state import get_kb_manager
 from .auth import verify_api_key
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["admin"])
 
-_kb_manager: KnowledgeBaseManager | None = None
-
-
-def set_admin_kb_manager(kb_manager: KnowledgeBaseManager) -> None:
-    global _kb_manager
-    _kb_manager = kb_manager
-
-
-def _get_kb_manager() -> KnowledgeBaseManager:
-    if _kb_manager is None:
-        raise HTTPException(503, "Knowledge base manager not initialized")
-    return _kb_manager
+# 硬伤1: read kb_manager from app.state via contextvar, not a module global.
+_get_kb_manager = get_kb_manager
 
 
 def _get_base(kb_id: str):
+    # F12: confine kb_id before path construction.
+    try:
+        validate_identifier(kb_id, field="kb_id")
+    except ValueError:
+        raise HTTPException(400, f"Invalid kb_id: {kb_id}")
     try:
         return _get_kb_manager().get(kb_id)
     except KeyError:
@@ -51,7 +47,7 @@ async def create_snapshot(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     return vm.create_snapshot(kb_id, _get_kb_storage_path(kb_id), description)
 
 
-@router.get("/bases/{kb_id}/versions")
+@router.get("/bases/{kb_id}/versions", dependencies=[Depends(verify_api_key)])
 async def list_snapshots(kb_id: str) -> list[dict[str, Any]]:
     _get_base(kb_id)
     from ..engine.version_manager import VersionManager
@@ -60,7 +56,7 @@ async def list_snapshots(kb_id: str) -> list[dict[str, Any]]:
     return vm.list_snapshots(kb_id)
 
 
-@router.get("/bases/{kb_id}/versions/{version_id}")
+@router.get("/bases/{kb_id}/versions/{version_id}", dependencies=[Depends(verify_api_key)])
 async def get_snapshot(kb_id: str, version_id: str) -> dict[str, Any]:
     _get_base(kb_id)
     from ..engine.version_manager import VersionManager
@@ -98,7 +94,7 @@ async def delete_snapshot(kb_id: str, version_id: str) -> dict[str, Any]:
 # ── Search Templates ──
 
 
-@router.get("/bases/{kb_id}/templates")
+@router.get("/bases/{kb_id}/templates", dependencies=[Depends(verify_api_key)])
 async def list_templates(kb_id: str) -> list[dict[str, Any]]:
     _get_base(kb_id)
     from ..engine.search_template import SearchTemplateManager
@@ -140,7 +136,7 @@ async def delete_template(kb_id: str, name: str) -> dict[str, Any]:
 # ── Permissions ──
 
 
-@router.get("/bases/{kb_id}/permissions")
+@router.get("/bases/{kb_id}/permissions", dependencies=[Depends(verify_api_key)])
 async def list_permissions(kb_id: str) -> list[dict[str, Any]]:
     _get_base(kb_id)
     from ..permissions import PermissionManager
@@ -195,7 +191,7 @@ async def check_permission(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
 # ── Audit Logs ──
 
 
-@router.get("/bases/{kb_id}/audit")
+@router.get("/bases/{kb_id}/audit", dependencies=[Depends(verify_api_key)])
 async def list_audit_logs(
     kb_id: str, limit: int = 50, offset: int = 0, caller: str | None = None
 ) -> list[dict[str, Any]]:
@@ -206,7 +202,7 @@ async def list_audit_logs(
     return al.query_logs(kb_id, limit=limit, offset=offset, caller=caller)
 
 
-@router.get("/bases/{kb_id}/audit/{log_id}")
+@router.get("/bases/{kb_id}/audit/{log_id}", dependencies=[Depends(verify_api_key)])
 async def get_audit_log(kb_id: str, log_id: int) -> dict[str, Any]:
     _get_base(kb_id)
     from ..engine.audit_logger import AuditLogger
@@ -218,13 +214,16 @@ async def get_audit_log(kb_id: str, log_id: int) -> dict[str, Any]:
     return log
 
 
-@router.get("/bases/{kb_id}/audit/export")
-async def export_audit_logs(kb_id: str, format: str = "json") -> str:
+@router.get("/bases/{kb_id}/audit/export", dependencies=[Depends(verify_api_key)])
+async def export_audit_logs(kb_id: str, output_format: str = Query("json", alias="format")) -> str:
+    # M7: param was named `format`, shadowing the builtin. Renamed to
+    # output_format; Query(alias="format") keeps the public ?format= query
+    # param name unchanged.
     _get_base(kb_id)
     from ..engine.audit_logger import AuditLogger
 
     al = AuditLogger(f"{_get_kb_storage_path(kb_id)}/audit.db")
-    return al.export_logs(kb_id, format=format)
+    return al.export_logs(kb_id, fmt=output_format)
 
 
 # ── Incremental Sync ──
@@ -271,7 +270,7 @@ async def run_bench(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     return await bench.run_search_bench(kb_id, vec_store, embed, queries)
 
 
-@router.get("/bases/{kb_id}/bench/results")
+@router.get("/bases/{kb_id}/bench/results", dependencies=[Depends(verify_api_key)])
 async def list_bench_results(kb_id: str, test_name: str | None = None) -> list[dict[str, Any]]:
     _get_base(kb_id)
     from ..engine.bench import BenchRunner

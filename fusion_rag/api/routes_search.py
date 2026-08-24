@@ -5,7 +5,9 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
+from fastapi.concurrency import run_in_threadpool
 
+from ..engine.llm_errors import LLMUnavailable
 from ..engine.query_rewriter import QueryRewriter
 from ..engine.reranker import HybridSearch
 
@@ -41,6 +43,22 @@ def _audit_and_trajectory(
         logger.warning("trajectory write failed: %s", e)
 
 
+async def _audit_and_trajectory_async(
+    kb_id: str,
+    query: str,
+    caller: str,
+    results: list[dict],
+    latency_ms: float,
+    metadata: dict | None = None,
+) -> None:
+    # P8/硬伤8: audit/trajectory do sync sqlite writes; running them inline in
+    # the async handler blocks the event loop for the write duration. Push the
+    # fire-and-forget logging off the loop thread.
+    await run_in_threadpool(
+        _audit_and_trajectory, kb_id, query, caller, results, latency_ms, metadata
+    )
+
+
 @router.post("/bases/{kb_id}/search")
 async def search(kb_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
     from .routes import _apply_search_filters, _do_rerank, _get_base, _get_embed_client, _get_vector_store
@@ -64,8 +82,9 @@ async def search(kb_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
         from ..engine.search_template import SearchTemplateManager
         from .routes import _get_kb_storage_path
 
+        # P8/硬伤8: SearchTemplateManager opens + queries sqlite synchronously.
         tpl_mgr = SearchTemplateManager(f"{_get_kb_storage_path(kb_id)}/templates.db")
-        tpl = tpl_mgr.get_template(kb_id, template)
+        tpl = await run_in_threadpool(tpl_mgr.get_template, kb_id, template)
         if tpl:
             top_k = tpl.get("top_k", top_k)
             threshold = tpl.get("threshold", threshold)
@@ -86,25 +105,55 @@ async def search(kb_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
 
     if rewrite_mode:
         rewriter = QueryRewriter(enabled=True)
-        rewritten = await rewriter.rewrite(query, mode=rewrite_mode)
+        try:
+            rewritten = await rewriter.rewrite(query, mode=rewrite_mode)
+        except LLMUnavailable as e:
+            # L1/L15: rewrite is an enhancement — fall back to the original
+            # query (logged), do NOT 503. The user still gets retrieval; they
+            # just lose the query-expansion lift.
+            logger.warning("search rewrite LLM unavailable, using original query: %s", e)
+            rewritten = query
         if isinstance(rewritten, list):
+            # L15: the rewrite-list path previously ran plain vec_store.search
+            # per sub-query, silently dropping hybrid when the client asked for
+            # hybrid=True + rewrite_mode=... (behavior fork vs the non-rewrite
+            # path). Honor use_hybrid per sub-query, and over-fetch so the
+            # post-fusion _apply_search_filters (L10) doesn't truncate below
+            # top_k when many rows are filtered out.
+            fetch_k = max(top_k * 4, top_k)
             all_results = []
             for q in rewritten:
                 qv = await embed.embed(q)
-                if qv and not all(v == 0.0 for v in qv):
-                    all_results.extend(vec_store.search(qv, top_k=top_k, threshold=threshold))
+                if not qv or all(v == 0.0 for v in qv):
+                    continue
+                if use_hybrid:
+                    hs = HybridSearch(vec_store, alpha=hybrid_alpha, method=hybrid_method)
+                    sub_filters = {}
+                    if folder_prefix:
+                        sub_filters["folder_prefix"] = folder_prefix
+                    sub = await hs.search(
+                        qv,
+                        q,
+                        top_k=fetch_k,
+                        threshold=threshold,
+                        filters=sub_filters if sub_filters else None,
+                    )
+                else:
+                    # P8/硬伤8: vec_store.search is sync LanceDB+BM25; push off-loop.
+                    sub = await run_in_threadpool(vec_store.search, qv, top_k=fetch_k, threshold=threshold)
+                    sub = await run_in_threadpool(_apply_search_filters, sub, folder_prefix, metadata_filter)
+                all_results.extend(sub)
             seen = {}
             for r in all_results:
                 rid = r.get("id", "")
                 if rid not in seen or r.get("score", 0) > seen[rid].get("score", 0):
                     seen[rid] = r
             results = sorted(seen.values(), key=lambda x: x.get("score", 0), reverse=True)[:top_k]
-            results = _apply_search_filters(results, folder_prefix, metadata_filter)
             if doc_type_filter:
                 results = [r for r in results if r.get("doc_type", "") in doc_type_filter]
             if use_rerank:
                 results = await _do_rerank(query, results, top_k)
-            _audit_and_trajectory(kb_id, query, "search", results, (time.time() - _start) * 1000)
+            await _audit_and_trajectory_async(kb_id, query, "search", results, (time.time() - _start) * 1000)
             return results
         query = rewritten
 
@@ -125,8 +174,16 @@ async def search(kb_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
             filters=filters if filters else None,
         )
     else:
-        results = vec_store.search(query_vector, top_k=top_k, threshold=threshold)
-        results = _apply_search_filters(results, folder_prefix, metadata_filter)
+        # L10: fetch wider than top_k so _apply_search_filters (folder_prefix /
+        # metadata_filter, applied client-side AFTER the top_k truncation) does
+        # not silently shrink the result set below top_k when many rows are
+        # filtered out. Matching rows may sit just past top_k.
+        fetch_k = top_k * 4 if (folder_prefix or metadata_filter) else top_k
+        # P8/硬伤8: sync LanceDB search + per-row json.loads filter block the
+        # event loop if run inline in an async handler.
+        results = await run_in_threadpool(vec_store.search, query_vector, top_k=fetch_k, threshold=threshold)
+        results = await run_in_threadpool(_apply_search_filters, results, folder_prefix, metadata_filter)
+        results = results[:top_k]
 
     if doc_type_filter:
         results = [r for r in results if r.get("doc_type", "") in doc_type_filter]
@@ -134,7 +191,7 @@ async def search(kb_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
     if use_rerank:
         results = await _do_rerank(query, results, top_k)
 
-    _audit_and_trajectory(kb_id, query, "search", results, (time.time() - _start) * 1000)
+    await _audit_and_trajectory_async(kb_id, query, "search", results, (time.time() - _start) * 1000)
     return results
 
 
@@ -173,9 +230,14 @@ async def ask(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     if rewrite_mode or history:
         rewriter = QueryRewriter(enabled=True)
         mode = rewrite_mode or ("condense" if history else "hyde")
-        rewritten = await rewriter.rewrite(question, history=history, mode=mode)
-        if isinstance(rewritten, str) and rewritten:
-            question = rewritten
+        try:
+            rewritten = await rewriter.rewrite(question, history=history, mode=mode)
+            if isinstance(rewritten, str) and rewritten:
+                question = rewritten
+        except LLMUnavailable as e:
+            # L1: rewrite is an enhancement; condense failure on multi-turn
+            # means we lose history context — keep original question, log it.
+            logger.warning("ask rewrite LLM unavailable, using original question: %s", e)
 
     query_vector = await embed.embed(question)
     if not query_vector or all(v == 0.0 for v in query_vector):
@@ -194,11 +256,16 @@ async def ask(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
             filters=filters if filters else None,
         )
     else:
-        chunks = vec_store.search(query_vector, top_k=top_k, threshold=kb.config.similarity_threshold)
-        chunks = _apply_search_filters(chunks, folder_prefix, metadata_filter)
+        fetch_k = top_k * 4 if (folder_prefix or metadata_filter) else top_k
+        # P8/硬伤8: sync LanceDB search + filter block the event loop.
+        chunks = await run_in_threadpool(
+            vec_store.search, query_vector, top_k=fetch_k, threshold=kb.config.similarity_threshold
+        )
+        chunks = await run_in_threadpool(_apply_search_filters, chunks, folder_prefix, metadata_filter)
+        chunks = chunks[:top_k]
 
     if not chunks:
-        _audit_and_trajectory(kb_id, question, "ask", [], (time.time() - _start) * 1000)
+        await _audit_and_trajectory_async(kb_id, question, "ask", [], (time.time() - _start) * 1000)
         return {"answer": "No relevant documents found.", "sources": []}
 
     if use_rerank:
@@ -206,16 +273,21 @@ async def ask(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
 
     context = "\n\n".join(f"[{c['doc_name']}] {c['text'][:2000]}" for c in chunks)
 
-    answer = await _generate_answer(
-        question,
-        context,
-        chunks,
-        model=model,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        system_prompt=system_prompt,
-    )
-    _audit_and_trajectory(
+    try:
+        answer = await _generate_answer(
+            question,
+            context,
+            chunks,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system_prompt=system_prompt,
+        )
+    except LLMUnavailable as e:
+        # L9: fusion-mlx down → no fabricated 200 answer. Surface as 502 so
+        # the caller knows generation failed, not "answered with no info".
+        raise HTTPException(502, "Answer generation failed (upstream LLM unavailable)") from e
+    await _audit_and_trajectory_async(
         kb_id,
         question,
         "ask",

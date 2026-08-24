@@ -16,6 +16,8 @@ from typing import Any
 import httpx
 from fusion_core.http_client import get_async_client, with_retry
 
+from .llm_errors import LLMUnavailable
+
 logger = logging.getLogger(__name__)
 
 
@@ -29,18 +31,16 @@ class Reranker:
         self.mlx_url = mlx_url.rstrip("/")
         self.model = model
         self.batch_size = batch_size
-        self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            self._client = get_async_client(self.mlx_url, timeout=30.0)
-            logger.debug("Pooled httpx.AsyncClient via fusion_core, base=%s", self.mlx_url)
-        return self._client
+        # A8: pool is the single source of truth (dedup + is_closed check).
+        # Drop the self._client check-then-assign cache that could hold a
+        # pool-evicted/closed reference.
+        return get_async_client(self.mlx_url, timeout=30.0)
 
     async def aclose(self) -> None:
-        if self._client is not None:
-            logger.debug("Releasing reference to pooled httpx.AsyncClient (pool-managed, not closed)")
-        self._client = None
+        # Pool-managed: nothing to close here.
+        return None
 
     async def rerank(self, query: str, documents: list[dict[str, Any]], top_k: int = 5) -> list[dict[str, Any]]:
         if not documents:
@@ -85,8 +85,12 @@ class Reranker:
                 raise ValueError("empty_content")
             return self._parse_scores(content, len(docs))
         except Exception as e:
-            logger.warning("Batch rerank failed, fallback to original scores: %s", e)
-            return [doc.get("score", 5.0) for doc in docs]
+            # L1: do NOT return a 5.0 magic array — that makes total LLM
+            # failure look like a successful rerank with confident scores.
+            # Propagate so the route layer maps to a logged fallback (original
+            # order) rather than a silent fabricated rerank.
+            logger.warning("Batch rerank failed (propagating, no fabricated scores): %s", e)
+            raise LLMUnavailable() from e
 
     def _parse_scores(self, content: str, expected: int) -> list[float]:
         try:
@@ -122,9 +126,18 @@ class Reranker:
             )
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"]["content"].strip()
+            if not content:
+                logger.warning("Reranker _score_relevance empty content, query=%s", query[:50])
+                raise ValueError("empty_content")
             return float(content[:4])
-        except Exception:
-            return 5.0
+        except Exception as e:
+            # M2/L1: do NOT return a 5.0 magic midpoint — that makes total LLM
+            # failure look like a confident mediocre score and (per M2) gets
+            # locked in by a test asserting 5.0, so a future fix to fail loudly
+            # would be blocked by the test. Propagate so the caller knows the
+            # single-doc fallback is unavailable.
+            logger.warning("Reranker _score_relevance failed (propagating, no 5.0 fallback): %s", e)
+            raise LLMUnavailable("single-doc relevance scoring failed") from e
 
 
 class HybridSearch:

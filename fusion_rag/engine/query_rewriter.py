@@ -13,6 +13,8 @@ import logging
 import httpx
 from fusion_core.http_client import get_async_client, with_retry
 
+from .llm_errors import LLMUnavailable
+
 logger = logging.getLogger(__name__)
 
 HYDE_PROMPT = (
@@ -45,18 +47,19 @@ class QueryRewriter:
         self.mlx_url = mlx_url.rstrip("/")
         self.model = model
         self.enabled = enabled
-        self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            self._client = get_async_client(self.mlx_url, timeout=30.0)
-            logger.debug("Pooled httpx.AsyncClient via fusion_core, base=%s", self.mlx_url)
-        return self._client
+        # A8: get_async_client is the single source of truth — it dedups by
+        # loop+base_url and skips a closed entry. The old self._client cache
+        # was a check-then-assign with no lock and could hold a reference to a
+        # client the pool had since LRU-evicted and closed. Drop the cache;
+        # resolve from the pool every call.
+        return get_async_client(self.mlx_url, timeout=30.0)
 
     async def aclose(self) -> None:
-        if self._client is not None:
-            logger.debug("Releasing reference to pooled httpx.AsyncClient (pool-managed, not closed)")
-        self._client = None
+        # Pool-managed: nothing to close here. Kept for callers that release
+        # per-instance (pool eviction handles actual aclose).
+        return None
 
     async def rewrite(
         self, query: str, history: list[dict[str, str]] | None = None, mode: str = "hyde"
@@ -73,8 +76,12 @@ class QueryRewriter:
             logger.warning("Unknown rewrite mode '%s', returning original query", mode)
             return query
         except Exception as e:
-            logger.warning("Query rewrite failed (mode=%s): %s", mode, e)
-            return query
+            # L1: do not silently return the original query — that makes LLM
+            # failure look like a successful (no-op) rewrite, degrading
+            # retrieval quality invisibly. Propagate so the route layer logs
+            # the degradation and decides: proceed with original query or 503.
+            logger.warning("Query rewrite failed (mode=%s, propagating): %s", mode, e)
+            raise LLMUnavailable(f"query rewrite failed (mode={mode})") from e
 
     async def _hyde(self, query: str) -> str:
         prompt = HYDE_PROMPT.format(query=query)

@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from .document import ParseResult
+from .document import DocumentParser, ParseResult
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,12 @@ class Chunker:
     """Split document text into chunks for embedding."""
 
     def __init__(self, strategy: str = "semantic", chunk_size: int = 512, chunk_overlap: int = 64):
+        # F10: overlap >= chunk_size makes the fixed-stride step <= 0, so the
+        # while loop never advances → infinite loop / memory blowup. Reject early.
+        if chunk_overlap >= chunk_size:
+            raise ValueError(
+                f"chunk_overlap ({chunk_overlap}) must be < chunk_size ({chunk_size})"
+            )
         self.strategy = strategy
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
@@ -97,11 +103,13 @@ class Chunker:
         text = result.content
         chunks = []
         start = 0
+        # F10: stride must stay positive or the loop never advances → infinite loop.
+        step = max(self.chunk_size - self.chunk_overlap, 1)
         while start < len(text):
             end = min(start + self.chunk_size, len(text))
             chunk_text = text[start:end]
             chunks.append(self._make_chunk(chunk_text, result, len(chunks)))
-            start += self.chunk_size - self.chunk_overlap
+            start += step
             if start >= len(text):
                 break
         return chunks if chunks else [self._make_chunk(text, result, 0)]
@@ -189,6 +197,3 @@ class Chunker:
             metadata=result.metadata,
             tokens=len(text) // 4,  # Rough token estimate
         )
-
-
-from .document import DocumentParser

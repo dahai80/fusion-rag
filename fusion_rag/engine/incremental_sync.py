@@ -55,6 +55,7 @@ class IncrementalSyncEngine:
                 )
             return {"added": added, "modified": modified, "deleted": deleted, "unchanged": unchanged}
 
+        scan_root = os.path.realpath(directory)
         for root, _dirs, files in os.walk(directory):
             for fname in files:
                 full_path = os.path.join(root, fname)
@@ -66,6 +67,11 @@ class IncrementalSyncEngine:
                             break
                     if not matched:
                         continue
+
+                real_full = os.path.realpath(full_path)
+                if real_full != full_path and not os.path.realpath(full_path).startswith(scan_root + os.sep):
+                    logger.warning("Skipping symlink that escapes scan root: %s -> %s", full_path, real_full)
+                    continue
 
                 scanned_paths.add(full_path)
 

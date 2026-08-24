@@ -1,38 +1,35 @@
 import logging
 import os
 import shutil
-import sqlite3
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
+
+from .sqlite_base import SqliteBase, open_sqlite
 
 logger = logging.getLogger(__name__)
 
 
-class VersionManager:
+class VersionManager(SqliteBase):
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self._conn: sqlite3.Connection | None = None
+        super().__init__()
         self._ensure_table()
-
-    def _get_conn(self) -> sqlite3.Connection:
-        if self._conn is None:
-            self._conn = sqlite3.connect(self.db_path)
-            self._conn.row_factory = sqlite3.Row
-        return self._conn
 
     @contextmanager
     def _cursor(self):
         conn = self._get_conn()
-        cur = conn.cursor()
-        try:
-            yield cur
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            cur.close()
+        with self._db_lock:
+            cur = conn.cursor()
+            try:
+                yield cur
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                cur.close()
 
     def _ensure_table(self):
         with self._cursor() as cur:
@@ -53,9 +50,16 @@ class VersionManager:
             """)
 
     def create_snapshot(self, kb_id: str, kb_storage_path: str, description: str = "") -> dict:
-        version_id = "v_" + str(int(time.time()))
+        # L8: second snapshot in the same second collided on the timestamp-only
+        # version_id → same dir → second copytree clobbered the first's hard
+        # links. Append a uuid8 so same-second snapshots get distinct dirs;
+        # assert the dir does not exist before writing.
+        version_id = f"v_{int(time.time())}_{uuid.uuid4().hex[:8]}"
         snapshot_dir = Path(kb_storage_path) / "snapshots" / version_id
-        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        if snapshot_dir.exists():
+            logger.error("Snapshot dir already exists (unexpected): %s", snapshot_dir)
+            raise FileExistsError(f"snapshot dir already exists: {snapshot_dir}")
+        snapshot_dir.mkdir(parents=True, exist_ok=False)
 
         logger.info("Creating snapshot %s for kb %s at %s", version_id, kb_id, snapshot_dir)
 
@@ -218,7 +222,7 @@ class VersionManager:
         metadata_db = Path(kb_storage_path) / "metadata.db"
         if metadata_db.exists():
             try:
-                conn = sqlite3.connect(str(metadata_db))
+                conn = open_sqlite(metadata_db, readonly=True)
                 cur = conn.cursor()
                 try:
                     cur.execute("SELECT COUNT(*) FROM documents")

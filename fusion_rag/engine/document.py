@@ -78,9 +78,6 @@ class ParseResult:
     error: str = ""
 
 
-from dataclasses import dataclass, field
-
-
 class DocumentParser:
     """Parse documents of various formats into plain text."""
 

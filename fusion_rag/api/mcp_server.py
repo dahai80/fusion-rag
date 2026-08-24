@@ -15,9 +15,20 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from .auth import get_auth_backend
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
+
+
+class _MCPError(Exception):
+    # L16: typed tool error → JSON-RPC error code + generic message. Subclasses
+    # set code; message must not echo internal str(e) (paths/SQL/stack).
+    def __init__(self, code: int, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 MCP_TOOLS = [
     {
@@ -123,9 +134,39 @@ async def mcp_handler(request: Request) -> JSONResponse:
         )
 
     if method == "tools/call":
+        # F13: MCP tool calls read/create KBs + upload docs — enforce the same
+        # API-key auth as the REST surface. initialize/tools/list stay open per
+        # MCP discovery, but tools/call must not bypass auth when it is enabled.
+        api_key = request.headers.get("X-API-Key")
+        try:
+            get_auth_backend().verify(api_key)
+        except Exception as e:
+            detail = getattr(e, "detail", str(e))
+            status = getattr(e, "status_code", 401)
+            return JSONResponse(
+                {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32001, "message": detail}},
+                status_code=status,
+            )
         tool_name = params.get("name", "")
         arguments = params.get("arguments", {})
-        result = await _dispatch_tool(tool_name, arguments)
+        try:
+            result = await _dispatch_tool(tool_name, arguments)
+        except _MCPError as e:
+            # L16: tool failures surface as a JSON-RPC `error` (not a `result`
+            # containing {"error": str(e)}), so clients can distinguish success
+            # from failure programmatically. No raw str(e) leaks — messages are
+            # generic; details stay in server logs.
+            logger.warning("MCP tool '%s' rejected: code=%d msg=%s", tool_name, e.code, e.message)
+            return JSONResponse(
+                {"jsonrpc": "2.0", "id": request_id, "error": {"code": e.code, "message": e.message}},
+                status_code=200,
+            )
+        except Exception as e:
+            logger.error("MCP tool '%s' failed: %s", tool_name, e, exc_info=True)
+            return JSONResponse(
+                {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32603, "message": "internal error"}},
+                status_code=200,
+            )
         return JSONResponse(
             {
                 "jsonrpc": "2.0",
@@ -144,61 +185,71 @@ async def mcp_handler(request: Request) -> JSONResponse:
 
 
 async def _dispatch_tool(name: str, args: dict) -> Any:
-    """Dispatch MCP tool calls to internal API."""
+    """Dispatch MCP tool calls to internal API.
+
+    L16: raises _MCPError (mapped to a JSON-RPC error by the caller) on
+    missing/invalid params or known tool failures; unexpected exceptions
+    propagate to the caller's generic -32603 handler. Never returns
+    {"error": str(e)} as a JSON-RPC result.
+    """
     from ..store.vector_store import VectorStore
     from .routes import _get_base, _get_embed_client, _get_kb_manager
 
-    try:
-        if name == "kb_list":
-            return _get_kb_manager().list()
+    def _require(key: str) -> Any:
+        if key not in args or args[key] in (None, ""):
+            raise _MCPError(-32602, f"missing required parameter: {key}")
+        return args[key]
 
-        if name == "kb_create":
-            kb = _get_kb_manager().create(
-                name=args["name"],
-                description=args.get("description", ""),
-            )
-            return {"id": kb.id, "name": kb.config.name, "status": "created"}
+    if name == "kb_list":
+        return _get_kb_manager().list()
 
-        if name == "kb_search":
-            kb_id = args["kb_id"]
-            kb = _get_base(kb_id)
-            embed = _get_embed_client()
-            vec_store = VectorStore(kb.vector_path)
-            query_vector = await embed.embed(args["query"])
-            if not query_vector or all(v == 0.0 for v in query_vector):
-                return {"error": "Embedding failed"}
-            top_k = args.get("top_k", kb.config.max_results)
-            results = vec_store.search(query_vector, top_k=top_k)
-            return results
+    if name == "kb_create":
+        kb_name = _require("name")
+        kb = _get_kb_manager().create(name=kb_name, description=args.get("description", ""))
+        return {"id": kb.id, "name": kb.config.name, "status": "created"}
 
-        if name == "kb_ask":
-            from .routes import _generate_answer
+    if name == "kb_search":
+        kb_id = _require("kb_id")
+        query = _require("query")
+        kb = _get_base(kb_id)
+        embed = _get_embed_client()
+        vec_store = VectorStore(kb.vector_path)
+        query_vector = await embed.embed(query)
+        if not query_vector or all(v == 0.0 for v in query_vector):
+            raise _MCPError(-32603, "embedding failed")
+        top_k = args.get("top_k", kb.config.max_results)
+        results = vec_store.search(query_vector, top_k=top_k)
+        return results
 
-            kb_id = args["kb_id"]
-            kb = _get_base(kb_id)
-            embed = _get_embed_client()
-            vec_store = VectorStore(kb.vector_path)
-            question = args["question"]
-            query_vector = await embed.embed(question)
-            if not query_vector or all(v == 0.0 for v in query_vector):
-                return {"error": "Embedding failed"}
-            top_k = args.get("top_k", kb.config.max_results)
-            chunks = vec_store.search(query_vector, top_k=top_k)
-            if not chunks:
-                return {"answer": "No relevant documents found.", "sources": []}
-            context = "\n\n".join(f"[{c['doc_name']}] {c['text'][:2000]}" for c in chunks)
-            return await _generate_answer(question, context, chunks)
+    if name == "kb_ask":
+        from .routes import _generate_answer
 
-        if name == "kb_upload":
-            from .routes import upload_document
+        kb_id = _require("kb_id")
+        question = _require("question")
+        kb = _get_base(kb_id)
+        embed = _get_embed_client()
+        vec_store = VectorStore(kb.vector_path)
+        query_vector = await embed.embed(question)
+        if not query_vector or all(v == 0.0 for v in query_vector):
+            raise _MCPError(-32603, "embedding failed")
+        top_k = args.get("top_k", kb.config.max_results)
+        chunks = vec_store.search(query_vector, top_k=top_k)
+        if not chunks:
+            return {"answer": "No relevant documents found.", "sources": []}
+        context = "\n\n".join(f"[{c['doc_name']}] {c['text'][:2000]}" for c in chunks)
+        return await _generate_answer(question, context, chunks)
 
-            return await upload_document(args["kb_id"], args)
+    if name == "kb_upload":
+        from .routes_docs import _index_document
 
-        if name == "kb_status":
-            kb = _get_base(args["kb_id"])
-            return kb.to_dict()
+        kb_id = _require("kb_id")
+        file_path = _require("file_path")
+        result = await _index_document(kb_id, file_path)
+        return result
 
-        return {"error": f"Unknown tool: {name}"}
-    except Exception as e:
-        logger.error("MCP tool '%s' failed: %s", name, e)
-        return {"error": str(e)}
+    if name == "kb_status":
+        kb_id = _require("kb_id")
+        kb = _get_base(kb_id)
+        return kb.to_dict()
+
+    raise _MCPError(-32601, f"unknown tool: {name}")
