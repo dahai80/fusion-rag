@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
+from fusion_core.http_client import get_async_client, with_retry
 
 from ..embed.client import EmbeddingClient
 from ..engine.knowledge_base import KnowledgeBaseManager
@@ -125,6 +126,7 @@ async def _generate_answer(
     embed = _get_embed_client()
     mlx_base = embed.base_url.replace("/v1", "")
     mlx_url = f"{mlx_base}/v1/chat/completions"
+    mlx_base_url = f"{mlx_base}/v1"
     headers = {}
     if embed.api_key:
         headers["Authorization"] = f"Bearer {embed.api_key}"
@@ -134,11 +136,11 @@ async def _generate_answer(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"},
     ]
-    import httpx
 
     try:
-        async with httpx.AsyncClient(timeout=60.0, headers=headers) as client:
-            resp = await client.post(
+        client = get_async_client(mlx_base_url, timeout=60.0)
+        resp = await with_retry(
+            lambda: client.post(
                 mlx_url,
                 json={
                     "model": model,
@@ -146,10 +148,16 @@ async def _generate_answer(
                     "max_tokens": max_tokens,
                     "temperature": temperature,
                 },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            answer_text = data["choices"][0]["message"]["content"]
+                headers=headers,
+            ),
+            retries=2,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        answer_text = data["choices"][0]["message"]["content"]
+        if not answer_text or not answer_text.strip():
+            logger.warning("RAG answer empty content, question=%s", question[:50])
+            raise ValueError("empty_content")
     except Exception as e:
         logger.error("RAG answer generation failed: %s", e)
         answer_text = f"Failed to generate answer: {e}"

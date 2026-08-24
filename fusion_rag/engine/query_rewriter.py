@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 
 import httpx
+from fusion_core.http_client import get_async_client, with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,18 @@ class QueryRewriter:
         self.mlx_url = mlx_url.rstrip("/")
         self.model = model
         self.enabled = enabled
+        self._client: httpx.AsyncClient | None = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = get_async_client(self.mlx_url, timeout=30.0)
+            logger.debug("Pooled httpx.AsyncClient via fusion_core, base=%s", self.mlx_url)
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            logger.debug("Releasing reference to pooled httpx.AsyncClient (pool-managed, not closed)")
+        self._client = None
 
     async def rewrite(
         self, query: str, history: list[dict[str, str]] | None = None, mode: str = "hyde"
@@ -65,8 +78,9 @@ class QueryRewriter:
 
     async def _hyde(self, query: str) -> str:
         prompt = HYDE_PROMPT.format(query=query)
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
+        client = await self._get_client()
+        resp = await with_retry(
+            lambda: client.post(
                 f"{self.mlx_url}/chat/completions",
                 json={
                     "model": self.model,
@@ -74,17 +88,20 @@ class QueryRewriter:
                     "max_tokens": 300,
                     "temperature": 0.3,
                 },
-            )
-            resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"].strip()
-            if content:
-                logger.info("HyDE rewrite: %s -> %s", query[:50], content[:50])
-            return content if content else query
+            ),
+            retries=2,
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"].strip()
+        if content:
+            logger.info("HyDE rewrite: %s -> %s", query[:50], content[:50])
+        return content if content else query
 
     async def _expand(self, query: str) -> list[str]:
         prompt = EXPAND_PROMPT.format(query=query)
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
+        client = await self._get_client()
+        resp = await with_retry(
+            lambda: client.post(
                 f"{self.mlx_url}/chat/completions",
                 json={
                     "model": self.model,
@@ -92,23 +109,26 @@ class QueryRewriter:
                     "max_tokens": 200,
                     "temperature": 0.5,
                 },
-            )
-            resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"].strip()
-            variants = self._parse_variants(content)
-            if variants:
-                result = [query] + variants
-                logger.info("Query expansion: %d variants for '%s'", len(variants), query[:50])
-                return result
-            return [query]
+            ),
+            retries=2,
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"].strip()
+        variants = self._parse_variants(content)
+        if variants:
+            result = [query] + variants
+            logger.info("Query expansion: %d variants for '%s'", len(variants), query[:50])
+            return result
+        return [query]
 
     async def _condense(self, query: str, history: list[dict[str, str]]) -> str:
         if not history:
             return query
         hist_text = "\n".join(f"{h.get('role', 'user')}: {h.get('content', '')}" for h in history[-6:])
         prompt = CONDENSE_PROMPT.format(history=hist_text, query=query)
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
+        client = await self._get_client()
+        resp = await with_retry(
+            lambda: client.post(
                 f"{self.mlx_url}/chat/completions",
                 json={
                     "model": self.model,
@@ -116,12 +136,14 @@ class QueryRewriter:
                     "max_tokens": 200,
                     "temperature": 0.0,
                 },
-            )
-            resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"].strip()
-            if content:
-                logger.info("Condensed: %s -> %s", query[:50], content[:50])
-            return content if content else query
+            ),
+            retries=2,
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"].strip()
+        if content:
+            logger.info("Condensed: %s -> %s", query[:50], content[:50])
+        return content if content else query
 
     @staticmethod
     def _parse_variants(content: str) -> list[str]:

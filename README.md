@@ -266,6 +266,17 @@ Fusion-RAG provides a REST API at `/kb/*` for knowledge base operations.
 └──────────────────────────────────────────────────────────────────┘
 ```
 
+### LLM Client Infrastructure
+
+All LLM chat calls (`/v1/chat/completions`) go through **fusion-core**'s HTTP client (`fusion_core.http_client`):
+
+- `get_async_client(base_url, timeout)` — shared connection pool (LRU, keyed by loop + base_url), reused across modules
+- `with_retry(fn, retries=2)` — automatic retry on 429/5xx and transient connection errors (backoff + jitter)
+- Auth headers passed **per request**, not baked into the pooled client (avoids header leak between instances sharing a base_url)
+- **D-H3 guard**: success path checks for empty/whitespace content and degrades explicitly (logged error/fallback) rather than returning empty content as a valid result
+
+Modules migrated to fusion-core: `contextualizer`, `query_rewriter`, `reranker`, `rag_chain` (MultiTurnRAG + DocumentChain), `graph_rag`, `streaming` (MetadataExtractor; SSEStreamer keeps raw `httpx.stream`), `evaluator`, `api/routes._generate_answer`.
+
 ### Key Modules
 
 | Module | File | Description |

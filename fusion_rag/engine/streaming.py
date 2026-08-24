@@ -6,6 +6,9 @@ import json
 import logging
 from typing import Any
 
+import httpx
+from fusion_core.http_client import get_async_client, with_retry
+
 logger = logging.getLogger(__name__)
 
 
@@ -14,9 +17,7 @@ class SSEStreamer:
 
     @staticmethod
     async def stream_response(question: str, context: str, mlx_url: str = "http://127.0.0.1:11432/v1") -> str:
-        """Stream a RAG response as SSE events."""
-        import httpx
-
+        """Stream a RAG response as SSE events. Keeps raw httpx.stream (with_retry does not apply to SSE streams)."""
         messages = [
             {"role": "system", "content": "Answer based on the context. Cite sources."},
             {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"},
@@ -54,12 +55,22 @@ class MetadataExtractor:
     """Automatically extracts metadata from documents using LLM."""
 
     def __init__(self, mlx_url: str = "http://127.0.0.1:11432/v1"):
-        self.mlx_url = mlx_url
+        self.mlx_url = mlx_url.rstrip("/")
+        self._client: httpx.AsyncClient | None = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = get_async_client(self.mlx_url, timeout=30.0)
+            logger.debug("Pooled httpx.AsyncClient via fusion_core, base=%s", self.mlx_url)
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            logger.debug("Releasing reference to pooled httpx.AsyncClient (pool-managed, not closed)")
+        self._client = None
 
     async def extract(self, text: str, doc_name: str = "") -> dict[str, Any]:
         """Extract metadata from document text."""
-        import httpx
-
         prompt = (
             f"Extract metadata from the following document. "
             f"Return ONLY a JSON object with these fields:\n"
@@ -73,8 +84,9 @@ class MetadataExtractor:
             f"JSON:"
         )
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
+            client = await self._get_client()
+            resp = await with_retry(
+                lambda: client.post(
                     f"{self.mlx_url}/chat/completions",
                     json={
                         "model": "qwen3.5-9b",
@@ -82,14 +94,20 @@ class MetadataExtractor:
                         "max_tokens": 512,
                         "temperature": 0.1,
                     },
-                )
-                content = resp.json()["choices"][0]["message"]["content"]
-                # Extract JSON from response
-                import re
+                ),
+                retries=2,
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"]
+            if not content or not content.strip():
+                logger.warning("MetadataExtractor empty content, doc_name=%s", doc_name)
+                raise ValueError("empty_content")
+            import re
 
-                match = re.search(r"\{.*\}", content, re.DOTALL)
-                if match:
-                    return json.loads(match.group())
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if match:
+                return json.loads(match.group())
+            logger.warning("MetadataExtractor no JSON in content, doc_name=%s", doc_name)
         except Exception as e:
             logger.debug("Metadata extraction failed: %s", e)
         return {"title": doc_name, "language": "unknown", "topics": []}

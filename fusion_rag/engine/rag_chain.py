@@ -13,6 +13,7 @@ import re
 from typing import Any
 
 import httpx
+from fusion_core.http_client import get_async_client, with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -46,14 +47,27 @@ class MultiTurnRAG:
         self._system_prompt = system_prompt
         self._history: list[dict] = []
         self._sessions: dict[str, list[dict]] = {}
+        self._client: httpx.AsyncClient | None = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = get_async_client(self.mlx_url, timeout=60.0)
+            logger.debug("Pooled httpx.AsyncClient via fusion_core, base=%s", self.mlx_url)
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            logger.debug("Releasing reference to pooled httpx.AsyncClient (pool-managed, not closed)")
+        self._client = None
 
     async def ask(self, question: str, context: str = "", session_id: str = "") -> dict[str, Any]:
         history = self._resolve_history(session_id)
         messages = self._build_messages(question, context, history)
 
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                resp = await client.post(
+            client = await self._get_client()
+            resp = await with_retry(
+                lambda: client.post(
                     f"{self.mlx_url}/chat/completions",
                     json={
                         "model": self.model,
@@ -61,11 +75,16 @@ class MultiTurnRAG:
                         "max_tokens": 4096,
                         "temperature": 0.3,
                     },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                answer = data["choices"][0]["message"]["content"]
-                usage = data.get("usage", {})
+                ),
+                retries=2,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            answer = data["choices"][0]["message"]["content"]
+            if not answer or not answer.strip():
+                logger.warning("MultiTurnRAG empty content, question=%s", question[:50])
+                raise ValueError("empty_content")
+            usage = data.get("usage", {})
         except Exception as e:
             logger.error("MultiTurnRAG ask failed: %s", e)
             answer = f"Error: {e}"
@@ -146,38 +165,52 @@ class DocumentChain:
     """Processes multiple documents with chain strategies."""
 
     @staticmethod
+    async def _call(mlx_url: str, messages: list[dict], max_tokens: int, timeout: float) -> str:
+        url = mlx_url.rstrip("/")
+        client = get_async_client(url, timeout=timeout)
+        resp = await with_retry(
+            lambda: client.post(
+                f"{url}/chat/completions",
+                json={
+                    "model": "qwen3.5-9b",
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                },
+            ),
+            retries=2,
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"]
+        if not content or not content.strip():
+            logger.warning("DocumentChain empty content, messages=%d", len(messages))
+            raise ValueError("empty_content")
+        return content
+
+    @staticmethod
     async def stuff(docs: list[str], query: str, mlx_url: str = "http://127.0.0.1:11432/v1") -> str:
         """Stuff all docs into a single prompt."""
         context = "\n\n".join(docs)
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                f"{mlx_url}/chat/completions",
-                json={
-                    "model": "qwen3.5-9b",
-                    "messages": [{"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}"}],
-                    "max_tokens": 4096,
-                },
-            )
-            return resp.json()["choices"][0]["message"]["content"]
+        return await DocumentChain._call(
+            mlx_url,
+            [{"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}"}],
+            4096,
+            60.0,
+        )
 
     @staticmethod
     async def refine(docs: list[str], query: str, mlx_url: str = "http://127.0.0.1:11432/v1") -> str:
         """Refine answer iteratively with each document."""
         answer = ""
         for doc in docs:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                prompt = f"Previous answer: {answer}\n\nNew document: {doc}\n\nQuestion: {query}\n\nRefine the answer."
-                if not answer:
-                    prompt = f"Document: {doc}\n\nQuestion: {query}\n\nAnswer:"
-                resp = await client.post(
-                    f"{mlx_url}/chat/completions",
-                    json={
-                        "model": "qwen3.5-9b",
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 4096,
-                    },
-                )
-                answer = resp.json()["choices"][0]["message"]["content"]
+            prompt = f"Previous answer: {answer}\n\nNew document: {doc}\n\nQuestion: {query}\n\nRefine the answer."
+            if not answer:
+                prompt = f"Document: {doc}\n\nQuestion: {query}\n\nAnswer:"
+            answer = await DocumentChain._call(
+                mlx_url,
+                [{"role": "user", "content": prompt}],
+                4096,
+                60.0,
+            )
         return answer
 
     @staticmethod
@@ -186,29 +219,19 @@ class DocumentChain:
         import asyncio
 
         async def map_doc(doc: str) -> str:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
-                    f"{mlx_url}/chat/completions",
-                    json={
-                        "model": "qwen3.5-9b",
-                        "messages": [{"role": "user", "content": f"Document: {doc}\n\nQuestion: {query}\n\nSummary:"}],
-                        "max_tokens": 1024,
-                    },
-                )
-                return resp.json()["choices"][0]["message"]["content"]
+            return await DocumentChain._call(
+                mlx_url,
+                [{"role": "user", "content": f"Document: {doc}\n\nQuestion: {query}\n\nSummary:"}],
+                1024,
+                30.0,
+            )
 
         summaries = await asyncio.gather(*[map_doc(d) for d in docs])
         combined = "\n\n".join(summaries)
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                f"{mlx_url}/chat/completions",
-                json={
-                    "model": "qwen3.5-9b",
-                    "messages": [
-                        {"role": "user", "content": f"Summaries:\n{combined}\n\nQuestion: {query}\n\nFinal answer:"}
-                    ],
-                    "max_tokens": 4096,
-                },
-            )
-            return resp.json()["choices"][0]["message"]["content"]
+        return await DocumentChain._call(
+            mlx_url,
+            [{"role": "user", "content": f"Summaries:\n{combined}\n\nQuestion: {query}\n\nFinal answer:"}],
+            4096,
+            60.0,
+        )

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from fusion_core.http_client import get_async_client, with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,18 @@ class RAGEvaluator:
         self.db_path = db_path
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
+        self._client: httpx.AsyncClient | None = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = get_async_client(self.mlx_url, timeout=60.0)
+            logger.debug("Pooled httpx.AsyncClient via fusion_core, base=%s", self.mlx_url)
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            logger.debug("Releasing reference to pooled httpx.AsyncClient (pool-managed, not closed)")
+        self._client = None
 
     def _get_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -177,8 +190,9 @@ class RAGEvaluator:
             {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"},
         ]
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                resp = await client.post(
+            client = await self._get_client()
+            resp = await with_retry(
+                lambda: client.post(
                     f"{self.mlx_url}/chat/completions",
                     json={
                         "model": self.model,
@@ -186,9 +200,14 @@ class RAGEvaluator:
                         "max_tokens": 4096,
                         "temperature": 0.3,
                     },
-                )
-                resp.raise_for_status()
-                answer_text = resp.json()["choices"][0]["message"]["content"]
+                ),
+                retries=2,
+            )
+            resp.raise_for_status()
+            answer_text = resp.json()["choices"][0]["message"]["content"]
+            if not answer_text or not answer_text.strip():
+                logger.warning("eval RAG empty content, question=%s", question[:50])
+                raise ValueError("empty_content")
         except Exception as e:
             logger.error("eval RAG answer generation failed: %s", e)
             answer_text = f"Failed to generate answer: {e}"
@@ -214,8 +233,9 @@ class RAGEvaluator:
             return 0.0
         prompt = FAITHFULNESS_PROMPT.format(context=context[:3000], answer=answer[:1000])
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
+            client = await self._get_client()
+            resp = await with_retry(
+                lambda: client.post(
                     f"{self.mlx_url}/chat/completions",
                     json={
                         "model": self.model,
@@ -223,13 +243,18 @@ class RAGEvaluator:
                         "max_tokens": 200,
                         "temperature": 0.0,
                     },
-                )
-                resp.raise_for_status()
-                content = resp.json()["choices"][0]["message"]["content"].strip()
-                match = re.search(r"\{.*\}", content, re.DOTALL)
-                if match:
-                    data = json.loads(match.group())
-                    return 1.0 if data.get("faithful", False) else 0.0
+                ),
+                retries=2,
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"].strip()
+            if not content:
+                logger.warning("Faithfulness empty content, answer=%s", answer[:50])
+                raise ValueError("empty_content")
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if match:
+                data = json.loads(match.group())
+                return 1.0 if data.get("faithful", False) else 0.0
         except Exception as e:
             logger.warning("Faithfulness scoring failed: %s", e)
         return 0.5
@@ -239,8 +264,9 @@ class RAGEvaluator:
             return 0.0
         prompt = RELEVANCE_PROMPT.format(query=query, answer=answer[:1000])
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
+            client = await self._get_client()
+            resp = await with_retry(
+                lambda: client.post(
                     f"{self.mlx_url}/chat/completions",
                     json={
                         "model": self.model,
@@ -248,13 +274,18 @@ class RAGEvaluator:
                         "max_tokens": 200,
                         "temperature": 0.0,
                     },
-                )
-                resp.raise_for_status()
-                content = resp.json()["choices"][0]["message"]["content"].strip()
-                match = re.search(r"\{.*\}", content, re.DOTALL)
-                if match:
-                    data = json.loads(match.group())
-                    return min(data.get("score", 0) / 10.0, 1.0)
+                ),
+                retries=2,
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"].strip()
+            if not content:
+                logger.warning("Relevance empty content, query=%s", query[:50])
+                raise ValueError("empty_content")
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if match:
+                data = json.loads(match.group())
+                return min(data.get("score", 0) / 10.0, 1.0)
         except Exception as e:
             logger.warning("Relevance scoring failed: %s", e)
         return 0.5

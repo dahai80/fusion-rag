@@ -14,6 +14,7 @@ import re
 from typing import Any
 
 import httpx
+from fusion_core.http_client import get_async_client, with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,18 @@ class Reranker:
         self.mlx_url = mlx_url.rstrip("/")
         self.model = model
         self.batch_size = batch_size
+        self._client: httpx.AsyncClient | None = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = get_async_client(self.mlx_url, timeout=30.0)
+            logger.debug("Pooled httpx.AsyncClient via fusion_core, base=%s", self.mlx_url)
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            logger.debug("Releasing reference to pooled httpx.AsyncClient (pool-managed, not closed)")
+        self._client = None
 
     async def rerank(self, query: str, documents: list[dict[str, Any]], top_k: int = 5) -> list[dict[str, Any]]:
         if not documents:
@@ -52,8 +65,9 @@ class Reranker:
             f"Output ONLY a JSON array of {len(docs)} scores, e.g. [8.5, 3.2, ...]:"
         )
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
+            client = await self._get_client()
+            resp = await with_retry(
+                lambda: client.post(
                     f"{self.mlx_url}/chat/completions",
                     json={
                         "model": self.model,
@@ -61,10 +75,15 @@ class Reranker:
                         "max_tokens": 200,
                         "temperature": 0.0,
                     },
-                )
-                resp.raise_for_status()
-                content = resp.json()["choices"][0]["message"]["content"].strip()
-                return self._parse_scores(content, len(docs))
+                ),
+                retries=2,
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"].strip()
+            if not content:
+                logger.warning("Reranker empty content, query=%s", query[:50])
+                raise ValueError("empty_content")
+            return self._parse_scores(content, len(docs))
         except Exception as e:
             logger.warning("Batch rerank failed, fallback to original scores: %s", e)
             return [doc.get("score", 5.0) for doc in docs]

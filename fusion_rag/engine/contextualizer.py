@@ -12,6 +12,7 @@ import logging
 from typing import Any
 
 import httpx
+from fusion_core.http_client import get_async_client, with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -39,26 +40,40 @@ class Contextualizer:
         self.model = model
         self.enabled = enabled
         self.api_key = api_key
+        self._client: httpx.AsyncClient | None = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = get_async_client(self.mlx_url, timeout=30.0)
+            logger.debug("Pooled httpx.AsyncClient via fusion_core, base=%s", self.mlx_url)
+        return self._client
+
+    def _auth_headers(self) -> dict[str, str]:
+        if self.api_key:
+            return {"Authorization": f"Bearer {self.api_key}"}
+        return {}
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            logger.debug("Releasing reference to pooled httpx.AsyncClient (pool-managed, not closed)")
+        self._client = None
 
     async def contextualize(self, chunks: list[dict[str, Any]], doc_text: str) -> list[dict[str, Any]]:
         if not self.enabled or not doc_text or not chunks:
             return chunks
         doc_truncated = doc_text[:8000]
-        headers = {}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        async with httpx.AsyncClient(timeout=30.0, headers=headers) as client:
-            for chunk in chunks:
-                try:
-                    context = await self._generate_context(client, chunk.get("text", ""), doc_truncated)
-                    chunk["context"] = context
-                except Exception as e:
-                    logger.warning(
-                        "Context generation failed for chunk %s: %s",
-                        chunk.get("id", "?"),
-                        e,
-                    )
-                    chunk["context"] = ""
+        client = await self._get_client()
+        for chunk in chunks:
+            try:
+                context = await self._generate_context(client, chunk.get("text", ""), doc_truncated)
+                chunk["context"] = context
+            except Exception as e:
+                logger.warning(
+                    "Context generation failed for chunk %s: %s",
+                    chunk.get("id", "?"),
+                    e,
+                )
+                chunk["context"] = ""
         return chunks
 
     async def _generate_context(self, client: httpx.AsyncClient, chunk_text: str, doc_text: str) -> str:
@@ -66,15 +81,22 @@ class Contextualizer:
             doc_text=doc_text,
             chunk_text=chunk_text,
         )
-        resp = await client.post(
-            f"{self.mlx_url}/chat/completions",
-            json={
-                "model": self.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 100,
-                "temperature": 0.0,
-            },
+        resp = await with_retry(
+            lambda: client.post(
+                f"{self.mlx_url}/chat/completions",
+                json={
+                    "model": self.model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 100,
+                    "temperature": 0.0,
+                },
+                headers=self._auth_headers(),
+            ),
+            retries=2,
         )
         resp.raise_for_status()
         content = resp.json()["choices"][0]["message"]["content"].strip()
+        if not content:
+            logger.warning("Contextualizer empty content, chunk_text=%s", chunk_text[:50])
+            raise ValueError("empty_content")
         return content[:200]

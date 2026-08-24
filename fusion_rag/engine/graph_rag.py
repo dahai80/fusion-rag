@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from fusion_core.http_client import get_async_client, with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,18 @@ class GraphRAG:
         self.model = model
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
+        self._client: httpx.AsyncClient | None = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = get_async_client(self.mlx_url, timeout=30.0)
+            logger.debug("Pooled httpx.AsyncClient via fusion_core, base=%s", self.mlx_url)
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            logger.debug("Releasing reference to pooled httpx.AsyncClient (pool-managed, not closed)")
+        self._client = None
 
     def _get_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -79,8 +92,9 @@ class GraphRAG:
             return {"entities": [], "relations": []}
         prompt = ENTITY_PROMPT.format(text=text[:3000])
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
+            client = await self._get_client()
+            resp = await with_retry(
+                lambda: client.post(
                     f"{self.mlx_url}/chat/completions",
                     json={
                         "model": self.model,
@@ -88,10 +102,15 @@ class GraphRAG:
                         "max_tokens": 500,
                         "temperature": 0.0,
                     },
-                )
-                resp.raise_for_status()
-                content = resp.json()["choices"][0]["message"]["content"].strip()
-                return self._parse_extraction(content)
+                ),
+                retries=2,
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"].strip()
+            if not content:
+                logger.warning("GraphRAG empty content, text=%s", text[:50])
+                raise ValueError("empty_content")
+            return self._parse_extraction(content)
         except Exception as e:
             logger.warning("Entity extraction failed: %s", e)
             return {"entities": [], "relations": []}
