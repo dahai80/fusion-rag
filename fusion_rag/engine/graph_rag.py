@@ -42,18 +42,16 @@ class GraphRAG:
         self.model = model
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
-        self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            self._client = get_async_client(self.mlx_url, timeout=30.0)
-            logger.debug("Pooled httpx.AsyncClient via fusion_core, base=%s", self.mlx_url)
-        return self._client
+        # A8: pool is the single source of truth (dedup + is_closed check).
+        # Drop the self._client check-then-assign cache that could hold a
+        # pool-evicted/closed reference.
+        return get_async_client(self.mlx_url, timeout=30.0)
 
     async def aclose(self) -> None:
-        if self._client is not None:
-            logger.debug("Releasing reference to pooled httpx.AsyncClient (pool-managed, not closed)")
-        self._client = None
+        # Pool-managed: nothing to close here.
+        return None
 
     def _get_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -121,14 +119,38 @@ class GraphRAG:
 
     async def build_graph(self, chunks: list[dict], kb_id: str = "") -> dict[str, int]:
         """Extract entities from chunks and store in graph DB."""
+        import asyncio
+
         total_entities = 0
         total_relations = 0
+        # P6: extract entities concurrently (semaphore-bounded) instead of a
+        # serial `for chunk: await extract_entities`. N chunks = N serial
+        # 30s-timeout LLM calls; a 500-chunk ingest could run for hours.
+        # The semaphore caps in-flight extractions (each carries retries=2, so
+        # an overload spiral is bounded). Extraction is LLM-bound; the sqlite
+        # writes run serially after all extractions return.
+        sem = asyncio.Semaphore(4)
+
+        async def extract_one(chunk: dict) -> dict[str, Any]:
+            text = chunk.get("text", "")
+            chunk_id = chunk.get("id", "")
+            if not text.strip():
+                return {"chunk_id": chunk_id, "result": {"entities": [], "relations": []}}
+            async with sem:
+                try:
+                    result = await self.extract_entities(text)
+                except LLMUnavailable as e:
+                    logger.warning("build_graph: extract failed for chunk %s, skipping: %s", chunk_id, e)
+                    result = {"entities": [], "relations": []}
+            return {"chunk_id": chunk_id, "result": result}
+
+        extractions = await asyncio.gather(*[extract_one(c) for c in chunks])
+
         conn = self._get_conn()
         try:
-            for chunk in chunks:
-                text = chunk.get("text", "")
-                chunk_id = chunk.get("id", "")
-                result = await self.extract_entities(text)
+            for ex in extractions:
+                chunk_id = ex["chunk_id"]
+                result = ex["result"]
                 for ent in result.get("entities", []):
                     try:
                         conn.execute(

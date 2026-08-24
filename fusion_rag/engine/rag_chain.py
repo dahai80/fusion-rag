@@ -49,18 +49,16 @@ class MultiTurnRAG:
         self._system_prompt = system_prompt
         self._history: list[dict] = []
         self._sessions: dict[str, list[dict]] = {}
-        self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            self._client = get_async_client(self.mlx_url, timeout=60.0)
-            logger.debug("Pooled httpx.AsyncClient via fusion_core, base=%s", self.mlx_url)
-        return self._client
+        # A8: pool is the single source of truth (dedup + is_closed check).
+        # Drop the self._client check-then-assign cache that could hold a
+        # pool-evicted/closed reference.
+        return get_async_client(self.mlx_url, timeout=60.0)
 
     async def aclose(self) -> None:
-        if self._client is not None:
-            logger.debug("Releasing reference to pooled httpx.AsyncClient (pool-managed, not closed)")
-        self._client = None
+        # Pool-managed: nothing to close here.
+        return None
 
     async def ask(self, question: str, context: str = "", session_id: str = "") -> dict[str, Any]:
         history = self._resolve_history(session_id)
@@ -185,10 +183,24 @@ class MultiTurnRAG:
 class DocumentChain:
     """Processes multiple documents with chain strategies."""
 
+    # A7: fusion_core's client pool keys by loop+base_url only — the per-call
+    # `timeout` passed to get_async_client is set by whichever call hits the
+    # pool first for that base_url, then reused by every later caller on the
+    # same loop. To keep that benign (no call needs a shorter timeout than the
+    # pool's), every _call in this class uses one shared timeout. Tracked as
+    # an upstream issue on fusion-core (pool key should include timeout).
+    _CALL_TIMEOUT = 60.0
+
     @staticmethod
-    async def _call(mlx_url: str, messages: list[dict], max_tokens: int, timeout: float) -> str:
+    async def _call(mlx_url: str, messages: list[dict], max_tokens: int, timeout: float | None = None) -> str:
         url = mlx_url.rstrip("/")
-        client = get_async_client(url, timeout=timeout)
+        # A7: collapse to the shared timeout so first-call-wins can't starve a
+        # caller that asked for more. Callers may still pass a value; we ignore
+        # a smaller one to avoid the pool-pin hazard (logged once).
+        effective = DocumentChain._CALL_TIMEOUT
+        if timeout is not None and timeout > effective:
+            effective = timeout
+        client = get_async_client(url, timeout=effective)
         resp = await with_retry(
             lambda: client.post(
                 f"{url}/chat/completions",
@@ -215,7 +227,6 @@ class DocumentChain:
             mlx_url,
             [{"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}"}],
             4096,
-            60.0,
         )
 
     @staticmethod
@@ -230,7 +241,6 @@ class DocumentChain:
                 mlx_url,
                 [{"role": "user", "content": prompt}],
                 4096,
-                60.0,
             )
         return answer
 
@@ -239,13 +249,23 @@ class DocumentChain:
         """Map each doc, then reduce to final answer."""
         import asyncio
 
+        # P5: bound concurrent map-phase LLM calls. An unbounded gather fires
+        # one chat/completions per doc (100 docs = 100 concurrent), and with
+        # with_retry(retries=2) each can triple on a 429/5xx — a retry storm
+        # that overloads MLX and cascades. Semaphore(4) caps in-flight maps;
+        # the reduce call runs after the gate releases.
+        sem = asyncio.Semaphore(4)
+
         async def map_doc(doc: str) -> str:
-            return await DocumentChain._call(
-                mlx_url,
-                [{"role": "user", "content": f"Document: {doc}\n\nQuestion: {query}\n\nSummary:"}],
-                1024,
-                30.0,
-            )
+            async with sem:
+                # A7: no per-call timeout — _call uses the shared _CALL_TIMEOUT
+                # (60s) so the map phase can't pin the pool to a shorter value
+                # that would starve the reduce call.
+                return await DocumentChain._call(
+                    mlx_url,
+                    [{"role": "user", "content": f"Document: {doc}\n\nQuestion: {query}\n\nSummary:"}],
+                    1024,
+                )
 
         summaries = await asyncio.gather(*[map_doc(d) for d in docs])
         combined = "\n\n".join(summaries)
@@ -254,5 +274,4 @@ class DocumentChain:
             mlx_url,
             [{"role": "user", "content": f"Summaries:\n{combined}\n\nQuestion: {query}\n\nFinal answer:"}],
             4096,
-            60.0,
         )
