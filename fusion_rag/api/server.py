@@ -11,9 +11,9 @@ from fastapi import FastAPI
 
 from ..embed.client import EmbeddingClient
 from ..engine.knowledge_base import KnowledgeBaseManager
+from .app_state import bind_app_state, init_app_state
 from .mcp_server import router as mcp_router
 from .routes import router as kb_router
-from .routes import set_kb_context
 from .routes_auth import router as auth_router
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,11 @@ def create_app(
     # and the LRU pool's eviction tasks never run if the loop is exiting.
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        set_kb_context(kb_manager, embed_client)
+        # 硬伤1: populate per-app state on app.state (shared services + the
+        # per-app mutable dicts tasks/watches/kb_locks/project_kb_map). The
+        # contextvar-binding middleware is registered on the app below (must
+        # happen before the middleware stack is built, not inside lifespan).
+        init_app_state(app, kb_manager, embed_client)
         logger.info("lifespan: startup complete, kb_manager=%d bases", kb_manager.count)
         try:
             yield
@@ -65,6 +69,12 @@ def create_app(
         version="0.6.0",
         lifespan=lifespan,
     )
+
+    # 硬伤1: bind each request's app.state to a contextvar so the no-arg
+    # accessors (get_kb_manager / get_embed_client / ...) resolve the current
+    # request's app without a Request parameter. Registered on the app object,
+    # not in the lifespan — middleware cannot be added after the stack starts.
+    app.middleware("http")(bind_app_state)
 
     app.include_router(kb_router)
     app.include_router(mcp_router)

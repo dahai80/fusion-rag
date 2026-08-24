@@ -6,25 +6,15 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 
 from .._validators import validate_identifier
-from ..engine.knowledge_base import KnowledgeBaseManager
+from .app_state import get_kb_manager
 from .auth import verify_api_key
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["admin"])
 
-_kb_manager: KnowledgeBaseManager | None = None
-
-
-def set_admin_kb_manager(kb_manager: KnowledgeBaseManager) -> None:
-    global _kb_manager
-    _kb_manager = kb_manager
-
-
-def _get_kb_manager() -> KnowledgeBaseManager:
-    if _kb_manager is None:
-        raise HTTPException(503, "Knowledge base manager not initialized")
-    return _kb_manager
+# 硬伤1: read kb_manager from app.state via contextvar, not a module global.
+_get_kb_manager = get_kb_manager
 
 
 def _get_base(kb_id: str):

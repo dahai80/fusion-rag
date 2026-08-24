@@ -10,55 +10,40 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 
 from .._validators import ValidationError, validate_identifier, validate_path_under_root
-from ..embed.client import EmbeddingClient
 from ..engine.chunker import Chunker
 from ..engine.contextualizer import Contextualizer
 from ..engine.document import DocumentParser, DocumentType, ParseResult
-from ..engine.knowledge_base import KnowledgeBaseManager
 from ..engine.llm_errors import LLMUnavailable
 from ..store.metadata_store import MetadataStore
 from ..store.vector_store import VectorStore
+from .app_state import get_embed_client, get_kb_locks, get_kb_manager, get_tasks, get_watches
 from .auth import verify_api_key
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["documents"])
 
-_kb_manager: KnowledgeBaseManager | None = None
-_embed_client: EmbeddingClient | None = None
+# _doc_parser is stateless and safe to share across requests.
 _doc_parser = DocumentParser()
-_tasks: dict[str, dict[str, Any]] = {}
-_watches: dict[str, dict[str, Any]] = {}
-# L12: per-KB lock guarding the read-modify-write of file_count/chunk_count.
-# Concurrent ingest on the same KB otherwise loses updates (both read N, both
-# write N+1). Keyed by kb_id; lazily created.
-_kb_locks: dict[str, asyncio.Lock] = {}
+
+# 硬伤1: per-app state (_kb_manager / _embed_client / _tasks / _watches /
+# _kb_locks) now lives on app.state, read per-request via a contextvar. The
+# mutable dicts (tasks/watches/locks) are per-app so a reload rebuilds them
+# fresh instead of carrying stale module globals across app instances.
+_get_kb_manager = get_kb_manager
+_get_embed_client = get_embed_client
 
 
 def _kb_lock(kb_id: str) -> asyncio.Lock:
-    lock = _kb_locks.get(kb_id)
+    # L12: per-KB lock guarding the read-modify-write of file_count/chunk_count.
+    # Concurrent ingest on the same KB otherwise loses updates (both read N,
+    # both write N+1). Keyed by kb_id; lazily created in app.state.kb_locks.
+    locks = get_kb_locks()
+    lock = locks.get(kb_id)
     if lock is None:
         lock = asyncio.Lock()
-        _kb_locks[kb_id] = lock
+        locks[kb_id] = lock
     return lock
-
-
-def set_doc_context(kb_manager: KnowledgeBaseManager, embed_client: EmbeddingClient) -> None:
-    global _kb_manager, _embed_client
-    _kb_manager = kb_manager
-    _embed_client = embed_client
-
-
-def _get_kb_manager() -> KnowledgeBaseManager:
-    if _kb_manager is None:
-        raise HTTPException(503, "Knowledge base manager not initialized")
-    return _kb_manager
-
-
-def _get_embed_client() -> EmbeddingClient:
-    if _embed_client is None:
-        raise HTTPException(503, "Embedding client not initialized")
-    return _embed_client
 
 
 def _get_base(kb_id: str):
@@ -451,7 +436,7 @@ async def document_status(kb_id: str, doc_id: str) -> dict[str, Any]:
 
     doc = meta_store.get_document(doc_id)
     if not doc:
-        task = _tasks.get(doc_id)
+        task = get_tasks().get(doc_id)
         if task and task.get("kb_id") == kb_id:
             return {
                 "doc_id": doc_id,
@@ -581,7 +566,7 @@ def _file_hash(path: str) -> str:
 
 
 async def _watch_loop(watch_id: str) -> None:
-    watch = _watches.get(watch_id)
+    watch = get_watches().get(watch_id)
     if not watch:
         return
     kb_id = watch["kb_id"]
@@ -646,8 +631,8 @@ async def watch_files(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
         "active": True,
         "changes_detected": 0,
     }
-    _watches[watch_id] = watch
-    _watches[watch_id]["_task"] = asyncio.create_task(_watch_loop(watch_id))
+    get_watches()[watch_id] = watch
+    get_watches()[watch_id]["_task"] = asyncio.create_task(_watch_loop(watch_id))
     logger.info("watch: created watch_id=%s, %d files", watch_id, len(valid_paths))
     return {"watch_id": watch_id, "file_count": len(valid_paths), "poll_interval": poll_interval}
 
@@ -655,18 +640,19 @@ async def watch_files(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
 @router.post("/bases/{kb_id}/unwatch", dependencies=[Depends(verify_api_key)])
 async def unwatch_files(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     watch_id = data.get("watch_id", "")
-    watch = _watches.get(watch_id)
+    watches = get_watches()
+    watch = watches.get(watch_id)
     if not watch or watch["kb_id"] != kb_id:
         raise HTTPException(404, f"Watch not found: {watch_id}")
     watch["active"] = False
     changes = watch.get("changes_detected", 0)
-    del _watches[watch_id]
+    del watches[watch_id]
     return {"stopped": True, "watch_id": watch_id, "changes_detected": changes}
 
 
 @router.get("/bases/{kb_id}/watch/status", dependencies=[Depends(verify_api_key)])
 async def watch_status(kb_id: str) -> dict[str, Any]:
-    active = [w for w in _watches.values() if w["kb_id"] == kb_id and w.get("active")]
+    active = [w for w in get_watches().values() if w["kb_id"] == kb_id and w.get("active")]
     return {
         "active_watches": len(active),
         "watches": [

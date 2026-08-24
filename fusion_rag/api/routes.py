@@ -7,19 +7,15 @@ from fastapi import APIRouter, HTTPException
 from fusion_core.http_client import get_async_client, with_retry
 
 from .._validators import validate_identifier
-from ..embed.client import EmbeddingClient
-from ..engine.knowledge_base import KnowledgeBaseManager
 from ..engine.llm_errors import LLMUnavailable
 from ..engine.reranker import Reranker
 from ..store.metadata_store import MetadataStore
 from ..store.vector_store import VectorStore
+from .app_state import get_embed_client, get_kb_manager
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/kb", tags=["knowledge-base"])
-
-_kb_manager: KnowledgeBaseManager | None = None
-_embed_client: EmbeddingClient | None = None
 
 _DEFAULT_SYSTEM_PROMPT = (
     "You are a knowledge base assistant. Answer the user's question based "
@@ -28,32 +24,13 @@ _DEFAULT_SYSTEM_PROMPT = (
 )
 
 
-def set_kb_context(kb_manager: KnowledgeBaseManager, embed_client: EmbeddingClient) -> None:
-    global _kb_manager, _embed_client
-    _kb_manager = kb_manager
-    _embed_client = embed_client
-
-    from .routes_admin import set_admin_kb_manager as _set_admin
-    from .routes_docs import set_doc_context as _set_doc
-    from .routes_kb import set_kb_context as _set_kb
-    from .routes_project import set_project_context as _set_proj
-
-    _set_kb(kb_manager, embed_client)
-    _set_doc(kb_manager, embed_client)
-    _set_admin(kb_manager)
-    _set_proj(kb_manager)
-
-
-def _get_kb_manager() -> KnowledgeBaseManager:
-    if _kb_manager is None:
-        raise HTTPException(503, "Knowledge base manager not initialized")
-    return _kb_manager
-
-
-def _get_embed_client() -> EmbeddingClient:
-    if _embed_client is None:
-        raise HTTPException(503, "Embedding client not initialized")
-    return _embed_client
+# 硬伤1: per-app state lives on app.state (populated by init_app_state in the
+# lifespan) and is read per-request via a contextvar. These no-arg accessors
+# delegate to app_state so existing callers (_get_base, _do_rerank,
+# _generate_answer, and the `from .routes import _get_embed_client` in
+# routes_search) keep working without a Request parameter.
+_get_kb_manager = get_kb_manager
+_get_embed_client = get_embed_client
 
 
 def _get_base(kb_id: str):
@@ -200,8 +177,20 @@ async def _generate_answer(
 
 @router.get("/status")
 async def status() -> dict[str, Any]:
-    kb_count = _get_kb_manager().count if _kb_manager else 0
-    embed_ok = await _get_embed_client().health() if _embed_client else False
+    # 硬伤1: read via contextvar accessors. /status is a readiness probe, so
+    # if the app state isn't bound yet (startup race / direct call) degrade
+    # gracefully to "not ready" rather than 503-ing the probe.
+    try:
+        kb_count = _get_kb_manager().count
+    except HTTPException:
+        kb_count = 0
+    try:
+        embed_ok = await _get_embed_client().health()
+    except HTTPException:
+        embed_ok = False
+    except Exception as e:
+        logger.warning("/status: embed health check failed: %s", e)
+        embed_ok = False
     return {
         "status": "ok",
         "knowledge_bases": kb_count,
