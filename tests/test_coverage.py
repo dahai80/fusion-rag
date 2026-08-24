@@ -114,7 +114,9 @@ class TestAPIRoutes:
 class TestEmbeddingClientAdvanced:
     @pytest.mark.asyncio
     async def test_embed_batch_with_retry(self):
-        client = EmbeddingClient(base_url="http://localhost:11432/v1")
+        # M1: cache_enabled=False — shared EmbeddingCache SQLite would otherwise
+        # serve a stale vector and the HTTP mock would never be exercised.
+        client = EmbeddingClient(base_url="http://localhost:11432/v1", cache_enabled=False)
         mock_http = MagicMock()
         mock_http.post = AsyncMock()
         # First call fails, second succeeds
@@ -130,18 +132,26 @@ class TestEmbeddingClientAdvanced:
 
     @pytest.mark.asyncio
     async def test_embed_batch_all_fail(self):
-        client = EmbeddingClient(base_url="http://localhost:11432/v1", max_retries=1)
+        # F7/M1: total failure (HTTP + local both fail) must raise EmbeddingError,
+        # never return zero vectors that get cached/persisted as search poison.
+        # cache_enabled=False so the shared cache can't mask the failure.
+        from fusion_rag.embed.client import EmbeddingError
+
+        client = EmbeddingClient(
+            base_url="http://localhost:11432/v1", max_retries=1, cache_enabled=False
+        )
         mock_http = MagicMock()
         mock_http.post = AsyncMock(side_effect=RuntimeError("always fail"))
         client._client = mock_http
-        results = await client.embed_batch(["test"])
-        # Should return zero vectors on failure
-        assert len(results) == 1
-        assert len(results[0]) == 1024
+        # Block the local sentence-transformers fallback so all providers fail.
+        with patch("fusion_rag.embed.local.get_local_model", return_value=None):
+            with pytest.raises(EmbeddingError):
+                await client.embed_batch(["test"])
 
     @pytest.mark.asyncio
     async def test_embed_single(self):
-        client = EmbeddingClient(base_url="http://localhost:11432/v1")
+        # M1: cache_enabled=False to force the HTTP path.
+        client = EmbeddingClient(base_url="http://localhost:11432/v1", cache_enabled=False)
         mock_http = MagicMock()
         mock_http.post = AsyncMock(return_value=MagicMock(
             status_code=200, json=lambda: {

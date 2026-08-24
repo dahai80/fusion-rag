@@ -49,12 +49,14 @@ def get_local_model(model_name: str = "BAAI/bge-m3") -> Any:
 
 
 def embed_local(texts: list[str], model_name: str = "BAAI/bge-m3") -> list[list[float]]:
+    # F7: model unavailable or encode failure must raise, not return zero
+    # vectors — zero vectors get cached + persisted as search poison.
     model = get_local_model(model_name)
     if model is None:
-        return [[0.0] * 1024 for _ in texts]
+        raise RuntimeError(f"local embedding model unavailable: {model_name}")
     try:
         embeddings = model.encode(texts, normalize_embeddings=True)
         return [emb.tolist() for emb in embeddings]
     except Exception as e:
         logger.error("Local embedding encode failed: %s", e)
-        return [[0.0] * 1024 for _ in texts]
+        raise RuntimeError(f"local embedding encode failed: {e}") from e

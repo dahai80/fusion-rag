@@ -60,8 +60,16 @@ class LocalBackend(StoreBackend):
             self._table = self._db.open_table(table_name)
             self._migrate_schema(self._table, schema)
         except Exception as e:
-            logger.warning("LocalBackend open failed, creating new: %s", e)
-            self._table = self._db.create_table(table_name, schema=schema)
+            # F8: only rebuild on a missing-table condition; any other error
+            # (corrupt index, schema mismatch, IO) must surface — silently
+            # rebuilding an empty table wiped real data on transient faults.
+            msg = str(e).lower()
+            if "does not exist" in msg or "not found" in msg or isinstance(e, FileNotFoundError):
+                logger.info("LocalBackend table '%s' absent, creating new", table_name)
+                self._table = self._db.create_table(table_name, schema=schema)
+            else:
+                logger.error("LocalBackend open_table failed (not auto-rebuilding): %s", e)
+                raise
 
     def _migrate_schema(self, table, target_schema) -> None:
         existing_fields = {f.name for f in table.schema}
@@ -70,10 +78,9 @@ class LocalBackend(StoreBackend):
             return
         for field in missing:
             logger.info("Migrating schema: adding column '%s'", field.name)
-            try:
-                table.add_columns({field.name: "''"})
-            except Exception as e:
-                logger.warning("Schema migration failed for '%s': %s", field.name, e)
+            # F8: a failed migration leaves a half-applied schema — abort loudly
+            # rather than swallow + continue on a corrupt table.
+            table.add_columns({field.name: "''"})
 
     @property
     def table(self):
