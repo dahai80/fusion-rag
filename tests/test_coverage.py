@@ -356,22 +356,40 @@ class TestRerankerAdvanced:
 class TestConnectorsAdvanced:
     @pytest.mark.asyncio
     async def test_web_loader_success(self):
+        # M1 fix: deterministic content via MockTransport (no network, no fake-green).
+        # Capture the real class before patching, then re-enter the mock transport.
+        import httpx
+
+        real_async_client = httpx.AsyncClient
+
+        def fake_client(*args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(
+                lambda req: httpx.Response(200, content=b"<html><body><p>Hello world</p></body></html>")
+            )
+            return real_async_client(**kwargs)
+
         from fusion_rag.connectors import WebLoader
         loader = WebLoader()
-        with patch("httpx.AsyncClient.get", new=AsyncMock()) as mock_get:
-            mock_resp = MagicMock()
-            mock_resp.status_code = 200
-            mock_resp.text = "<html><body><p>Hello world</p></body></html>"
-            mock_resp.raise_for_status = MagicMock()
-            mock_get.return_value = mock_resp
+        with patch("httpx.AsyncClient", new=fake_client):
             result = await loader.load("http://example.com")
             assert "Hello" in result["content"]
 
     @pytest.mark.asyncio
     async def test_web_loader_error(self):
+        import httpx
+
+        real_async_client = httpx.AsyncClient
+
+        def handler(req):
+            raise httpx.ConnectError("fail")
+
+        def fake_client(*args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(handler)
+            return real_async_client(**kwargs)
+
         from fusion_rag.connectors import WebLoader
         loader = WebLoader()
-        with patch("httpx.AsyncClient.get", side_effect=RuntimeError("fail")):
+        with patch("httpx.AsyncClient", new=fake_client):
             result = await loader.load("http://example.com")
             assert "error" in result
 

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 from typing import Any
+
+from .._validators import validate_git_url
 
 logger = logging.getLogger(__name__)
 
@@ -12,14 +15,30 @@ logger = logging.getLogger(__name__)
 class GitLoader:
     def __init__(self, work_dir: str = ""):
         self.work_dir = work_dir or tempfile.mkdtemp(prefix="fusion_git_")
+        self._owns_work_dir = not bool(work_dir)
 
     def clone(self, repo_url: str, branch: str = "main", depth: int = 1) -> str:
+        # F3 fix: validate scheme + reject ext:: (RCE via git transport/hook).
+        validate_git_url(repo_url, field="repo_url")
         target = os.path.join(self.work_dir, repo_url.split("/")[-1].replace(".git", ""))
         if os.path.exists(target):
             logger.info("Git repo already cloned at %s, pulling latest", target)
             self._run_git(["pull", "--ff-only"], cwd=target)
             return target
-        cmd = ["git", "clone", "--branch", branch, "--depth", str(depth), repo_url, target]
+        # F3: disable hooks to block post-checkout RCE; set core.hooksPath=/dev/null.
+        cmd = [
+            "git",
+            "clone",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "--no-install-hooks",
+            "--branch",
+            branch,
+            "--depth",
+            str(depth),
+            repo_url,
+            target,
+        ]
         self._run_git(cmd)
         logger.info("Cloned %s (branch=%s) to %s", repo_url, branch, target)
         return target
@@ -46,33 +65,41 @@ class GitLoader:
                 all_files.append(os.path.join(root, f))
         return all_files
 
-    def clone_and_index(
+    async def clone_and_index(
         self, repo_url: str, branch: str = "main", patterns: list[str] | None = None, depth: int = 1
     ) -> list[dict[str, Any]]:
-        repo_path = self.clone(repo_url, branch=branch, depth=depth)
-        files = self.list_files(repo_path, patterns=patterns)
-        results = []
+        # F4 fix: async + await parser.parse (was sync call to async -> coroutine,
+        # AttributeError swallowed by broad except -> always returned []). M6: cleanup work_dir.
         from ..engine.document import DocumentParser
 
+        owns = self._owns_work_dir
         parser = DocumentParser()
-        for fpath in files:
-            try:
-                parsed = parser.parse(fpath)
-                results.append(
-                    {
-                        "file_path": fpath,
-                        "file_name": os.path.basename(fpath),
-                        "content": parsed.content,
-                        "doc_type": parsed.doc_type.value
-                        if hasattr(parsed.doc_type, "value")
-                        else str(parsed.doc_type),
-                        "chars": parsed.chars,
-                    }
-                )
-            except Exception as e:
-                logger.warning("Failed to parse %s: %s", fpath, e)
-        logger.info("Indexed %d/%d files from %s", len(results), len(files), repo_url)
-        return results
+        try:
+            repo_path = self.clone(repo_url, branch=branch, depth=depth)
+            files = self.list_files(repo_path, patterns=patterns)
+            results = []
+            for fpath in files:
+                try:
+                    parsed = await parser.parse(fpath)
+                    results.append(
+                        {
+                            "file_path": fpath,
+                            "file_name": os.path.basename(fpath),
+                            "content": parsed.content,
+                            "doc_type": parsed.doc_type.value
+                            if hasattr(parsed.doc_type, "value")
+                            else str(parsed.doc_type),
+                            "chars": parsed.chars,
+                        }
+                    )
+                except Exception as e:
+                    logger.warning("Failed to parse %s: %s", fpath, e)
+            logger.info("Indexed %d/%d files from %s", len(results), len(files), repo_url)
+            return results
+        finally:
+            if owns:
+                shutil.rmtree(self.work_dir, ignore_errors=True)
+                logger.debug("clone_and_index cleaned work_dir=%s", self.work_dir)
 
     def _run_git(self, cmd: list[str], cwd: str | None = None) -> str:
         try:

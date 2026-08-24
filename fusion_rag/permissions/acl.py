@@ -42,16 +42,12 @@ class ACL:
     def check(self, subject: str, action: str, resource_path: str) -> bool:
         logger.debug("ACL check: subject=%s action=%s resource_path=%s", subject, action, resource_path)
 
-        for rule in self.rules:
-            if rule.subject != subject:
-                continue
-            if rule.subject == Role.ADMIN.value:
-                logger.debug("ACL: ADMIN subject %s allowed by default", subject)
-                return True
-
-        for rule in self.rules:
-            if rule.subject == subject and rule.subject == Role.ADMIN.value:
-                break
+        # F1/F2/M5 fix: admin bypasses via subject flag, never via rule inheritance.
+        # Admin access does NOT depend on a rule existing (admin semantics are not
+        # inverted). Non-admin subjects never inherit admin's permission.
+        if subject == Role.ADMIN.value:
+            logger.debug("ACL: ADMIN subject %s allowed by role flag", subject)
+            return True
 
         matching_rules = []
         for rule in self.rules:
@@ -230,11 +226,9 @@ class PermissionManager:
         acl = ACL(rules)
         result = acl.check(subject, action, resource_path)
 
-        if subject != Role.ADMIN.value:
-            admin_result = acl.check(Role.ADMIN.value, action, resource_path)
-            if admin_result:
-                logger.debug("check_permission: subject=%s inherits ADMIN permission", subject)
-                result = True
+        # F1 fix: removed cross-subject admin inheritance. A non-admin subject
+        # must never be granted access because an admin rule matched the
+        # resource. Admin bypass lives inside ACL.check (subject flag only).
 
         logger.debug("check_permission result: %s", result)
         return result
