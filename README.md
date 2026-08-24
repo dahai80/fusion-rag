@@ -8,8 +8,8 @@ Local vector knowledge base service for the Fusion-MLX ecosystem — 100% offlin
 
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-164-success.svg)](tests/)
-[![Version](https://img.shields.io/badge/Version-0.6.7-blue.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-234-success.svg)](tests/)
+[![Version](https://img.shields.io/badge/Version-0.6.8-blue.svg)]()
 
 [Quick Start](#quick-start) · [API Reference](#api-reference) · [Architecture](#architecture) · [Documentation](docs/)
 
