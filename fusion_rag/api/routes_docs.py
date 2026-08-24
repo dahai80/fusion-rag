@@ -9,6 +9,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from .._validators import ValidationError, validate_identifier, validate_path_under_root
 from ..embed.client import EmbeddingClient
 from ..engine.chunker import Chunker
 from ..engine.contextualizer import Contextualizer
@@ -48,10 +49,38 @@ def _get_embed_client() -> EmbeddingClient:
 
 
 def _get_base(kb_id: str):
+    # F12: confine kb_id before any path construction.
+    try:
+        validate_identifier(kb_id, field="kb_id")
+    except ValueError:
+        raise HTTPException(400, f"Invalid kb_id: {kb_id}")
     try:
         return _get_kb_manager().get(kb_id)
     except KeyError:
         raise HTTPException(404, f"Knowledge base '{kb_id}' not found")
+
+
+def _check_ingest_root(file_path: str) -> None:
+    """F15: LFI guard — when FUSION_RAG_INGEST_ROOTS is set, confine reads to it.
+
+    Local-first tool: an unset env means no confinement (operator opted into
+    unrestricted local indexing). When set (colon-separated), every ingest path
+    must resolve under one of the configured roots, blocking /etc/passwd etc.
+    """
+    roots_env = os.environ.get("FUSION_RAG_INGEST_ROOTS", "").strip()
+    if not roots_env:
+        return
+    roots = [r.strip() for r in roots_env.split(":") if r.strip()]
+    if not roots:
+        return
+    for root in roots:
+        try:
+            validate_path_under_root(file_path, root=root, field="file_path")
+            return
+        except ValidationError:
+            continue
+    logger.warning("ingest path rejected by root confinement: %s", file_path)
+    raise HTTPException(403, "file_path not under a configured ingest root")
 
 
 def _get_vector_store(kb_id: str) -> VectorStore:
@@ -66,6 +95,8 @@ def _get_meta_store(kb_id: str) -> MetadataStore:
 
 async def _index_document(kb_id: str, file_path: str, contextualize: bool = True) -> dict:
     kb = _get_base(kb_id)
+    # F15: LFI guard — reject paths escaping the configured ingest root.
+    _check_ingest_root(file_path)
     result = await _doc_parser.parse(file_path)
     if result.error:
         return {"error": result.error}
@@ -394,6 +425,8 @@ async def scan_directory(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     dir_path = data.get("dir_path", "")
     if not dir_path:
         raise HTTPException(400, "dir_path is required")
+    # F15: LFI guard on the scanned directory root.
+    _check_ingest_root(dir_path)
 
     results = await _doc_parser.parse_directory(dir_path, recursive=True, max_files=1000)
     embed = _get_embed_client()
@@ -511,14 +544,20 @@ async def _watch_loop(watch_id: str) -> None:
     logger.info("watch %s: stopped", watch_id)
 
 
-@router.post("/bases/{kb_id}/watch")
+@router.post("/bases/{kb_id}/watch", dependencies=[Depends(verify_api_key)])
 async def watch_files(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     _get_base(kb_id)
     file_paths = data.get("file_paths", [])
     poll_interval = max(data.get("poll_interval", 30), 10)
     if not file_paths:
         raise HTTPException(400, "file_paths is required")
-    valid_paths = [fp for fp in file_paths if os.path.isfile(fp)]
+    # F15: every watched file must sit under the ingest root (re-index reads it).
+    valid_paths = []
+    for fp in file_paths:
+        if not os.path.isfile(fp):
+            continue
+        _check_ingest_root(fp)
+        valid_paths.append(fp)
     if not valid_paths:
         raise HTTPException(400, "No valid file paths provided")
     hashes = {}
@@ -542,7 +581,7 @@ async def watch_files(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     return {"watch_id": watch_id, "file_count": len(valid_paths), "poll_interval": poll_interval}
 
 
-@router.post("/bases/{kb_id}/unwatch")
+@router.post("/bases/{kb_id}/unwatch", dependencies=[Depends(verify_api_key)])
 async def unwatch_files(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     watch_id = data.get("watch_id", "")
     watch = _watches.get(watch_id)
@@ -554,7 +593,7 @@ async def unwatch_files(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     return {"stopped": True, "watch_id": watch_id, "changes_detected": changes}
 
 
-@router.get("/bases/{kb_id}/watch/status")
+@router.get("/bases/{kb_id}/watch/status", dependencies=[Depends(verify_api_key)])
 async def watch_status(kb_id: str) -> dict[str, Any]:
     active = [w for w in _watches.values() if w["kb_id"] == kb_id and w.get("active")]
     return {

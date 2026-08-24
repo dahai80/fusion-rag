@@ -9,6 +9,7 @@ user instruction: "修复所有的issue和pr"
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 import os
 import sqlite3
@@ -53,7 +54,17 @@ class ApiKeyBackend(AuthBackend):
             return None
         if not api_key:
             raise HTTPException(401, "API key required. Set X-API-Key header.")
-        if api_key == self.admin_key or self.auth_config.validate_key(api_key):
+        # F11: constant-time compare for the admin key — `==` short-circuits on
+        # the first differing byte and leaks the matching prefix over the wire.
+        try:
+            admin_ok = hmac.compare_digest(api_key, self.admin_key)
+            store_ok = self.auth_config.validate_key(api_key)
+        except Exception as e:
+            # F14: fail-closed — any backend error during validation denies,
+            # never silently authenticates.
+            logger.error("auth backend error, denying (fail-closed): %s", e)
+            raise HTTPException(401, "Authentication failed")
+        if admin_ok or store_ok:
             return api_key
         raise HTTPException(401, "Invalid API key")
 

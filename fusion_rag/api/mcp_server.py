@@ -15,6 +15,8 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from .auth import get_auth_backend
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
@@ -123,6 +125,19 @@ async def mcp_handler(request: Request) -> JSONResponse:
         )
 
     if method == "tools/call":
+        # F13: MCP tool calls read/create KBs + upload docs — enforce the same
+        # API-key auth as the REST surface. initialize/tools/list stay open per
+        # MCP discovery, but tools/call must not bypass auth when it is enabled.
+        api_key = request.headers.get("X-API-Key")
+        try:
+            get_auth_backend().verify(api_key)
+        except Exception as e:
+            detail = getattr(e, "detail", str(e))
+            status = getattr(e, "status_code", 401)
+            return JSONResponse(
+                {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32001, "message": detail}},
+                status_code=status,
+            )
         tool_name = params.get("name", "")
         arguments = params.get("arguments", {})
         result = await _dispatch_tool(tool_name, arguments)
@@ -190,9 +205,10 @@ async def _dispatch_tool(name: str, args: dict) -> Any:
             return await _generate_answer(question, context, chunks)
 
         if name == "kb_upload":
-            from .routes import upload_document
+            from .routes_docs import _index_document
 
-            return await upload_document(args["kb_id"], args)
+            result = await _index_document(args["kb_id"], args["file_path"])
+            return result
 
         if name == "kb_status":
             kb = _get_base(args["kb_id"])

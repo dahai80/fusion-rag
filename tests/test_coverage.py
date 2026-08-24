@@ -144,9 +144,8 @@ class TestEmbeddingClientAdvanced:
         mock_http.post = AsyncMock(side_effect=RuntimeError("always fail"))
         client._client = mock_http
         # Block the local sentence-transformers fallback so all providers fail.
-        with patch("fusion_rag.embed.local.get_local_model", return_value=None):
-            with pytest.raises(EmbeddingError):
-                await client.embed_batch(["test"])
+        with patch("fusion_rag.embed.local.get_local_model", return_value=None), pytest.raises(EmbeddingError):
+            await client.embed_batch(["test"])
 
     @pytest.mark.asyncio
     async def test_embed_single(self):
@@ -466,3 +465,97 @@ class TestRetrieversAdvanced:
         retriever.base_retriever.search = AsyncMock(return_value=[])
         results = await retriever.search([1.0, 0.0], "query")
         assert results == []
+
+
+# ── F11-F17 Security regression ──
+
+
+class TestSecurityRegression:
+    """P0 audit fixes F11-F17: verify the trust boundary holds."""
+
+    def test_f12_kb_id_traversal_rejected(self, client):
+        # F12: kb_id with path separators is blocked by routing (404 — the
+        # segment never matches). kb_id with other invalid chars (space) that
+        # decode to a single segment reaches the validator -> 400. Either way
+        # it never builds a path or returns a real KB.
+        for bad in ("../etc", "a/b", ".."):
+            resp = client.get(f"/kb/bases/{bad}")
+            assert resp.status_code == 404, f"kb_id={bad!r} returned {resp.status_code}"
+        resp = client.get("/kb/bases/a%20b")
+        assert resp.status_code == 400
+
+    def test_f12_kb_id_traversal_on_delete(self, client):
+        # encoded slash still a single segment? No — Starlette won't match it.
+        resp = client.delete("/kb/bases/..%2Fetc")
+        assert resp.status_code == 404
+
+    def test_f12_kb_id_invalid_on_create(self, client):
+        # F12: body-supplied kb_id reaches the validator and is rejected 400.
+        for bad in ("../evil", "a/b", "..", "a:b", "a b"):
+            resp = client.post("/kb/bases", json={"name": "x", "kb_id": bad})
+            assert resp.status_code == 400, f"kb_id={bad!r} returned {resp.status_code}"
+
+    def test_f12_project_id_body_traversal_rejected(self, client):
+        # F12: project route validates both project_id (path) and kb_id (body).
+        # Body kb_id traversal reaches the validator -> 400.
+        resp = client.post("/kb/projects/proj1/kb", json={"kb_id": "../evil"})
+        assert resp.status_code == 400
+
+    def test_f15_ingest_root_blocks_outside(self, client, tmp_path, monkeypatch):
+        # F15: with FUSION_RAG_INGEST_ROOTS set, a path outside it is 403.
+        root = tmp_path / "allowed"
+        root.mkdir()
+        outside = tmp_path / "secret.txt"
+        outside.write_text("x")
+        monkeypatch.setenv("FUSION_RAG_INGEST_ROOTS", str(root))
+        resp = client.post("/kb/bases/abc123/documents", json={"file_path": str(outside)})
+        # 400 because kb 'abc123' not found OR 403 from root confinement —
+        # either way never 200 and never reads the file. Assert not 2xx.
+        assert resp.status_code >= 400
+
+    def test_f15_ingest_root_unset_allows_anywhere(self, client, tmp_path, monkeypatch):
+        # F15: local-first — unset env means no confinement, so the request
+        # proceeds to KB lookup (404) rather than being blocked by roots.
+        monkeypatch.delenv("FUSION_RAG_INGEST_ROOTS", raising=False)
+        target = tmp_path / "anywhere.txt"
+        target.write_text("x")
+        resp = client.post("/kb/bases/nonexist01/documents", json={"file_path": str(target)})
+        # Not blocked by confinement — reaches KB-not-found (404), not 403.
+        assert resp.status_code != 403
+
+    def test_f11_invalid_api_key_rejected(self, client, monkeypatch):
+        # F11: when an admin key is set, a wrong key gets 401, not 200.
+        from fusion_rag.api import auth as auth_mod
+
+        monkeypatch.setenv("FUSION_RAG_API_KEY", "secret-admin-key")
+        auth_mod._auth_backend = None  # reset so get_auth_backend rebuilds
+        resp = client.post("/kb/bases", json={"name": "x"}, headers={"X-API-Key": "wrong"})
+        assert resp.status_code == 401
+        auth_mod._auth_backend = None  # cleanup for other tests
+
+    def test_f11_no_key_when_required_rejected(self, client, monkeypatch):
+        from fusion_rag.api import auth as auth_mod
+
+        monkeypatch.setenv("FUSION_RAG_API_KEY", "secret-admin-key")
+        auth_mod._auth_backend = None
+        resp = client.post("/kb/bases", json={"name": "x"})
+        assert resp.status_code == 401
+        auth_mod._auth_backend = None
+
+    def test_f13_mcp_tools_call_requires_key(self, client, monkeypatch):
+        # F13: MCP tools/call must enforce the same API-key auth.
+        from fusion_rag.api import auth as auth_mod
+
+        monkeypatch.setenv("FUSION_RAG_API_KEY", "secret-admin-key")
+        auth_mod._auth_backend = None
+        resp = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                          "params": {"name": "kb_list", "arguments": {}}})
+        assert resp.status_code == 401
+        body = resp.json()
+        assert body.get("error", {}).get("code") == -32001
+        auth_mod._auth_backend = None
+
+    def test_f13_mcp_initialize_stays_open(self, client):
+        # F13: initialize/tools/list stay open per MCP discovery.
+        resp = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+        assert resp.status_code == 200

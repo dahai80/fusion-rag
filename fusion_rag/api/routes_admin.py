@@ -5,6 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from .._validators import validate_identifier
 from ..engine.knowledge_base import KnowledgeBaseManager
 from .auth import verify_api_key
 
@@ -27,6 +28,11 @@ def _get_kb_manager() -> KnowledgeBaseManager:
 
 
 def _get_base(kb_id: str):
+    # F12: confine kb_id before path construction.
+    try:
+        validate_identifier(kb_id, field="kb_id")
+    except ValueError:
+        raise HTTPException(400, f"Invalid kb_id: {kb_id}")
     try:
         return _get_kb_manager().get(kb_id)
     except KeyError:
@@ -51,7 +57,7 @@ async def create_snapshot(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     return vm.create_snapshot(kb_id, _get_kb_storage_path(kb_id), description)
 
 
-@router.get("/bases/{kb_id}/versions")
+@router.get("/bases/{kb_id}/versions", dependencies=[Depends(verify_api_key)])
 async def list_snapshots(kb_id: str) -> list[dict[str, Any]]:
     _get_base(kb_id)
     from ..engine.version_manager import VersionManager
@@ -60,7 +66,7 @@ async def list_snapshots(kb_id: str) -> list[dict[str, Any]]:
     return vm.list_snapshots(kb_id)
 
 
-@router.get("/bases/{kb_id}/versions/{version_id}")
+@router.get("/bases/{kb_id}/versions/{version_id}", dependencies=[Depends(verify_api_key)])
 async def get_snapshot(kb_id: str, version_id: str) -> dict[str, Any]:
     _get_base(kb_id)
     from ..engine.version_manager import VersionManager
@@ -98,7 +104,7 @@ async def delete_snapshot(kb_id: str, version_id: str) -> dict[str, Any]:
 # ── Search Templates ──
 
 
-@router.get("/bases/{kb_id}/templates")
+@router.get("/bases/{kb_id}/templates", dependencies=[Depends(verify_api_key)])
 async def list_templates(kb_id: str) -> list[dict[str, Any]]:
     _get_base(kb_id)
     from ..engine.search_template import SearchTemplateManager
@@ -140,7 +146,7 @@ async def delete_template(kb_id: str, name: str) -> dict[str, Any]:
 # ── Permissions ──
 
 
-@router.get("/bases/{kb_id}/permissions")
+@router.get("/bases/{kb_id}/permissions", dependencies=[Depends(verify_api_key)])
 async def list_permissions(kb_id: str) -> list[dict[str, Any]]:
     _get_base(kb_id)
     from ..permissions import PermissionManager
@@ -195,7 +201,7 @@ async def check_permission(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
 # ── Audit Logs ──
 
 
-@router.get("/bases/{kb_id}/audit")
+@router.get("/bases/{kb_id}/audit", dependencies=[Depends(verify_api_key)])
 async def list_audit_logs(
     kb_id: str, limit: int = 50, offset: int = 0, caller: str | None = None
 ) -> list[dict[str, Any]]:
@@ -206,7 +212,7 @@ async def list_audit_logs(
     return al.query_logs(kb_id, limit=limit, offset=offset, caller=caller)
 
 
-@router.get("/bases/{kb_id}/audit/{log_id}")
+@router.get("/bases/{kb_id}/audit/{log_id}", dependencies=[Depends(verify_api_key)])
 async def get_audit_log(kb_id: str, log_id: int) -> dict[str, Any]:
     _get_base(kb_id)
     from ..engine.audit_logger import AuditLogger
@@ -218,7 +224,7 @@ async def get_audit_log(kb_id: str, log_id: int) -> dict[str, Any]:
     return log
 
 
-@router.get("/bases/{kb_id}/audit/export")
+@router.get("/bases/{kb_id}/audit/export", dependencies=[Depends(verify_api_key)])
 async def export_audit_logs(kb_id: str, format: str = "json") -> str:
     _get_base(kb_id)
     from ..engine.audit_logger import AuditLogger
@@ -271,7 +277,7 @@ async def run_bench(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     return await bench.run_search_bench(kb_id, vec_store, embed, queries)
 
 
-@router.get("/bases/{kb_id}/bench/results")
+@router.get("/bases/{kb_id}/bench/results", dependencies=[Depends(verify_api_key)])
 async def list_bench_results(kb_id: str, test_name: str | None = None) -> list[dict[str, Any]]:
     _get_base(kb_id)
     from ..engine.bench import BenchRunner

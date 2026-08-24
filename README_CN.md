@@ -184,6 +184,9 @@ Fusion-RAG 通过 `/kb/*` 提供 REST API。
 | `FUSION_RAG_HOST` | 127.0.0.1 | 监听地址 |
 | `FUSION_MLX_URL` | http://127.0.0.1:11432/v1 | fusion-mlx 地址 |
 | `FUSION_RAG_EMBED` | BGE-M3 | Embedding 模型 |
+| `FUSION_RAG_API_KEY` | (空) | API key 鉴权（空=关闭） |
+| `FUSION_RAG_AUTH_BACKEND` | apikey | 鉴权后端：`apikey` 或 `none` |
+| `FUSION_RAG_INGEST_ROOTS` | (空) | 文件入库/扫描/监听的允许根目录（冒号分隔）。空=不限制（本地优先）；设置后限制读取范围，阻断路径遍历/LFI |
 
 ### 使用 start.sh
 

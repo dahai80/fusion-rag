@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from fusion_core.http_client import get_async_client, with_retry
 
+from .._validators import validate_identifier
 from ..embed.client import EmbeddingClient
 from ..engine.knowledge_base import KnowledgeBaseManager
 from ..engine.reranker import Reranker
@@ -55,6 +56,13 @@ def _get_embed_client() -> EmbeddingClient:
 
 
 def _get_base(kb_id: str):
+    # F12: confine kb_id to the identifier charset before it reaches any path
+    # construction (vector_path / metadata_path). Without this, a kb_id of
+    # "../etc" traverses out of the stores root.
+    try:
+        validate_identifier(kb_id, field="kb_id")
+    except ValueError:
+        raise HTTPException(400, f"Invalid kb_id: {kb_id}")
     try:
         return _get_kb_manager().get(kb_id)
     except KeyError:

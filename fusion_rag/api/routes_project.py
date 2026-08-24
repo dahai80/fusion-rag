@@ -5,6 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from .._validators import validate_identifier
 from ..engine.knowledge_base import KnowledgeBaseManager
 from .auth import verify_api_key
 
@@ -28,6 +29,11 @@ def _get_kb_manager() -> KnowledgeBaseManager:
 
 
 def _get_base(kb_id: str):
+    # F12: confine kb_id before path construction (path-traversal guard).
+    try:
+        validate_identifier(kb_id, field="kb_id")
+    except ValueError:
+        raise HTTPException(400, f"Invalid kb_id: {kb_id}")
     try:
         return _get_kb_manager().get(kb_id)
     except KeyError:
@@ -36,6 +42,12 @@ def _get_base(kb_id: str):
 
 @router.post("/projects/{project_id}/kb", dependencies=[Depends(verify_api_key)])
 async def map_project_kb(project_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    # F12: project_id is used as a map key but still validate the charset so a
+    # malicious id cannot carry separators that could collide or confuse.
+    try:
+        validate_identifier(project_id, field="project_id")
+    except ValueError:
+        raise HTTPException(400, f"Invalid project_id: {project_id}")
     kb_id = data.get("kb_id", "")
     if not kb_id:
         name = data.get("name", f"project-{project_id}")

@@ -5,6 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from .._validators import validate_identifier
 from ..engine.knowledge_base import KnowledgeBaseManager
 from .auth import verify_api_key
 
@@ -30,6 +31,11 @@ def _get_kb_manager() -> KnowledgeBaseManager:
 
 
 def _get_base(kb_id: str):
+    # F12: validate kb_id before any path construction (path-traversal guard).
+    try:
+        validate_identifier(kb_id, field="kb_id")
+    except ValueError:
+        raise HTTPException(400, f"Invalid kb_id: {kb_id}")
     try:
         return _get_kb_manager().get(kb_id)
     except KeyError:
@@ -47,6 +53,13 @@ async def create_knowledge_base(data: dict[str, Any]) -> dict[str, Any]:
     kb_id = data.get("kb_id", "")
     if not name and not kb_id:
         raise HTTPException(400, "name or kb_id is required")
+    # F12: a caller-supplied kb_id must match the identifier charset or it would
+    # be unreadable later (and could carry path separators). Reject at the gate.
+    if kb_id:
+        try:
+            validate_identifier(kb_id, field="kb_id")
+        except ValueError:
+            raise HTTPException(400, f"Invalid kb_id: {kb_id}")
     if not name:
         name = kb_id
     description = data.get("description", "")
@@ -66,14 +79,16 @@ async def create_knowledge_base(data: dict[str, Any]) -> dict[str, Any]:
 
 @router.get("/bases/{kb_id}")
 async def get_knowledge_base(kb_id: str) -> dict[str, Any]:
-    try:
-        return _get_kb_manager().get(kb_id).to_dict()
-    except KeyError:
-        raise HTTPException(404, f"Knowledge base '{kb_id}' not found")
+    return _get_base(kb_id).to_dict()
 
 
 @router.delete("/bases/{kb_id}", dependencies=[Depends(verify_api_key)])
 async def delete_knowledge_base(kb_id: str) -> dict[str, str]:
+    # F12: validate kb_id before delete (path-traversal guard, same charset rule).
+    try:
+        validate_identifier(kb_id, field="kb_id")
+    except ValueError:
+        raise HTTPException(400, f"Invalid kb_id: {kb_id}")
     if _get_kb_manager().delete(kb_id):
         return {"id": kb_id, "status": "deleted"}
     raise HTTPException(404, f"Knowledge base '{kb_id}' not found")
