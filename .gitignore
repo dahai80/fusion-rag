@@ -4,8 +4,7 @@ __pycache__/
 htmlcov/
 .venv/
 *.egg-info/
-.pytest_cache/# Non-code docs (keep local only)
-CLAUDE.md
+.pytest_cache/# Non-code docs (keep local only); CLAUDE.md is checked in for agent context
 GAP_ANALYSIS.md
 claude-rag-insight.md
 prd-ar-plan.md

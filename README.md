@@ -9,7 +9,7 @@ Local vector knowledge base service for the Fusion-MLX ecosystem — 100% offlin
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/Tests-164-success.svg)](tests/)
-[![Version](https://img.shields.io/badge/Version-0.6.6-blue.svg)]()
+[![Version](https://img.shields.io/badge/Version-0.6.7-blue.svg)]()
 
 [Quick Start](#quick-start) · [API Reference](#api-reference) · [Architecture](#architecture) · [Documentation](docs/)
 
@@ -359,6 +359,12 @@ ruff check fusion_rag/
 ```
 
 ---
+
+## What's New in v0.6.7
+
+- **fusion-core HTTP client migration (PR #41)** — LLM modules (reranker, contextualizer, query_rewriter, rag_chain, graph_rag, evaluator, streaming, routes._generate_answer) now use `fusion_core.http_client.get_async_client` (shared connection pool, LRU-keyed by loop+base_url) + `with_retry` (auto-retry on 429/5xx + transient errors). Auth headers passed per-request, not baked into pooled client. SSE streaming and embed/client keep raw httpx.
+- **D-H3 empty-content guards** — success-path empty/whitespace LLM responses now degrade explicitly (logged error/fallback) instead of returning empty as a valid result.
+- **CLAUDE.md re-checked in** — un-ignored and refreshed: accurate architecture tree (parse/, permissions/, store split, 7 route files, 7 new engine modules), 170 tests green, 5 missing env vars documented, fusion_core dependency + ruff lint documented.
 
 ## What's New in v0.6.6
 
