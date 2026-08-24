@@ -37,10 +37,13 @@ class TestAPIExtra:
         assert resp.status_code == 400
 
     def test_search_with_mocked_embed(self, client):
-        """Test search on empty KB returns empty results."""
+        """Test search on empty KB returns empty results (embed mocked, no network)."""
+        from fusion_rag.embed.client import EmbeddingClient
+
         create = client.post("/kb/bases", json={"name": "test"}).json()
-        resp = client.post(f"/kb/bases/{create['id']}/search",
-                           json={"query": "test", "top_k": 5, "threshold": 0.5})
+        with patch.object(EmbeddingClient, "embed", new=AsyncMock(return_value=[0.1, 0.2, 0.3])):
+            resp = client.post(f"/kb/bases/{create['id']}/search",
+                               json={"query": "test", "top_k": 5, "threshold": 0.5})
         assert resp.status_code == 200
         data = resp.json()
         results = data if isinstance(data, list) else data.get("results", [])
