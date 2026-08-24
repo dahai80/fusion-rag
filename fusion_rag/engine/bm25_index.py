@@ -17,6 +17,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from .sqlite_base import SqliteBase
+
 logger = logging.getLogger(__name__)
 
 # callers: VectorStore (vector_store.py:115-117), HybridSearch
@@ -54,11 +56,12 @@ def _tokenize(text: str) -> list[str]:
     return [t for t in tokens if len(t) > 1]
 
 
-class BM25Index:
+class BM25Index(SqliteBase):
     """Okapi BM25 index with SQLite persistence."""
 
     def __init__(self, store_path: str, k1: float = 1.5, b: float = 0.75):
         self.store_path = Path(store_path)
+        self.db_path = str(self.store_path)
         self.k1 = k1
         self.b = b
         self._corpus_size = 0
@@ -68,13 +71,13 @@ class BM25Index:
         self._inverted: dict[str, dict[str, int]] = {}
         self._doc_texts: dict[str, str] = {}
         self._doc_paths: dict[str, str] = {}
-        self._db: sqlite3.Connection | None = None
+        super().__init__()
         self._init_db()
         self._load()
 
     def _init_db(self) -> None:
         self.store_path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = sqlite3.connect(str(self.store_path))
+        self._db = self._get_conn()
         self._db.execute("CREATE TABLE IF NOT EXISTS bm25_meta (key TEXT PRIMARY KEY, value TEXT)")
         self._db.execute("CREATE TABLE IF NOT EXISTS bm25_docs (doc_id TEXT PRIMARY KEY, text TEXT, doc_len INTEGER)")
         # L5: store doc_path per chunk so remove_document can match exactly

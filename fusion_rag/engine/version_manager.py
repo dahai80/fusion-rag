@@ -1,39 +1,35 @@
 import logging
 import os
 import shutil
-import sqlite3
 import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
+from .sqlite_base import SqliteBase, open_sqlite
+
 logger = logging.getLogger(__name__)
 
 
-class VersionManager:
+class VersionManager(SqliteBase):
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self._conn: sqlite3.Connection | None = None
+        super().__init__()
         self._ensure_table()
-
-    def _get_conn(self) -> sqlite3.Connection:
-        if self._conn is None:
-            self._conn = sqlite3.connect(self.db_path)
-            self._conn.row_factory = sqlite3.Row
-        return self._conn
 
     @contextmanager
     def _cursor(self):
         conn = self._get_conn()
-        cur = conn.cursor()
-        try:
-            yield cur
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            cur.close()
+        with self._db_lock:
+            cur = conn.cursor()
+            try:
+                yield cur
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                cur.close()
 
     def _ensure_table(self):
         with self._cursor() as cur:
@@ -226,7 +222,7 @@ class VersionManager:
         metadata_db = Path(kb_storage_path) / "metadata.db"
         if metadata_db.exists():
             try:
-                conn = sqlite3.connect(str(metadata_db))
+                conn = open_sqlite(metadata_db, readonly=True)
                 cur = conn.cursor()
                 try:
                     cur.execute("SELECT COUNT(*) FROM documents")
