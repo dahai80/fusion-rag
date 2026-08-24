@@ -18,8 +18,16 @@ jobs:
               uses: actions/setup-python@v5
               with:
                   python-version: ${{ matrix.python-version }}
-            - name: Install fusion-core (in-tree dependency, not on PyPI)
-              run: pip install git+https://github.com/dahai80/fusion-core.git
+            - name: Install fusion-core (private in-tree dependency)
+              env:
+                  FUSION_CORE_TOKEN: ${{ secrets.FUSION_CORE_TOKEN }}
+              run: |
+                  if [ -n "$FUSION_CORE_TOKEN" ]; then
+                    pip install "git+https://x-access-token:${FUSION_CORE_TOKEN}@github.com/dahai80/fusion-core.git"
+                  else
+                    echo "::error::FUSION_CORE_TOKEN secret is not set — needed to clone private dahai80/fusion-core. See issue #43."
+                    exit 1
+                  fi
             - name: Install dependencies
               run: |
                   python -m pip install --upgrade pip
@@ -35,8 +43,16 @@ jobs:
               uses: actions/setup-python@v5
               with:
                   python-version: "3.12"
-            - name: Install fusion-core (in-tree dependency, not on PyPI)
-              run: pip install git+https://github.com/dahai80/fusion-core.git
+            - name: Install fusion-core (private in-tree dependency)
+              env:
+                  FUSION_CORE_TOKEN: ${{ secrets.FUSION_CORE_TOKEN }}
+              run: |
+                  if [ -n "$FUSION_CORE_TOKEN" ]; then
+                    pip install "git+https://x-access-token:${FUSION_CORE_TOKEN}@github.com/dahai80/fusion-core.git"
+                  else
+                    echo "::error::FUSION_CORE_TOKEN secret is not set — needed to clone private dahai80/fusion-core. See issue #43."
+                    exit 1
+                  fi
             - name: Install dependencies
               run: |
                   python -m pip install --upgrade pip
