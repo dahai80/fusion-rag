@@ -9,7 +9,7 @@ Local vector knowledge base service for the Fusion-MLX ecosystem — 100% offlin
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/Tests-243-success.svg)](tests/)
-[![Version](https://img.shields.io/badge/Version-0.7.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/Version-0.7.1-blue.svg)]()
 
 [Quick Start](#quick-start) · [API Reference](#api-reference) · [Architecture](#architecture) · [Documentation](docs/)
 
@@ -362,6 +362,12 @@ ruff check fusion_rag/
 ```
 
 ---
+
+## What's New in v0.7.1
+
+- **Audit P2/P3 fixes (Task #8)** — architecture + performance hardening from the adversarial audit (`audit/fusion-rag-audit-0827.md`): `LocalBackend.close()` now actually releases the BM25 SQLite handle (was only nulling refs); `FusionStoreBackend.close()` raises on checkpoint failure instead of silently losing data; `EmbeddingCache` inherits `SqliteBase` (no more connection-per-call storm) with a batched `WHERE IN` lookup; `MetadataStore` splits read/write lock paths for concurrent reads; `BenchRunner`/`SearchTemplateManager`/`AuditLogger` adopt the `SqliteBase` write lock (no more cross-thread commit/rollback pollution); 5 admin managers pooled per-KB on `app.state` and closed at shutdown; `PermissionManager` uses `open_sqlite` (WAL + busy_timeout); `StoreBackendFactory` raises on unknown backend type instead of silently falling back to local; `RemoteBackend.count/clear` raise instead of masking a misconfigured empty KB.
+- **P3 perf** — `delete_by_doc` uses a `doc_path→int_ids` KV index (was O(n) full vector scan per delete); BM25 `_df` maintained incrementally (was full Counter rebuild per op); `LocalBackend.search` skips rows missing `_distance` with a warning (was treating missing as best match); `get_document_by_metadata` uses `json_extract` (was O(n) full-table scan); `AuditLogger` prunes on construction + streams exports via keyset pagination; `version_manager` caches record counts (60s TTL) instead of a full COUNT per snapshot.
+- **Deadlock fix** — `SqliteBase._db_lock` switched `Lock → RLock` to fix a re-entrant deadlock in `EmbeddingCache` (locks-then-calls-`_get_conn`, which also locks during lazy connection create). 243 tests green, ruff clean.
 
 ## What's New in v0.7.0
 
