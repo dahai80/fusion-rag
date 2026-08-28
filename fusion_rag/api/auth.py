@@ -56,16 +56,24 @@ class ApiKeyBackend(AuthBackend):
             raise HTTPException(401, "API key required. Set X-API-Key header.")
         # F11: constant-time compare for the admin key — `==` short-circuits on
         # the first differing byte and leaks the matching prefix over the wire.
+        # P0-5: return a coherent *subject* the ACL layer can match on, not the
+        # raw key. Admin key -> "admin" (ACL bypass). Stored key -> its stable
+        # `name` (the value admins see in list_keys and write into permission
+        # rules). Returning the raw key was unusable for ACL: admins can't see
+        # a stored key's cleartext, and the admin key never equals the literal
+        # "admin" the ACL bypass checked — so enforcement was impossible.
         try:
             admin_ok = hmac.compare_digest(api_key, self.admin_key)
-            store_ok = self.auth_config.validate_key(api_key)
+            stored_name = self.auth_config.validate_key(api_key)
         except Exception as e:
             # F14: fail-closed — any backend error during validation denies,
             # never silently authenticates.
             logger.error("auth backend error, denying (fail-closed): %s", e)
             raise HTTPException(401, "Authentication failed")
-        if admin_ok or store_ok:
-            return api_key
+        if admin_ok:
+            return "admin"
+        if stored_name:
+            return stored_name
         raise HTTPException(401, "Invalid API key")
 
 
@@ -116,14 +124,17 @@ class AuthConfig:
         finally:
             conn.close()
 
-    def validate_key(self, key: str) -> bool:
+    def validate_key(self, key: str) -> str | None:
+        # P0-5: return the key's stable `name` (the ACL subject) on match, else
+        # None. Callers that only need truthiness (add_key success checks, the
+        # test suite) are unaffected — a non-empty name is truthy, None falsy.
         if not key:
-            return False
+            return None
         h = self._hash_key(key)
         conn = self._get_conn()
         try:
             row = conn.execute("SELECT name FROM api_keys WHERE key_hash = ?", (h,)).fetchone()
-            return row is not None
+            return row["name"] if row else None
         finally:
             conn.close()
 

@@ -51,7 +51,7 @@ async def map_project_kb(project_id: str, data: dict[str, Any]) -> dict[str, Any
     return {"project_id": project_id, "kb_id": kb_id}
 
 
-@router.get("/projects/{project_id}/kb")
+@router.get("/projects/{project_id}/kb", dependencies=[Depends(verify_api_key)])
 async def get_project_kb(project_id: str) -> dict[str, Any]:
     kb_id = get_project_kb_map().get(project_id)
     if not kb_id:

@@ -23,6 +23,32 @@ class EmbeddingError(RuntimeError):
     """
 
 
+def _map_embed_response(data: dict, expected_count: int) -> list[list[float]]:
+    """P0-2: map an /embeddings response to a positionally-correct vector list.
+
+    OpenAI-spec responses carry `item["index"]` (the input position each
+    embedding corresponds to). The prior code did `if vector: vectors.append(...)`
+    — it (a) DROPPED empty/zero embeddings (shortening the list, misaligning
+    every later vector to the wrong input text), and (b) ignored `index`,
+    so any out-of-order provider silently wrote the wrong vector to the wrong
+    cached text. Now: build by index, require exactly `expected_count` non-zero
+    vectors, raise EmbeddingError on mismatch (fail-loud, no silent truncation).
+    """
+    items = data.get("data", [])
+    by_index: dict[int, list[float]] = {}
+    for item in items:
+        vector = item.get("embedding", [])
+        if not vector or all(x == 0.0 for x in vector):
+            raise EmbeddingError("embedding response contains a zero vector (provider failure)")
+        idx = item.get("index", len(by_index))
+        by_index[idx] = vector
+    if len(by_index) != expected_count:
+        raise EmbeddingError(
+            f"embedding count mismatch: got {len(by_index)}, expected {expected_count}"
+        )
+    return [by_index[i] for i in range(expected_count)]
+
+
 class EmbeddingClient:
     """Generates text embeddings by calling fusion-mlx's /v1/embeddings.
 
@@ -177,18 +203,17 @@ class EmbeddingClient:
                     resp = await self.client.post("/embeddings", json=payload)
                     resp.raise_for_status()
                     data = resp.json()
-
-                    vectors = []
-                    for item in data.get("data", []):
-                        vector = item.get("embedding", [])
-                        if vector:
-                            vectors.append(vector)
-                    return vectors
+                    return _map_embed_response(data, len(texts))
 
             except httpx.TimeoutException:
                 logger.warning("Embedding timeout (attempt %d/%d)", attempt + 1, self.max_retries)
                 if attempt < self.max_retries - 1:
                     await asyncio.sleep(1.0 * (attempt + 1))
+            except EmbeddingError:
+                # P0-2: a count-mismatch / zero-vector is a hard failure from
+                # _map_embed_response — don't retry or fall through to fallback
+                # with a silently-truncated list; propagate immediately.
+                raise
             except Exception as e:
                 logger.error("Embedding failed: %s", e)
                 if attempt < self.max_retries - 1:
@@ -209,15 +234,11 @@ class EmbeddingClient:
             resp = await self.fallback_client.post("/embeddings", json=payload)
             resp.raise_for_status()
             data = resp.json()
-            vectors = []
-            for item in data.get("data", []):
-                vector = item.get("embedding", [])
-                if vector:
-                    vectors.append(vector)
-            if len(vectors) == len(texts):
-                logger.info("Fallback embedding succeeded: %d vectors", len(vectors))
-                return vectors
-            logger.warning("Fallback returned %d/%d vectors", len(vectors), len(texts))
+            vectors = _map_embed_response(data, len(texts))
+            logger.info("Fallback embedding succeeded: %d vectors", len(vectors))
+            return vectors
+        except EmbeddingError:
+            raise
         except Exception as e:
             logger.error("Fallback embedding also failed: %s", e)
         return await self._call_local_embed(texts)

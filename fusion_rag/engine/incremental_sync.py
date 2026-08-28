@@ -3,6 +3,8 @@ import hashlib
 import logging
 import os
 
+from .._validators import ValidationError, validate_path_under_root
+
 logger = logging.getLogger(__name__)
 
 
@@ -56,7 +58,14 @@ class IncrementalSyncEngine:
             return {"added": added, "modified": modified, "deleted": deleted, "unchanged": unchanged}
 
         scan_root = os.path.realpath(directory)
-        for root, _dirs, files in os.walk(directory):
+        # P0-9: os.walk defaults to followlinks=False for directories, but
+        # symlinked *files* are still followed on stat/hash. The prior inline
+        # guard used startswith (escapable via crafted paths) and short-circuited
+        # on real_full == full_path (self-referential links skipped the check).
+        # Route through the shared validate_path_under_root (resolve() +
+        # is_relative_to + symlink escape) — the same LFI guard every ingest
+        # path uses, instead of a weaker reimplementation here.
+        for root, _dirs, files in os.walk(directory, followlinks=False):
             for fname in files:
                 full_path = os.path.join(root, fname)
                 if patterns:
@@ -68,9 +77,10 @@ class IncrementalSyncEngine:
                     if not matched:
                         continue
 
-                real_full = os.path.realpath(full_path)
-                if real_full != full_path and not os.path.realpath(full_path).startswith(scan_root + os.sep):
-                    logger.warning("Skipping symlink that escapes scan root: %s -> %s", full_path, real_full)
+                try:
+                    validate_path_under_root(full_path, root=scan_root, field="sync_file")
+                except ValidationError:
+                    logger.warning("Skipping path that escapes scan root: %s", full_path)
                     continue
 
                 scanned_paths.add(full_path)

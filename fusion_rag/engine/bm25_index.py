@@ -131,6 +131,12 @@ class BM25Index(SqliteBase):
         # whole inverted table (O(corpus) per doc on a large KB).
         added_docs: dict[str, tuple[str, int, str]] = {}
         added_postings: list[tuple[str, str, int]] = []
+        # P0-1/P3-2: track doc_ids already in the index. A re-index of the same
+        # chunk (watch re-index, replace) used to increment _corpus_size again
+        # — inflating IDF denominators and double-counting doc length. Now an
+        # existing doc_id is an upsert, not a new doc. _df updated incrementally
+        # per touched token instead of a full O(corpus) rebuild every call.
+        new_count = 0
         for chunk in chunks:
             doc_id = chunk.get("id", "")
             if not doc_id:
@@ -138,6 +144,21 @@ class BM25Index(SqliteBase):
             text = chunk.get("text", "")
             context = chunk.get("context", "")
             full_text = (context + " " + text).strip() if context else text
+            is_new = doc_id not in self._doc_texts
+            if is_new:
+                new_count += 1
+                self._corpus_size += 1
+            else:
+                # upsert of an existing chunk: retract its old postings from
+                # _df / _inverted before re-inserting, so the tf reflects the
+                # new text, not the old + new.
+                old_tokens = _tokenize(self._doc_texts.get(doc_id, ""))
+                for ot in set(old_tokens):
+                    post = self._inverted.get(ot)
+                    if post and doc_id in post:
+                        del post[doc_id]
+                        if not post:
+                            del self._inverted[ot]
             self._doc_texts[doc_id] = full_text
             self._doc_paths[doc_id] = chunk.get("doc_path", "") or ""
             tokens = _tokenize(full_text)
@@ -149,14 +170,15 @@ class BM25Index(SqliteBase):
                     self._inverted[token] = {}
                 self._inverted[token][doc_id] = freq
                 added_postings.append((token, doc_id, freq))
-            self._corpus_size += 1
-        self._df = Counter()
-        for token, postings in self._inverted.items():
-            self._df[token] = len(postings)
+                # P3-2: incremental _df — only the touched token's df changes,
+                # not every token's. Rebuild was O(corpus) per add.
+                self._df[token] = len(self._inverted[token])
         total_len = sum(self._doc_len.values())
         self._avgdl = total_len / max(self._corpus_size, 1)
         self._persist_delta(added_docs, added_postings, removed_doc_ids=None)
-        logger.info("BM25 index updated: %d docs, %d tokens", self._corpus_size, len(self._inverted))
+        logger.info(
+            "BM25 index updated: %d docs (+%d new), %d tokens", self._corpus_size, new_count, len(self._inverted)
+        )
 
     def remove_document(self, doc_path: str) -> int:
         # L5: exact doc_path match against the stored per-chunk doc_path field,
@@ -166,19 +188,30 @@ class BM25Index(SqliteBase):
         if not to_remove:
             return 0
         removed_set = set(to_remove)
+        total_len_delta = 0
         for did in to_remove:
             del self._doc_texts[did]
-            self._doc_len.pop(did, None)
+            total_len_delta += self._doc_len.pop(did, 0)
             self._doc_paths.pop(did, None)
             self._corpus_size -= 1
-        for token in list(self._inverted.keys()):
-            self._inverted[token] = {k: v for k, v in self._inverted[token].items() if k not in removed_set}
-            if not self._inverted[token]:
-                del self._inverted[token]
-        self._df = Counter()
-        for token, postings in self._inverted.items():
-            self._df[token] = len(postings)
-        total_len = sum(self._doc_len.values())
+        # P3-2: decrement _df incrementally per affected token instead of
+        # rebuilding the whole Counter (O(unique tokens) per delete). Only the
+        # tokens that appeared in a removed doc change df; pruning an empty
+        # posting list also drops the df entry. Scan the inverted index (not a
+        # re-tokenize of the deleted text) for the tokens that posted this doc.
+        for did in to_remove:
+            posted = [tok for tok, posts in self._inverted.items() if did in posts]
+            for token in posted:
+                post = self._inverted.get(token)
+                if post and did in post:
+                    del post[did]
+                    if not post:
+                        del self._inverted[token]
+                        self._df.pop(token, None)
+                    else:
+                        self._df[token] = len(post)
+        # _avgdl from cached total length, not a full O(corpus) sum.
+        total_len = max(self._avgdl * (self._corpus_size + len(to_remove)) - total_len_delta, 0.0)
         self._avgdl = total_len / max(self._corpus_size, 1)
         # P2: delete only the rows for the removed doc_ids, not the whole table.
         self._persist_delta(added_docs=None, added_postings=None, removed_doc_ids=removed_set)

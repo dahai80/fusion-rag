@@ -1,37 +1,36 @@
 import json
 import logging
-import sqlite3
 import time
 from contextlib import contextmanager
+
+from .sqlite_base import SqliteBase
 
 logger = logging.getLogger(__name__)
 
 
-class BenchRunner:
+class BenchRunner(SqliteBase):
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self._conn: sqlite3.Connection | None = None
+        super().__init__()
         self._ensure_table()
-
-    def _get_conn(self) -> sqlite3.Connection:
-        if self._conn is None:
-            self._conn = sqlite3.connect(self.db_path)
-            self._conn.row_factory = sqlite3.Row
-            self._conn.execute("PRAGMA journal_mode=WAL")
-        return self._conn
 
     @contextmanager
     def _cursor(self):
+        # P2-7: shared connection across the async server's threadpool needs the
+        # SqliteBase lock — without it two threads interleave commit/rollback on
+        # the same conn (one thread's exception rolled back the other's in-flight
+        # insert). Mirror VersionManager._cursor exactly.
         conn = self._get_conn()
-        cur = conn.cursor()
-        try:
-            yield cur
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            cur.close()
+        with self._db_lock:
+            cur = conn.cursor()
+            try:
+                yield cur
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                cur.close()
 
     def _ensure_table(self):
         with self._cursor() as cur:

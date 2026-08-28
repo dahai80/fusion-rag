@@ -6,7 +6,10 @@ No direct MLX imports.
 
 from __future__ import annotations
 
+import fcntl
+import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -14,6 +17,28 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    # P0-11: write_text truncates then writes — a crash/power loss mid-write
+    # leaves kb_meta.json empty or partial, and the next _load_all swallows the
+    # JSONDecodeError, silently dropping the KB. Atomic pattern: write a tmp
+    # file, fsync, os.replace (atomic rename on POSIX). A cross-process flock
+    # on a sidecar lockfile serializes concurrent workers (uvicorn --workers N)
+    # so two processes never interleave a read-modify-write of the same KB meta.
+    payload = json.dumps(data, indent=2, ensure_ascii=False)
+    lock_path = path.with_name(path.name + ".lock")
+    tmp_path = path.with_name(path.name + ".tmp")
+    with open(lock_path, "w") as lock_fd:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as tmp_fd:
+                tmp_fd.write(payload)
+                tmp_fd.flush()
+                os.fsync(tmp_fd.fileno())
+            os.replace(tmp_path, path)
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
 
 
 @dataclass
@@ -125,23 +150,43 @@ class KnowledgeBaseManager:
             if kb_dir.is_dir():
                 meta_file = kb_dir / "kb_meta.json"
                 if meta_file.exists():
-                    import json
+                    self._load_meta_file(meta_file)
 
-                    try:
-                        data = json.loads(meta_file.read_text(encoding="utf-8"))
-                        kb = KnowledgeBase.from_dict(data)
-                        self._bases[kb.id] = kb
-                    except Exception as e:
-                        logger.warning("Failed to load KB meta from %s: %s", meta_file, e)
+    def _load_meta_file(self, meta_file: Path) -> None:
+        # P0-11: was `except Exception: logger.warning(...)` — a corrupted
+        # kb_meta.json (truncated by a non-atomic write crash) was swallowed and
+        # the KB silently dropped, invisible to list/get. Fail visibly now: a
+        # JSON decode error is a data-loss event, not a warning. We still keep
+        # iterating (one bad KB must not abort loading the rest), but log at
+        # ERROR and surface the corrupt path so the operator can recover it.
+        try:
+            data = json.loads(meta_file.read_text(encoding="utf-8"))
+            kb = KnowledgeBase.from_dict(data)
+            self._bases[kb.id] = kb
+        except json.JSONDecodeError as e:
+            logger.error("CORRUPT kb_meta.json at %s (will not load KB): %s", meta_file, e)
+        except Exception as e:
+            logger.error("Failed to load KB meta from %s: %s", meta_file, e)
+
+    def _try_reload_from_disk(self, kb_id: str) -> KnowledgeBase | None:
+        # P0-11: cross-worker reconciliation. With uvicorn --workers N each
+        # worker owns its own in-memory _bases; a KB created by worker A is
+        # invisible to worker B, so B's get(kb_id) 404s on a KB that provably
+        # exists on disk. On a get miss, re-read that one KB's meta file from
+        # disk (cheap, one file) instead of failing. This is eventually
+        # consistent: deletes are still best-effort cross-worker (a worker may
+        # serve a stale cached KB), but the common create-then-search flow works.
+        meta_file = self._storage_dir / kb_id / "kb_meta.json"
+        if meta_file.exists():
+            self._load_meta_file(meta_file)
+            return self._bases.get(kb_id)
+        return None
 
     def _save_meta(self, kb: KnowledgeBase) -> None:
-        """Save knowledge base metadata to disk."""
-        import json
-
+        """Save knowledge base metadata to disk (atomically)."""
         path = Path(kb.storage_path)
         path.mkdir(parents=True, exist_ok=True)
-        meta_file = path / "kb_meta.json"
-        meta_file.write_text(json.dumps(kb.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+        _atomic_write_json(path / "kb_meta.json", kb.to_dict())
 
     def create(
         self,
@@ -170,7 +215,11 @@ class KnowledgeBaseManager:
     def get(self, kb_id: str) -> KnowledgeBase:
         """Get a knowledge base by ID."""
         if kb_id not in self._bases:
-            raise KeyError(f"Knowledge base '{kb_id}' not found")
+            # P0-11: cross-worker reconciliation — re-read from disk on miss.
+            reloaded = self._try_reload_from_disk(kb_id)
+            if reloaded is None:
+                raise KeyError(f"Knowledge base '{kb_id}' not found")
+            return reloaded
         return self._bases[kb_id]
 
     def list(self) -> list[dict[str, Any]]:

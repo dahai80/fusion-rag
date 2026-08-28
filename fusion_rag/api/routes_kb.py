@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 
 from .._validators import validate_identifier
+from .access import require_kb_action
 from .app_state import get_kb_manager
 from .auth import verify_api_key
 
@@ -29,13 +30,15 @@ def _get_base(kb_id: str):
         raise HTTPException(404, f"Knowledge base '{kb_id}' not found")
 
 
-@router.get("/bases")
+@router.get("/bases", dependencies=[Depends(verify_api_key)])
 async def list_knowledge_bases() -> list[dict[str, Any]]:
     return _get_kb_manager().list()
 
 
 @router.post("/bases", dependencies=[Depends(verify_api_key)])
 async def create_knowledge_base(data: dict[str, Any]) -> dict[str, Any]:
+    # No {kb_id} path param yet -> cannot use require_kb_action (no KB to check
+    # against). Plain auth gate; the new KB is open until an admin writes rules.
     name = data.get("name", "")
     kb_id = data.get("kb_id", "")
     if not name and not kb_id:
@@ -64,12 +67,12 @@ async def create_knowledge_base(data: dict[str, Any]) -> dict[str, Any]:
     return {"id": kb.id, "name": kb.config.name, "status": status}
 
 
-@router.get("/bases/{kb_id}")
+@router.get("/bases/{kb_id}", dependencies=[Depends(require_kb_action("read"))])
 async def get_knowledge_base(kb_id: str) -> dict[str, Any]:
     return _get_base(kb_id).to_dict()
 
 
-@router.delete("/bases/{kb_id}", dependencies=[Depends(verify_api_key)])
+@router.delete("/bases/{kb_id}", dependencies=[Depends(require_kb_action("delete"))])
 async def delete_knowledge_base(kb_id: str) -> dict[str, str]:
     # F12: validate kb_id before delete (path-traversal guard, same charset rule).
     try:
@@ -81,7 +84,7 @@ async def delete_knowledge_base(kb_id: str) -> dict[str, str]:
     raise HTTPException(404, f"Knowledge base '{kb_id}' not found")
 
 
-@router.get("/bases/{kb_id}/stats")
+@router.get("/bases/{kb_id}/stats", dependencies=[Depends(require_kb_action("read"))])
 async def kb_stats(kb_id: str) -> dict[str, Any]:
     from .routes import _get_meta_store, _get_vector_store
 

@@ -5,6 +5,8 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
+from .sqlite_base import SqliteBase
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,35 +68,32 @@ BUILTIN_TEMPLATES: list[SearchTemplate] = [
 ]
 
 
-class SearchTemplateManager:
+class SearchTemplateManager(SqliteBase):
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self._conn: sqlite3.Connection | None = None
+        super().__init__()
         self._create_table()
         self._seed_builtins()
         logger.info("SearchTemplateManager initialized with db=%s", db_path)
 
-    def _get_conn(self) -> sqlite3.Connection:
-        if self._conn is None:
-            self._conn = sqlite3.connect(self.db_path)
-            self._conn.row_factory = sqlite3.Row
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA foreign_keys=ON")
-        return self._conn
-
     @contextmanager
     def _cursor(self):
+        # P2-7: SqliteBase lock guards the shared connection's commit/rollback
+        # against cross-thread interleaving (the exact bug SqliteBase exists to
+        # fix — this module predates adoption). foreign_keys pragma moved to
+        # per-connection init below since SqliteBase owns the conn.
         conn = self._get_conn()
-        cur = conn.cursor()
-        try:
-            yield cur
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            logger.exception("DB operation failed, rolled back")
-            raise
-        finally:
-            cur.close()
+        with self._db_lock:
+            cur = conn.cursor()
+            try:
+                yield cur
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                logger.exception("DB operation failed, rolled back")
+                raise
+            finally:
+                cur.close()
 
     def _create_table(self):
         with self._cursor() as cur:

@@ -143,7 +143,12 @@ class Reranker:
 class HybridSearch:
     """Combines vector similarity and keyword search with weighted or RRF fusion."""
 
-    def __init__(self, vector_store, alpha: float = 0.7, method: str = "alpha"):
+    def __init__(self, vector_store, alpha: float = 0.7, method: str = "rrf"):
+        # P1-6: default RRF (rank-based) not alpha. vector score ∈ [0,1] (cosine
+        # 1-dist) while BM25 Okapi is unbounded (can exceed 10) — alpha-weighting
+        # them raw lets BM25 dominate and makes alpha meaningless. RRF is
+        # scale-free so it is the correct default. Alpha is still available on
+        # request, with BM25 min-max normalized first (see _alpha_fusion).
         self.vector_store = vector_store
         self.alpha = alpha
         self.method = method
@@ -170,6 +175,24 @@ class HybridSearch:
     def _alpha_fusion(
         self, vector_results: list[dict], keyword_results: list[dict], top_k: int, threshold: float
     ) -> list[dict[str, Any]]:
+        # P1-6: vector scores are cosine 1-dist ∈ [0,1]; BM25 Okapi scores are
+        # unbounded (can exceed 10). Adding them raw with an alpha weight lets
+        # BM25 dominate and makes alpha meaningless. Min-max normalize both to
+        # [0,1] before weighting so the two scales are commensurable. A single-
+        # result list normalizes to 1.0 (no spread to compute — keep its value).
+        def _normalize(results: list[dict]) -> list[dict]:
+            if not results:
+                return results
+            vals = [r.get("score", 0.0) for r in results]
+            lo, hi = min(vals), max(vals)
+            span = hi - lo
+            if span <= 0:
+                return [{**r, "score": 1.0} for r in results]
+            return [{**r, "score": (r.get("score", 0.0) - lo) / span} for r in results]
+
+        vector_results = _normalize(vector_results)
+        keyword_results = _normalize(keyword_results)
+
         scores: dict[str, float] = {}
         for r in vector_results:
             rid = r.get("id", "")
@@ -222,11 +245,23 @@ class HybridSearch:
 
     @staticmethod
     def _apply_filters(results: list[dict], filters: dict) -> list[dict]:
+        # P1-7: folder_prefix is NOT a metadata field — it is a top-level
+        # doc_path prefix match. The prior loop only checked `if key in meta`,
+        # so folder_prefix was never found in metadata → silently passed every
+        # row → a folder-filtered hybrid search returned the whole KB. The
+        # non-hybrid path (routes._apply_search_filters) already does
+        # doc_path.startswith; this must match. Other keys stay metadata lookups
+        # (unchanged behavior for a key absent from metadata).
         filtered = []
         for r in results:
-            meta = r.get("metadata", {})
             match = True
             for key, value in filters.items():
+                if key == "folder_prefix":
+                    if not str(r.get("doc_path", "")).startswith(value):
+                        match = False
+                        break
+                    continue
+                meta = r.get("metadata", {})
                 if key in meta:
                     if isinstance(value, (list, tuple)):
                         if meta[key] not in value:

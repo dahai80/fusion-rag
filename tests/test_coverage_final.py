@@ -192,9 +192,15 @@ class TestRerankerFinal:
             {"id": "2", "score": 0.3},
         ])
         store.keyword_search = MagicMock(return_value=[])
-        hs = HybridSearch(store)
+        # P1-6: default fusion is now RRF (scale-free). This test exercises the
+        # alpha path's cosine-scaled threshold filtering, so request method="alpha"
+        # explicitly. Min-max normalization of a 2-element list maps [0.3,0.9] →
+        # [0.0,1.0]; with keyword empty, alpha-weighted scores are [0.0, 0.7],
+        # threshold 0.5 keeps only id "1".
+        hs = HybridSearch(store, method="alpha")
         results = await hs.search([1.0, 0.0], "test", threshold=0.5)
         assert len(results) == 1
+        assert results[0]["id"] == "1"
 
     @pytest.mark.asyncio
     async def test_rrf_ignores_cosine_threshold(self):

@@ -49,14 +49,42 @@ class StoreBackendFactory:
 
     @classmethod
     def register(cls, name: str, backend_class: type[StoreBackend]) -> None:
+        # P2-10: a silent overwrite on re-register hid import-time global
+        # mutation (a third party re-importing vector_store clobbered "local").
+        # Detect a duplicate name and log loudly — the new class wins (late
+        # registration is a plugin pattern) but the prior class is surfaced so
+        # the clobber is visible, not silent.
+        prior = cls._registry.get(name)
+        if prior is not None and prior is not backend_class:
+            logger.warning(
+                "Store backend '%s' re-registered: %s -> %s (late registration wins)", name, prior, backend_class
+            )
         cls._registry[name] = backend_class
-        logger.info("Registered store backend: %s", name)
+        logger.info("Registered store backend: %s (available: %s)", name, cls.available_types())
 
     @classmethod
-    def create(cls, store_type: str = "local", **kwargs) -> StoreBackend:
+    def create(cls, store_type: str = "local", *, fallback: bool = False, **kwargs) -> StoreBackend:
+        # P2-10: unknown type used to silently fall back to "local" — but "local"
+        # is a different storage engine (squared-L2 vs cosine, P0-10). A typo in
+        # FUSION_RAG_STORE_BACKEND ("fusion_store" vs "fusion-store") would
+        # silently run LanceDB instead of the intended backend with no error, no
+        # log beyond a warning, and different retrieval semantics. Fail visibly:
+        # raise unless the caller explicitly opts into fallback.
         if store_type not in cls._registry:
-            logger.warning("Unknown store type '%s', falling back to 'local'", store_type)
-            store_type = "local"
+            if fallback:
+                logger.warning(
+                    "Unknown store type '%s' (fallback=True) -> 'local'. Available: %s",
+                    store_type,
+                    cls.available_types(),
+                )
+                store_type = "local"
+            else:
+                logger.error("Unknown store type '%s'. Available: %s", store_type, cls.available_types())
+                raise ValueError(
+                    f"Unknown store backend type: {store_type!r}. "
+                    f"Available: {cls.available_types()}. "
+                    "Check FUSION_RAG_STORE_BACKEND spelling, or pass fallback=True for legacy local fallback."
+                )
         backend_cls = cls._registry[store_type]
         return backend_cls(**kwargs)
 

@@ -28,6 +28,24 @@ def _pa():
         raise ImportError("Install pyarrow: pip install pyarrow")
 
 
+def _lance_string_literal(value: str) -> str:
+    """P0-4: build a safely-escaped single-quoted DataFusion string literal.
+
+    lancedb Table.delete takes a SQL filter string (no bind parameters), so the
+    matched value is interpolated. Single-quote doubling is the correct escape
+    for a DataFusion char literal — `x' OR '1'='1` becomes the single literal
+    `x' OR '1'='1`. We also reject control chars (NUL/newline/CR/tab) which are
+    not valid in a real doc_path and could break the filter parser. Returns the
+    quoted literal INCLUDING the surrounding single quotes.
+    """
+    if not value:
+        return "''"
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in value):
+        raise ValueError(f"control char in doc_path rejected (len={len(value)})")
+    escaped = value.replace("'", "''")
+    return f"'{escaped}'"
+
+
 class LocalBackend(StoreBackend):
     def __init__(self, vector_path: str, dimension: int = 1024):
         self.vector_path = vector_path
@@ -97,6 +115,22 @@ class LocalBackend(StoreBackend):
             self._bm25_index = BM25Index(bm25_path)
         return self._bm25_index
 
+    def _check_vector_dim(self, records: list[dict[str, Any]]) -> None:
+        # P1-4: validate every vector length BEFORE any table.add. LanceDB's
+        # fixed-width list schema (pa.list_(pa.float32(), self.dimension)) will
+        # raise mid-batch, but only after partially writing — leaving an
+        # all-or-nothing batch half-committed. Pre-validate so a model swap
+        # (1024→768) or a short/zero fallback vector fails loud and clean, with
+        # the offending id, before touching the table.
+        for r in records:
+            vec = r.get("vector")
+            if vec is None or len(vec) != self.dimension:
+                raise ValueError(
+                    f"vector dimension mismatch for chunk {r.get('id', '?')}: "
+                    f"got {len(vec) if vec is not None else 'None'}, expected {self.dimension}. "
+                    "Embedding model changed or provider returned a short vector."
+                )
+
     def add(
         self,
         chunk_id: str,
@@ -122,6 +156,7 @@ class LocalBackend(StoreBackend):
                 "context": context,
             }
         ]
+        self._check_vector_dim(data)
         self.table.add(data)
         self.bm25.add_documents(data)
 
@@ -131,6 +166,7 @@ class LocalBackend(StoreBackend):
         for r in records:
             if "metadata_json" not in r and "metadata" in r:
                 r["metadata_json"] = json.dumps(r.pop("metadata", {}), ensure_ascii=False)
+        self._check_vector_dim(records)
         self.table.add(records)
         self.bm25.add_documents(records)
 
@@ -148,7 +184,16 @@ class LocalBackend(StoreBackend):
             raise
         filtered = []
         for r in results:
-            score = 1.0 - r.get("_distance", 0.0)
+            # P3-3: a missing _distance (schema drift / bad row) must NOT
+            # default to 0.0 — that scores 1.0, the maximum similarity, so a
+            # malformed row outranks every real match. Default to 2.0 (cosine
+            # distance range is [0,2]) → score -1.0, filtered out under any sane
+            # threshold. Surface it so the drift is visible, not silent.
+            dist = r.get("_distance")
+            if dist is None:
+                logger.warning("LocalBackend search: row id=%s missing _distance, skipping", r.get("id"))
+                continue
+            score = 1.0 - float(dist)
             if score < threshold:
                 continue
             r["score"] = score
@@ -171,8 +216,17 @@ class LocalBackend(StoreBackend):
         # reported success either way — a broken delete looked like "deleted 0".
         # Let it raise so the route surfaces a real failure. The return value
         # still means "matched rows" on success.
-        safe = doc_path.replace("'", "''")
-        result = self.table.delete(f"doc_path = '{safe}'")
+        #
+        # P0-4: lancedb Table.delete takes a SQL filter STRING (no bind params),
+        # so the doc_path is interpolated into the filter. The single-quote
+        # doubling below is the correct DataFusion string-literal escape and
+        # defeats `x' OR '1'='1` (it parses as one literal). We additionally
+        # reject NUL/newline/control chars — they are invalid in real file paths
+        # and can break the DataFusion parser. doc_path is internally sourced
+        # (read from metadata at delete time), but inline ingest lets a user
+        # store an arbitrary doc_name, so harden the literal builder regardless.
+        safe = _lance_string_literal(doc_path)
+        result = self.table.delete(f"doc_path = {safe}")
         if isinstance(result, int):
             count = result
         elif hasattr(result, "__int__"):
@@ -197,6 +251,18 @@ class LocalBackend(StoreBackend):
             logger.warning("LocalBackend clear failed: %s", e)
 
     def close(self) -> None:
+        # P2-2: prior close() only nulled Python refs — it did NOT close the
+        # BM25Index's sqlite3 connection (SqliteBase has no __del__, sqlite3
+        # connections are not guaranteed to close on GC). Leaked connections
+        # held FDs and file locks on bm25_index.db, blocking snapshot/clear.
+        # Close the BM25 connection explicitly before dropping the reference.
+        # LanceDB holds mmap'd files released only on process exit (no close API)
+        # — documented; we null the ref so a stale handle isn't reused.
+        if self._bm25_index is not None:
+            try:
+                self._bm25_index._close_conn()
+            except Exception as e:
+                logger.warning("LocalBackend close: BM25 conn close failed: %s", e)
         self._db = None
         self._table = None
         self._bm25_index = None
