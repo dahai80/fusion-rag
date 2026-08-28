@@ -192,8 +192,7 @@ async def _dispatch_tool(name: str, args: dict) -> Any:
     propagate to the caller's generic -32603 handler. Never returns
     {"error": str(e)} as a JSON-RPC result.
     """
-    from ..store.vector_store import VectorStore
-    from .routes import _get_base, _get_embed_client, _get_kb_manager
+    from .routes import _get_base, _get_embed_client, _get_kb_manager, _get_vector_store
 
     def _require(key: str) -> Any:
         if key not in args or args[key] in (None, ""):
@@ -209,31 +208,39 @@ async def _dispatch_tool(name: str, args: dict) -> Any:
         return {"id": kb.id, "name": kb.config.name, "status": "created"}
 
     if name == "kb_search":
+        from fastapi.concurrency import run_in_threadpool
+
         kb_id = _require("kb_id")
         query = _require("query")
         kb = _get_base(kb_id)
         embed = _get_embed_client()
-        vec_store = VectorStore(kb.vector_path)
+        # 硬伤A: reuse pooled backend handle; prior raw VectorStore(kb.vector_path)
+        # opened a new handle per call (default backend, no env-var) and leaked.
+        vec_store = _get_vector_store(kb_id)
         query_vector = await embed.embed(query)
         if not query_vector or all(v == 0.0 for v in query_vector):
             raise _MCPError(-32603, "embedding failed")
         top_k = args.get("top_k", kb.config.max_results)
-        results = vec_store.search(query_vector, top_k=top_k)
+        # P1-8: vec_store.search is sync (LanceDB+BM25); run off the event loop.
+        results = await run_in_threadpool(vec_store.search, query_vector, top_k=top_k)
         return results
 
     if name == "kb_ask":
+        from fastapi.concurrency import run_in_threadpool
+
         from .routes import _generate_answer
 
         kb_id = _require("kb_id")
         question = _require("question")
         kb = _get_base(kb_id)
         embed = _get_embed_client()
-        vec_store = VectorStore(kb.vector_path)
+        vec_store = _get_vector_store(kb_id)
         query_vector = await embed.embed(question)
         if not query_vector or all(v == 0.0 for v in query_vector):
             raise _MCPError(-32603, "embedding failed")
         top_k = args.get("top_k", kb.config.max_results)
-        chunks = vec_store.search(query_vector, top_k=top_k)
+        # P1-8: sync search off-loop.
+        chunks = await run_in_threadpool(vec_store.search, query_vector, top_k=top_k)
         if not chunks:
             return {"answer": "No relevant documents found.", "sources": []}
         context = "\n\n".join(f"[{c['doc_name']}] {c['text'][:2000]}" for c in chunks)

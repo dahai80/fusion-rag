@@ -16,8 +16,8 @@ from ..engine.document import DocumentParser, DocumentType, ParseResult
 from ..engine.llm_errors import LLMUnavailable
 from ..store.metadata_store import MetadataStore
 from ..store.vector_store import VectorStore
+from .access import require_kb_action
 from .app_state import get_embed_client, get_kb_locks, get_kb_manager, get_tasks, get_watches
-from .auth import verify_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +84,11 @@ def _check_ingest_root(file_path: str) -> None:
 def _get_vector_store(kb_id: str) -> VectorStore:
     kb = _get_base(kb_id)
     backend_type = os.environ.get("FUSION_RAG_STORE_BACKEND", "local")
-    return VectorStore(kb.vector_path, backend_type=backend_type)
+    # 硬伤A: reuse one pooled backend handle per KB (see app_state
+    # get_or_create_vec_store). Prior per-request construction leaked handles.
+    from .app_state import get_or_create_vec_store
+
+    return get_or_create_vec_store(kb.vector_path, backend_type)
 
 
 def _get_meta_store(kb_id: str) -> MetadataStore:
@@ -154,22 +158,24 @@ async def _index_document(kb_id: str, file_path: str, contextualize: bool = True
             }
         )
     try:
+        # P0-1: add_batch writes vectors AND bm25 in one call (both LocalBackend
+        # and FusionStoreBackend do the bm25 add inside add_batch). The prior
+        # separate vec_store.bm25.add_documents(records) was a SECOND write —
+        # double-counting _corpus_size and splitting the rollback across two
+        # store calls. One write, one rollback path.
         vec_store.add_batch(records)
     except Exception as e:
-        # L7: vectors failed — roll back metadata writes (doc + chunks).
-        logger.error("index_document: vector add_batch failed, rolling back metadata for doc %s: %s", doc_id, e)
+        # L7: vector/bm25 write failed — roll back metadata for this doc. The
+        # backend add_batch is all-or-nothing per store; delete_by_doc (if any
+        # partial vectors landed) cleans both vectors + bm25 atomically.
+        logger.error("index_document: add_batch failed, rolling back doc %s: %s", doc_id, e)
+        try:
+            vec_store.delete_by_doc(result.file_path)
+        except Exception as de:
+            logger.error("index_document: rollback delete_by_doc failed for %s: %s", doc_id, de)
         meta_store.delete_chunks_by_doc(doc_id)
         meta_store.delete_document(doc_id)
-        return {"error": f"vector index write failed: {e}"}
-    try:
-        vec_store.bm25.add_documents(records)
-    except Exception as e:
-        # L7: bm25 failed — roll back vectors + metadata for this doc.
-        logger.error("index_document: bm25 add failed, rolling back vectors+metadata for doc %s: %s", doc_id, e)
-        vec_store.delete_by_doc(result.file_path)
-        meta_store.delete_chunks_by_doc(doc_id)
-        meta_store.delete_document(doc_id)
-        return {"error": f"bm25 index write failed: {e}"}
+        return {"error": f"index write failed: {e}"}
     meta_store.update_chunk_count(doc_id, len(chunks), result.chars)
 
     # L12: per-KB lock so concurrent ingest can't both read N and write N+1.
@@ -181,7 +187,7 @@ async def _index_document(kb_id: str, file_path: str, contextualize: bool = True
     return {"doc_id": doc_id, "chunks": len(chunks), "chars": result.chars}
 
 
-@router.post("/bases/{kb_id}/documents", dependencies=[Depends(verify_api_key)])
+@router.post("/bases/{kb_id}/documents", dependencies=[Depends(require_kb_action("write"))])
 async def upload_document(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     file_path = data.get("file_path", "")
     if not file_path:
@@ -192,7 +198,7 @@ async def upload_document(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-@router.post("/bases/{kb_id}/documents/batch", dependencies=[Depends(verify_api_key)])
+@router.post("/bases/{kb_id}/documents/batch", dependencies=[Depends(require_kb_action("write"))])
 async def batch_upload_documents(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     file_paths = data.get("file_paths", [])
     if not file_paths:
@@ -229,7 +235,7 @@ async def batch_upload_documents(kb_id: str, data: dict[str, Any]) -> dict[str, 
     }
 
 
-@router.post("/bases/{kb_id}/documents/ingest", dependencies=[Depends(verify_api_key)])
+@router.post("/bases/{kb_id}/documents/ingest", dependencies=[Depends(require_kb_action("write"))])
 async def ingest_content(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     kb = _get_base(kb_id)
     content = data.get("content", "")
@@ -295,8 +301,20 @@ async def ingest_content(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
-    vec_store.add_batch(records)
-    vec_store.bm25.add_documents(records)
+    # P0-1/P0-8: add_batch writes vectors+bm25 in one call; wrap in rollback so
+    # a write failure doesn't leave orphan metadata rows (doc + chunks) with no
+    # vectors. Prior code had no try/except here at all.
+    try:
+        vec_store.add_batch(records)
+    except Exception as e:
+        logger.error("ingest_content: add_batch failed, rolling back doc %s: %s", doc_id, e)
+        try:
+            vec_store.delete_by_doc(doc_path)
+        except Exception as de:
+            logger.error("ingest_content: rollback delete_by_doc failed for %s: %s", doc_id, de)
+        meta_store.delete_chunks_by_doc(doc_id)
+        meta_store.delete_document(doc_id)
+        raise HTTPException(500, f"index write failed: {e}") from e
     meta_store.update_chunk_count(doc_id, len(chunks), len(content))
 
     # L12: per-KB lock around the count read-modify-write.
@@ -309,7 +327,7 @@ async def ingest_content(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     return {"doc_id": doc_id, "chunks": len(chunks), "chars": len(content)}
 
 
-@router.delete("/bases/{kb_id}/documents/{doc_id}", dependencies=[Depends(verify_api_key)])
+@router.delete("/bases/{kb_id}/documents/{doc_id}", dependencies=[Depends(require_kb_action("delete"))])
 async def delete_document(kb_id: str, doc_id: str) -> dict[str, Any]:
     kb = _get_base(kb_id)
     meta_store = _get_meta_store(kb_id)
@@ -323,19 +341,33 @@ async def delete_document(kb_id: str, doc_id: str) -> dict[str, Any]:
     chunks = meta_store.get_chunks_by_doc(doc_id)
     chunk_count = len(chunks)
 
-    vec_store.delete_by_doc(doc_path)
-    meta_store.delete_chunks_by_doc(doc_id)
-    meta_store.delete_document(doc_id)
+    # P0-8/P1-1: the three-store delete (vectors → chunks → doc) had no
+    # try/except and no lock. A partial failure left orphan vectors with no
+    # metadata (or vice-versa), and concurrent delete/ingest raced the count
+    # read-modify-write. Now: lock the KB, delete under try/except, and on
+    # failure surface 500 instead of reporting a half-deleted doc as "deleted".
+    async with _kb_lock(kb_id):
+        try:
+            vec_store.delete_by_doc(doc_path)
+        except Exception as e:
+            logger.error("delete_document: vector delete_by_doc failed for %s: %s", doc_id, e)
+            raise HTTPException(500, f"vector delete failed: {e}") from e
+        try:
+            meta_store.delete_chunks_by_doc(doc_id)
+            meta_store.delete_document(doc_id)
+        except Exception as e:
+            logger.error("delete_document: metadata delete failed for %s: %s", doc_id, e)
+            raise HTTPException(500, f"metadata delete failed: {e}") from e
 
-    kb.file_count = max(0, kb.file_count - 1)
-    kb.chunk_count = max(0, kb.chunk_count - chunk_count)
-    _get_kb_manager().update(kb_id, file_count=kb.file_count, chunk_count=kb.chunk_count)
+        kb.file_count = max(0, kb.file_count - 1)
+        kb.chunk_count = max(0, kb.chunk_count - chunk_count)
+        _get_kb_manager().update(kb_id, file_count=kb.file_count, chunk_count=kb.chunk_count)
 
     logger.info("deleted doc %s from kb %s: %d chunks removed", doc_id, kb_id, chunk_count)
     return {"doc_id": doc_id, "status": "deleted", "chunks_removed": chunk_count}
 
 
-@router.put("/bases/{kb_id}/documents/{doc_id}", dependencies=[Depends(verify_api_key)])
+@router.put("/bases/{kb_id}/documents/{doc_id}", dependencies=[Depends(require_kb_action("write"))])
 async def replace_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dict[str, Any]:
     kb = _get_base(kb_id)
     meta_store = _get_meta_store(kb_id)
@@ -411,8 +443,22 @@ async def replace_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dic
             }
         )
 
-    vec_store.add_batch(records)
-    vec_store.bm25.add_documents(records)
+    # P0-1/P0-8: add_batch writes vectors+bm25 in one call. Old index is already
+    # deleted (above); on a write failure we must not leave the new doc row with
+    # zero vectors — roll it back so the KB stays consistent (old gone, new gone,
+    # metadata clean). The doc is unrecoverable either way for a replace, but
+    # the store state is not corrupted.
+    try:
+        vec_store.add_batch(records)
+    except Exception as e:
+        logger.error("replace_document: add_batch failed, rolling back new doc %s: %s", doc_id, e)
+        try:
+            vec_store.delete_by_doc(result.file_path)
+        except Exception as de:
+            logger.error("replace_document: rollback delete_by_doc failed for %s: %s", doc_id, de)
+        meta_store.delete_chunks_by_doc(doc_id)
+        meta_store.delete_document(doc_id)
+        raise HTTPException(500, f"replacement index write failed: {e}") from e
     meta_store.update_chunk_count(doc_id, len(chunks), result.chars)
 
     # L12: guard the read-modify-write of chunk_count under the per-KB lock.
@@ -430,7 +476,7 @@ async def replace_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dic
     }
 
 
-@router.get("/bases/{kb_id}/documents/{doc_id}/status")
+@router.get("/bases/{kb_id}/documents/{doc_id}/status", dependencies=[Depends(require_kb_action("read"))])
 async def document_status(kb_id: str, doc_id: str) -> dict[str, Any]:
     _get_base(kb_id)
     meta_store = _get_meta_store(kb_id)
@@ -458,14 +504,14 @@ async def document_status(kb_id: str, doc_id: str) -> dict[str, Any]:
     }
 
 
-@router.get("/bases/{kb_id}/documents")
+@router.get("/bases/{kb_id}/documents", dependencies=[Depends(require_kb_action("read"))])
 async def list_documents(kb_id: str) -> list[dict[str, Any]]:
     _get_base(kb_id)
     meta_store = _get_meta_store(kb_id)
     return meta_store.list_documents()
 
 
-@router.post("/bases/{kb_id}/scan", dependencies=[Depends(verify_api_key)])
+@router.post("/bases/{kb_id}/scan", dependencies=[Depends(require_kb_action("write"))])
 async def scan_directory(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     kb = _get_base(kb_id)
     dir_path = data.get("dir_path", "")
@@ -537,8 +583,21 @@ async def scan_directory(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
                 }
             )
 
-        vec_store.add_batch(records)
-        vec_store.bm25.add_documents(records)
+        # P0-1/P0-8: add_batch writes vectors+bm25 in one call. Roll back this
+        # file's metadata on failure so a mid-scan write error doesn't leave
+        # orphan doc/chunk rows; continue scanning the rest.
+        try:
+            vec_store.add_batch(records)
+        except Exception as e:
+            logger.error("scan: add_batch failed for %s (doc %s): %s", result.file_name, doc_id, e)
+            try:
+                vec_store.delete_by_doc(result.file_path)
+            except Exception as de:
+                logger.error("scan: rollback delete_by_doc failed for %s: %s", doc_id, de)
+            meta_store.delete_chunks_by_doc(doc_id)
+            meta_store.delete_document(doc_id)
+            errors.append({"file": result.file_name, "error": f"index write failed: {e}"})
+            continue
         meta_store.update_chunk_count(doc_id, len(chunks), result.chars)
         total_chunks += len(chunks)
         total_chars += result.chars
@@ -601,7 +660,7 @@ async def _watch_loop(watch_id: str) -> None:
     logger.info("watch %s: stopped", watch_id)
 
 
-@router.post("/bases/{kb_id}/watch", dependencies=[Depends(verify_api_key)])
+@router.post("/bases/{kb_id}/watch", dependencies=[Depends(require_kb_action("write"))])
 async def watch_files(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     _get_base(kb_id)
     file_paths = data.get("file_paths", [])
@@ -638,7 +697,7 @@ async def watch_files(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     return {"watch_id": watch_id, "file_count": len(valid_paths), "poll_interval": poll_interval}
 
 
-@router.post("/bases/{kb_id}/unwatch", dependencies=[Depends(verify_api_key)])
+@router.post("/bases/{kb_id}/unwatch", dependencies=[Depends(require_kb_action("write"))])
 async def unwatch_files(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     watch_id = data.get("watch_id", "")
     watches = get_watches()
@@ -651,7 +710,7 @@ async def unwatch_files(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     return {"stopped": True, "watch_id": watch_id, "changes_detected": changes}
 
 
-@router.get("/bases/{kb_id}/watch/status", dependencies=[Depends(verify_api_key)])
+@router.get("/bases/{kb_id}/watch/status", dependencies=[Depends(require_kb_action("read"))])
 async def watch_status(kb_id: str) -> dict[str, Any]:
     active = [w for w in get_watches().values() if w["kb_id"] == kb_id and w.get("active")]
     return {

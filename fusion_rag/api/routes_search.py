@@ -4,12 +4,13 @@ import logging
 import time
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
 
 from ..engine.llm_errors import LLMUnavailable
 from ..engine.query_rewriter import QueryRewriter
 from ..engine.reranker import HybridSearch
+from .access import require_kb_action
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,11 @@ async def _audit_and_trajectory_async(
 
 
 @router.post("/bases/{kb_id}/search")
-async def search(kb_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
+async def search(
+    kb_id: str,
+    data: dict[str, Any],
+    subject: str | None = Depends(require_kb_action("search")),
+) -> list[dict[str, Any]]:
     from .routes import _apply_search_filters, _do_rerank, _get_base, _get_embed_client, _get_vector_store
 
     kb = _get_base(kb_id)
@@ -196,7 +201,11 @@ async def search(kb_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 @router.post("/bases/{kb_id}/ask")
-async def ask(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
+async def ask(
+    kb_id: str,
+    data: dict[str, Any],
+    subject: str | None = Depends(require_kb_action("search")),
+) -> dict[str, Any]:
     from .routes import (
         _apply_search_filters,
         _do_rerank,

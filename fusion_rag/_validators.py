@@ -87,6 +87,14 @@ def validate_path_under_root(
 
     Resolves symlinks, then asserts the resolved path is relative to root.
     Rejects symlink escapes and any path that leaves root.
+
+    NOTE (P1-11, TOCTOU): this validates the path AT CALL TIME. resolve() follows
+    symlinks, so a symlink that points inside root at check-time passes; if an
+    attacker swaps it to point outside root between this check and the caller's
+    open(), the guard is defeated (classic TOCTOU). A pure-path validator cannot
+    close this — callers that read untrusted paths MUST open with O_NOFOLLOW (or
+    os.open + lstat-vs-fstat) to make the check-then-use atomic. This function is
+    the first line, not the only line.
     """
     if not path:
         raise ValidationError(f"invalid {field}: empty")
@@ -95,8 +103,13 @@ def validate_path_under_root(
     root_resolved = Path(root).expanduser().resolve()
     target = Path(path).expanduser().resolve()
     if not allow_root and target == root_resolved:
-        # Disallow operating on the root itself for file ops.
-        pass
+        # P1-11: this branch was a dead `pass` — the docstring claimed it
+        # disallowed operating on root itself, but it never raised, so the
+        # promise was a lie. All current callers validate a file UNDER root
+        # (never the root dir), so rejecting root-equal matches intent. If a
+        # future caller legitimately needs the root, pass allow_root=True.
+        logger.warning("validate_path_under_root reject: field=%s path equals root=%s", field, root_resolved)
+        raise ValidationError(f"invalid {field}: path equals ingest root (not a file under it)")
     if not target.is_relative_to(root_resolved):
         logger.warning(
             "validate_path_under_root reject: field=%s path=%s resolved=%s root=%s",

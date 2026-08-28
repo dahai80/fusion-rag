@@ -7,7 +7,7 @@ import logging
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +45,8 @@ class MetadataStore:
 
     @contextmanager
     def _cursor(self):
+        # P2-6: write path — hold the lock across the whole transaction so two
+        # threads never commit/rollback the shared connection mid-statement.
         conn = self._get_conn()
         with self._lock:
             try:
@@ -53,6 +55,23 @@ class MetadataStore:
             except Exception:
                 conn.rollback()
                 raise
+
+    @contextmanager
+    def _read_cursor(self):
+        # P2-6: read path — NO lock. SQLite WAL allows concurrent readers that
+        # never see an in-flight writer's uncommitted rows, and the shared conn
+        # is check_same_thread=False. The lock was over-correct: it serialized
+        # every read behind every write, so a slow list_documents blocked all
+        # concurrent ingests' add_chunk. Reads only fetch (no commit/rollback),
+        # so cross-thread interleaving on the connection is safe here.
+        conn = self._get_conn()
+        try:
+            yield conn
+        except Exception:
+            # A read has nothing to roll back, but reset any incidental txn state.
+            with suppress(sqlite3.Error):
+                conn.rollback()
+            raise
 
     def _init_db(self) -> None:
         with self._cursor() as conn:
@@ -117,7 +136,7 @@ class MetadataStore:
             conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
 
     def get_document(self, doc_id: str) -> dict[str, Any] | None:
-        with self._cursor() as conn:
+        with self._read_cursor() as conn:
             row = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
         if not row:
             return None
@@ -126,7 +145,7 @@ class MetadataStore:
         return d
 
     def get_document_by_path(self, file_path: str) -> dict[str, Any] | None:
-        with self._cursor() as conn:
+        with self._read_cursor() as conn:
             row = conn.execute("SELECT * FROM documents WHERE file_path = ?", (file_path,)).fetchone()
         if not row:
             return None
@@ -135,18 +154,29 @@ class MetadataStore:
         return d
 
     def get_document_by_metadata(self, key: str, value: str) -> dict[str, Any] | None:
-        with self._cursor() as conn:
-            rows = conn.execute("SELECT * FROM documents").fetchall()
-        for row in rows:
-            d = dict(row)
-            meta = json.loads(d.get("metadata") or "{}")
-            if meta.get(key) == value:
-                d["metadata"] = meta
-                return d
-        return None
+        # P3-4: prior impl SELECT * then Python-loop json.loads + meta.get==value
+        # over every document — O(n) full-table scan + N JSON parses per call,
+        # used by incremental_sync to check if a file is already ingested by
+        # content_hash. SQLite's json_extract lets the DB filter on the JSON
+        # field directly. The key is interpolated into the path (json paths are
+        # not bind-able), so validate it as a SQL identifier first to keep
+        # injection out even though callers pass internal keys.
+        from .._validators import validate_sql_identifier
+
+        validate_sql_identifier(key, field="metadata_key")
+        with self._read_cursor() as conn:
+            row = conn.execute(
+                f"SELECT * FROM documents WHERE json_extract(metadata, '$.{key}') = ? LIMIT 1",
+                (value,),
+            ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["metadata"] = json.loads(d.get("metadata") or "{}")
+        return d
 
     def list_documents(self) -> list[dict[str, Any]]:
-        with self._cursor() as conn:
+        with self._read_cursor() as conn:
             rows = conn.execute("SELECT * FROM documents ORDER BY updated_at DESC").fetchall()
         results = []
         for r in rows:
@@ -187,7 +217,7 @@ class MetadataStore:
             conn.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
 
     def get_chunks_by_doc(self, doc_id: str) -> list[dict[str, Any]]:
-        with self._cursor() as conn:
+        with self._read_cursor() as conn:
             rows = conn.execute("SELECT * FROM chunks WHERE doc_id = ? ORDER BY chunk_index", (doc_id,)).fetchall()
         results = []
         for r in rows:
@@ -197,12 +227,12 @@ class MetadataStore:
         return results
 
     def doc_count(self) -> int:
-        with self._cursor() as conn:
+        with self._read_cursor() as conn:
             row = conn.execute("SELECT COUNT(*) as cnt FROM documents").fetchone()
         return row["cnt"] if row else 0
 
     def chunk_count(self) -> int:
-        with self._cursor() as conn:
+        with self._read_cursor() as conn:
             row = conn.execute("SELECT COUNT(*) as cnt FROM chunks").fetchone()
         return row["cnt"] if row else 0
 

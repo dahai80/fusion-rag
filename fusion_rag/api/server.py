@@ -52,10 +52,42 @@ def create_app(
             yield
         finally:
             logger.info("lifespan: shutdown — closing clients and pooled connections")
+            # P1-9: cancel every watch task so a reload doesn't orphan background
+            # loops holding KB handles. Previously the tasks dict was dropped on
+            # shutdown while the asyncio.create_task loops kept running.
+            try:
+                from .app_state import get_watches
+
+                for watch in get_watches().values():
+                    watch["active"] = False
+                    task = watch.get("_task")
+                    if task is not None and not task.done():
+                        task.cancel()
+                get_watches().clear()
+            except Exception as e:
+                logger.warning("lifespan: watch cancel failed: %s", e)
             try:
                 await embed_client.close()
             except Exception as e:
                 logger.warning("lifespan: embed_client close failed: %s", e)
+            # 硬伤A/P0-3: close every pooled VectorStore backend handle (LanceDB
+            # table refs / fusion_store lmdb envs) so no FD/env leaks across
+            # reload.
+            try:
+                from .app_state import close_vec_store_pool
+
+                await close_vec_store_pool()
+            except Exception as e:
+                logger.warning("lifespan: vec_store pool close failed: %s", e)
+            # P2-8: close every pooled admin manager's sqlite conn (VersionManager
+            # / SearchTemplateManager / PermissionManager / AuditLogger / BenchRunner)
+            # so no FD/lock leaks across reload.
+            try:
+                from .app_state import close_admin_pool
+
+                await close_admin_pool()
+            except Exception as e:
+                logger.warning("lifespan: admin pool close failed: %s", e)
             try:
                 from fusion_core.http_client import close_all
 

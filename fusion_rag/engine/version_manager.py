@@ -12,9 +12,18 @@ logger = logging.getLogger(__name__)
 
 
 class VersionManager(SqliteBase):
+    # P3-6: TTL for the cached record counts. create_snapshot calls
+    # _count_records which opens a readonly conn and runs COUNT(*) over the
+    # documents + chunks tables — a full scan on a large KB. Snapshots are
+    # infrequent but the admin also reads counts elsewhere; cache the result
+    # briefly so back-to-back snapshots (or a snapshot after a list) don't
+    # re-scan. 60s is short enough that a count goes stale only briefly.
+    _COUNT_TTL = 60.0
+
     def __init__(self, db_path: str):
         self.db_path = db_path
         super().__init__()
+        self._count_cache: dict[str, tuple[float, int, int]] = {}
         self._ensure_table()
 
     @contextmanager
@@ -216,6 +225,16 @@ class VersionManager(SqliteBase):
         return deleted
 
     def _count_records(self, kb_storage_path: str) -> tuple[int, int]:
+        # P3-6: serve from cache within TTL so back-to-back snapshots (or a
+        # snapshot right after another count read) don't re-open a readonly
+        # conn and full-scan documents + chunks. Cache is per kb_storage_path,
+        # keyed by the metadata.db path so a KB never sees another's counts.
+        cache_key = str(kb_storage_path)
+        cached = self._count_cache.get(cache_key)
+        now = time.time()
+        if cached is not None and (now - cached[0]) < self._COUNT_TTL:
+            return cached[1], cached[2]
+
         doc_count = 0
         chunk_count = 0
 
@@ -244,4 +263,5 @@ class VersionManager(SqliteBase):
             except Exception as e:
                 logger.warning("Failed to read metadata.db for counts: %s", e)
 
+        self._count_cache[cache_key] = (now, doc_count, chunk_count)
         return doc_count, chunk_count

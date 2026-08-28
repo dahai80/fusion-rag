@@ -47,10 +47,23 @@ class RemoteBackend(StoreBackend):
         raise NotImplementedError("RemoteBackend.delete_by_doc: not connected to fusion-multi-nodes")
 
     def count(self) -> int:
-        return 0
+        # P2-11: returning 0 made a misconfigured remote KB look healthy-but-empty
+        # (/kb/status, /kb/stats report "0 vectors" with no error) while every
+        # write/search already raised. A stub backend must be uniformly
+        # unimplemented: count raises too, so a status probe surfaces the
+        # misconfiguration instead of hiding it behind a green 0. Also guards
+        # P2-10's legacy fallback path routing a typo'd backend to remote.
+        logger.warning("RemoteBackend.count not yet implemented")
+        raise NotImplementedError("RemoteBackend.count: not connected to fusion-multi-nodes")
 
     def clear(self) -> None:
+        # P2-11: clear returning silently made "reset KB" appear to succeed while
+        # doing nothing — an operator believes the store is wiped when it never
+        # had data (or the remote is unreachable). Raise so reset is honest.
         logger.warning("RemoteBackend.clear not yet implemented")
+        raise NotImplementedError("RemoteBackend.clear: not connected to fusion-multi-nodes")
 
     def close(self) -> None:
+        # Stub holds no resources (no connection opened in __init__). No-op is
+        # correct here, unlike count/clear which lie about data.
         pass

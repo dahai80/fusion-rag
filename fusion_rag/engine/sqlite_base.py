@@ -15,9 +15,11 @@ owns its own connection) but still get the WAL pragma via ``open_sqlite``.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -57,7 +59,13 @@ class SqliteBase:
     def __init__(self) -> None:
         self._db: sqlite3.Connection | None = None
         self._db_closed = True
-        self._db_lock = threading.Lock()
+        # RLock (reentrant): _get_conn takes this lock to serialize the lazy
+        # connection CREATE, and is itself called from methods that already hold
+        # the lock (EmbeddingCache locks-then-calls-_get_conn; its methods need
+        # the conn mid-block for _evict_if_needed / conditional delete). A plain
+        # Lock deadlocks on that re-entrant acquire. RLock permits same-thread
+        # re-entry with negligible overhead vs the SQLite I/O it guards.
+        self._db_lock = threading.RLock()
 
     def _get_conn(self) -> sqlite3.Connection:
         if self._db is None or self._db_closed:
@@ -77,3 +85,19 @@ class SqliteBase:
                     logger.warning("SqliteBase close failed for %s: %s", self.db_path, e)
             self._db = None
             self._db_closed = True
+
+    @contextmanager
+    def _read_cursor(self):
+        # No-lock read path. SQLite WAL lets concurrent readers proceed
+        # alongside a writer without blocking, and check_same_thread=False
+        # permits cross-thread use. The write lock (_db_lock) is held only by
+        # write transactions; a read only fetches — no commit/rollback — so
+        # interleaving on the shared connection is safe here. Holding the lock
+        # on reads would serialize every read behind every writer.
+        conn = self._get_conn()
+        try:
+            yield conn
+        except Exception:
+            with contextlib.suppress(sqlite3.Error):
+                conn.rollback()
+            raise

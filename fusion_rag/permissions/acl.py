@@ -7,6 +7,8 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+from ..engine.sqlite_base import open_sqlite
+
 logger = logging.getLogger(__name__)
 
 
@@ -76,7 +78,12 @@ class PermissionManager:
         self._init_db()
 
     def _init_db(self):
-        conn = sqlite3.connect(self.db_path)
+        # P2-9: open_sqlite sets WAL + busy_timeout=5000 + check_same_thread=False
+        # + row_factory=Row. The prior raw sqlite3.connect had none — concurrent
+        # rule writes under default journal=DELETE blocked readers and raised
+        # "database is locked" past the 5s default timeout. check_permission's
+        # per-call connection (P1-12) multiplied the lock-contention surface.
+        conn = open_sqlite(self.db_path)
         try:
             conn.execute(
                 """
@@ -99,8 +106,7 @@ class PermissionManager:
 
     @contextmanager
     def _get_conn(self):
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
+        conn = open_sqlite(self.db_path)
         try:
             yield conn
         finally:
@@ -201,17 +207,19 @@ class PermissionManager:
             "check_permission: kb_id=%s subject=%s action=%s resource_path=%s", kb_id, subject, action, resource_path
         )
 
+        # P1-12: the prior code loaded ALL 4 role rule-sets (for role in Role)
+        # alongside the subject's own rules. But ACL.check filters rules by
+        # `rule.subject == subject`, so a role rule only ever matched when the
+        # subject string literally equaled the role value — and RBAC has no
+        # user→role assignment, so "alice with editor role" never inherited
+        # editor's rules. The role loop was dead work (4 extra DB round-trips)
+        # plus a misleading "RBAC" label on what is plain ABAC. Drop it: load
+        # only the subject's own rules. Admin bypass still lives in ACL.check
+        # (subject == Role.ADMIN.value), independent of any rule.
         subject_rules = self.get_rules_for_subject(kb_id, subject)
 
-        role_rules = []
-        for role in Role:
-            role_rules_for_kb = self.get_rules_for_subject(kb_id, role.value)
-            role_rules.extend(role_rules_for_kb)
-
-        all_rule_dicts = subject_rules + role_rules
-
         rules = []
-        for rd in all_rule_dicts:
+        for rd in subject_rules:
             rule = PermissionRule(
                 id=rd["id"],
                 kb_id=rd["kb_id"],

@@ -51,7 +51,12 @@ def _get_base(kb_id: str):
 def _get_vector_store(kb_id: str) -> VectorStore:
     kb = _get_base(kb_id)
     backend_type = os.environ.get("FUSION_RAG_STORE_BACKEND", "local")
-    return VectorStore(kb.vector_path, backend_type=backend_type)
+    # 硬伤A: reuse one pooled backend handle per KB (see app_state
+    # get_or_create_vec_store). The prior per-request VectorStore leaked
+    # handles and reopened the fusion_store env each call (EnvAlreadyOpened).
+    from .app_state import get_or_create_vec_store
+
+    return get_or_create_vec_store(kb.vector_path, backend_type)
 
 
 def _get_meta_store(kb_id: str) -> MetadataStore:
