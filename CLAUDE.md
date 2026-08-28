@@ -91,6 +91,7 @@ fusion_rag/
     ├── local_backend.py     # LocalBackend — LanceDB + BM25 implementation
     ├── remote_backend.py    # RemoteBackend — remote storage stub (extensible)
     ├── vector_store.py      # VectorStore — StoreBackend wrapper, hybrid search
+    ├── fusion_store_backend.py  # FusionStoreBackend — fusion-store HNSW (PyO3) + in-process BM25
     └── metadata_store.py    # MetadataStore — SQLite document/chunk metadata
 ```
 
@@ -122,6 +123,7 @@ fusion_rag/
 | `FUSION_RAG_SYSTEM_PROMPT` | (built-in) | Custom system prompt for RAG generation |
 | `FUSION_RAG_FALLBACK_URL` | (empty) | Cloud embedding fallback URL (used when local embed fails) |
 | `FUSION_RAG_FALLBACK_API_KEY` | (empty) | Cloud fallback API key |
+| `FUSION_RAG_STORE_BACKEND` | local | Vector store backend: `local` (LanceDB) or `fusion-store` (HNSW via in-tree fusion-store PyO3 binding; install with `pip install -e ../fusion-store`, not on PyPI) |
 | `FUSION_TRAJECTORY_DIR` | ~/.fusion/trajectories/rag | D1 retrieval trajectory output dir |
 | `FUSION_RAG_LOG_LEVEL` | INFO | Server log level |
 

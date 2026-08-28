@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -49,7 +50,8 @@ def _get_base(kb_id: str):
 
 def _get_vector_store(kb_id: str) -> VectorStore:
     kb = _get_base(kb_id)
-    return VectorStore(kb.vector_path)
+    backend_type = os.environ.get("FUSION_RAG_STORE_BACKEND", "local")
+    return VectorStore(kb.vector_path, backend_type=backend_type)
 
 
 def _get_meta_store(kb_id: str) -> MetadataStore:

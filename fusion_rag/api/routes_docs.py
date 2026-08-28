@@ -83,7 +83,8 @@ def _check_ingest_root(file_path: str) -> None:
 
 def _get_vector_store(kb_id: str) -> VectorStore:
     kb = _get_base(kb_id)
-    return VectorStore(kb.vector_path)
+    backend_type = os.environ.get("FUSION_RAG_STORE_BACKEND", "local")
+    return VectorStore(kb.vector_path, backend_type=backend_type)
 
 
 def _get_meta_store(kb_id: str) -> MetadataStore:
