@@ -8,8 +8,8 @@ Local vector knowledge base service for the Fusion-MLX ecosystem — 100% offlin
 
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-234-success.svg)](tests/)
-[![Version](https://img.shields.io/badge/Version-0.6.8-blue.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-243-success.svg)](tests/)
+[![Version](https://img.shields.io/badge/Version-0.7.0-blue.svg)]()
 
 [Quick Start](#quick-start) · [API Reference](#api-reference) · [Architecture](#architecture) · [Documentation](docs/)
 
@@ -331,6 +331,7 @@ Modules migrated to fusion-core: `contextualizer`, `query_rewriter`, `reranker`,
 | `FUSION_RAG_SYSTEM_PROMPT` | (built-in) | Custom system prompt for RAG answer generation |
 | `FUSION_RAG_FALLBACK_URL` | (empty) | Cloud embedding fallback URL |
 | `FUSION_RAG_FALLBACK_API_KEY` | (empty) | Cloud fallback API key |
+| `FUSION_RAG_STORE_BACKEND` | local | Vector store backend: `local` (LanceDB) or `fusion-store` (HNSW via the in-tree fusion-store PyO3 binding). `fusion-store` requires `pip install -e ../fusion-store` (maturin); not on PyPI |
 | `FUSION_TRAJECTORY_DIR` | ~/.fusion/trajectories/rag | RAG retrieval trajectory output dir (D1 轨迹飞轮) |
 
 ### Using start.sh
@@ -361,6 +362,10 @@ ruff check fusion_rag/
 ```
 
 ---
+
+## What's New in v0.7.0
+
+- **fusion-store HNSW vector backend (#47)** — optional `FusionStoreBackend` sinks vector storage/retrieval to the in-tree fusion-store HNSW index via its PyO3 binding. Opt in with `FUSION_RAG_STORE_BACKEND=fusion-store`; default stays `local` (LanceDB), so no migration. fusion_store uses int ids while fusion-rag uses str chunk ids — the backend maintains a str↔int mapping in fusion-store KV and persists an id counter in a sidecar. Chunk metadata rides in fusion-store KV (`put_kv`); BM25 keyword search stays in-process (fusion-store is a vector primitive only, per its PRD boundary). Hybrid search (vector + BM25 + RRF) keeps working. 9 backend tests (skip on CI where the binding isn't installed).
 
 ## What's New in v0.6.7
 

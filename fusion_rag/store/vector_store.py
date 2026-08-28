@@ -12,6 +12,12 @@ logger = logging.getLogger(__name__)
 
 StoreBackendFactory.register("local", LocalBackend)
 StoreBackendFactory.register("remote", RemoteBackend)
+try:
+    from .fusion_store_backend import FusionStoreBackend
+
+    StoreBackendFactory.register("fusion-store", FusionStoreBackend)
+except ImportError:
+    logger.debug("FusionStoreBackend unavailable (fusion_store not installed); backend 'fusion-store' disabled")
 
 
 class VectorStore:
@@ -24,6 +30,8 @@ class VectorStore:
             self._backend: StoreBackend = LocalBackend(vector_path=vector_path, dimension=dimension)
         elif backend_type == "remote":
             self._backend = RemoteBackend(**backend_kwargs)
+        elif backend_type == "fusion-store":
+            self._backend = FusionStoreBackend(vector_path=vector_path, dimension=dimension)
         else:
             self._backend = StoreBackendFactory.create(
                 store_type=backend_type,
@@ -44,15 +52,18 @@ class VectorStore:
 
     @property
     def table(self):
-        if isinstance(self._backend, LocalBackend):
+        # LanceDB table is a LocalBackend concept; fusion-store has no table.
+        if hasattr(self._backend, "table"):
             return self._backend.table
-        raise AttributeError("table property only available on LocalBackend")
+        raise AttributeError("table property only available on LanceDB-backed stores")
 
     @property
     def bm25(self):
-        if isinstance(self._backend, LocalBackend):
+        # Any backend that owns an in-process BM25Index exposes it via .bm25
+        # (LocalBackend and FusionStoreBackend both do).
+        if hasattr(self._backend, "bm25"):
             return self._backend.bm25
-        raise AttributeError("bm25 property only available on LocalBackend")
+        raise AttributeError("bm25 property not available on this backend")
 
     def add(
         self,

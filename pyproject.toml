@@ -1,6 +1,6 @@
 [project]
 name = "fusion-rag"
-version = "0.6.8"
+version = "0.7.0"
 description = "Fusion-RAG — Apple Silicon native offline vector knowledge base backend"
 license = "Apache-2.0"
 requires-python = ">=3.12"
@@ -27,6 +27,12 @@ test = [
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=5.0.0",
     "pytest-mock>=3.14.0",
+]
+# Optional: fusion-store HNSW vector backend (in-tree PyO3, NOT on PyPI).
+# Install via the monorepo venv: pip install -e ../fusion-store (maturin).
+# Enables FUSION_RAG_STORE_BACKEND=fusion-store. numpy ships with lancedb/pyarrow.
+fusion_store = [
+    "numpy>=1.26.0",
 ]
 
 [tool.pytest.ini_options]
