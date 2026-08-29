@@ -127,6 +127,12 @@ def init_app_state(app: Any, kb_manager: KnowledgeBaseManager, embed_client: Emb
     app.state.tasks: dict[str, dict[str, Any]] = {}
     app.state.watches: dict[str, dict[str, Any]] = {}
     app.state.kb_locks: dict[str, asyncio.Lock] = {}
+    # A-P2-2: guard kb_locks creation. _kb_lock(kb_id) did check-then-act
+    # (if kb_id not in locks: locks[kb_id] = Lock()) — two concurrent ingests
+    # on a fresh KB both missed, each built a Lock, one was orphaned while the
+    # other raced unguarded. A threading.Lock serializes the dict mutation; the
+    # asyncio.Lock itself is created under it so exactly one wins.
+    app.state.kb_locks_lock = threading.Lock()
     app.state.project_kb_map: dict[str, str] = {}
     # 硬伤A/P0-3/P2-1: per-app VectorStore singleton pool. One backend handle
     # per vector_path, reused across requests — kills the per-request
@@ -145,6 +151,19 @@ def init_app_state(app: Any, kb_manager: KnowledgeBaseManager, embed_client: Emb
     # shutdown. Keyed by a string tag so the pool is one dict, lock-guarded.
     app.state.admin_pool: dict[str, Any] = {}
     app.state.admin_pool_lock = threading.Lock()
+    # A-P1-1: per-KB MetadataStore pool. _get_meta_store(kb_id) built a fresh
+    # MetadataStore(kb.metadata_path) per request — each opened a new sqlite
+    # connection (check_same_thread=False, WAL) and never closed it. On a KB hit
+    # repeatedly that is one leaked conn per request; across a long run the FDs
+    # accumulate. One instance per metadata_path, reused; closed on shutdown.
+    app.state.meta_pool: dict[str, Any] = {}
+    app.state.meta_pool_lock = threading.Lock()
+    # A-P2-1: TrajectoryWriter singleton. routes_search built a fresh
+    # TrajectoryWriter() per search call — each re-read env + reopened the same
+    # JSONL file, and _maybe_rotate ran unguarded (two rotations could race on
+    # concurrent searches). One writer per process, lock-guarded rotation.
+    app.state.trajectory_writer: Any = None
+    app.state.trajectory_writer_lock = threading.Lock()
     # R3: restore persisted watches so a restart does not silently drop every
     # directory monitor (operator believes monitoring is live; without restore
     # it was gone with no signal). Rebuild hashes from the files on disk + spawn
@@ -308,6 +327,97 @@ async def close_vec_store_pool() -> None:
             logger.info("vec_store pool: closed %s", vpath)
         except Exception as e:
             logger.warning("vec_store pool: close failed for %s: %s", vpath, e)
+
+
+def get_meta_store(metadata_path: str):
+    """A-P1-1: return the cached MetadataStore for metadata_path, build once.
+
+    _get_meta_store(kb_id) previously built a fresh MetadataStore per request —
+    a new sqlite conn opened and never closed each call (FD leak across a long
+    run). One instance per metadata_path, reused; thread-safe via the pool lock.
+    Closed from the lifespan finally via close_meta_pool.
+    """
+    from ..store.metadata_store import MetadataStore
+
+    pool = _state().meta_pool
+    lock = _state().meta_pool_lock
+    cached = pool.get(metadata_path)
+    if cached is not None:
+        return cached
+    with lock:
+        cached = pool.get(metadata_path)
+        if cached is not None:
+            return cached
+        ms = MetadataStore(metadata_path)
+        pool[metadata_path] = ms
+        logger.info("meta pool: opened %s", metadata_path)
+        return ms
+
+
+async def close_meta_pool() -> None:
+    """Lifespan shutdown: close every pooled MetadataStore's sqlite conn.
+
+    MetadataStore.close nulls the shared conn. Sync close — run off-loop.
+    """
+    from fastapi.concurrency import run_in_threadpool
+
+    try:
+        pool = _state().meta_pool
+    except HTTPException:
+        return
+    lock = _state().meta_pool_lock
+    with lock:
+        items = list(pool.items())
+        pool.clear()
+    for mpath, ms in items:
+        try:
+            await run_in_threadpool(ms.close)
+            logger.info("meta pool: closed %s", mpath)
+        except Exception as e:
+            logger.warning("meta pool: close failed for %s: %s", mpath, e)
+
+
+def get_trajectory_writer():
+    """A-P2-1: return the process-singleton TrajectoryWriter, build once.
+
+    routes_search built a fresh TrajectoryWriter() per search call — each
+    re-read env + reopened the same JSONL file, and _maybe_rotate ran
+    unguarded. One writer per process, reused; created under a lock so two
+    concurrent searches don't race to build two. Returns None if disabled.
+    """
+    from ..engine.trajectory_writer import TrajectoryWriter
+
+    state = _state()
+    if state.trajectory_writer is not None:
+        return state.trajectory_writer
+    with state.trajectory_writer_lock:
+        if state.trajectory_writer is not None:
+            return state.trajectory_writer
+        writer = TrajectoryWriter()
+        state.trajectory_writer = writer
+        logger.info("trajectory writer singleton initialized")
+        return writer
+
+
+async def close_trajectory_writer() -> None:
+    """Lifespan shutdown: best-effort flush/close of the singleton writer."""
+    from fastapi.concurrency import run_in_threadpool
+
+    try:
+        state = _state()
+    except HTTPException:
+        return
+    writer = state.trajectory_writer
+    if writer is None:
+        return
+    close = getattr(writer, "close", None)
+    if close is None:
+        return
+    try:
+        await run_in_threadpool(close)
+        logger.info("trajectory writer singleton closed")
+    except Exception as e:
+        logger.warning("trajectory writer close failed: %s", e)
 
 
 def _get_or_create_admin(key: str, factory):

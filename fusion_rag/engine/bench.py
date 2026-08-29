@@ -3,6 +3,8 @@ import logging
 import time
 from contextlib import contextmanager
 
+from fastapi.concurrency import run_in_threadpool
+
 from .sqlite_base import SqliteBase
 
 logger = logging.getLogger(__name__)
@@ -77,7 +79,11 @@ class BenchRunner(SqliteBase):
 
             t0 = time.monotonic()
             try:
-                bm25_results = vec_store.keyword_search(query_text, top_k=top_k)
+                # A-P2-3: keyword_search is sync (in-process BM25); push off the
+                # event loop so the bench does not block other in-flight requests.
+                bm25_results = await run_in_threadpool(
+                    vec_store.keyword_search, query_text, top_k=top_k
+                )
             except Exception as e:
                 logger.error("BM25 search failed: %s", e)
                 bm25_results = []
@@ -88,7 +94,10 @@ class BenchRunner(SqliteBase):
             try:
                 query_vector = await embed_client.embed(query_text)
                 if query_vector and not all(v == 0.0 for v in query_vector):
-                    vector_results = vec_store.search(query_vector, top_k=top_k)
+                    # A-P2-3: vec_store.search is sync (LanceDB); off the loop.
+                    vector_results = await run_in_threadpool(
+                        vec_store.search, query_vector, top_k=top_k
+                    )
                 else:
                     vector_results = []
             except Exception as e:
@@ -140,9 +149,18 @@ class BenchRunner(SqliteBase):
             "queries": results,
         }
 
-        self._save_result(kb_id, "search_bench", "avg_bm25_ms", total_bm25_ms / n, summary)
-        self._save_result(kb_id, "search_bench", "avg_vector_ms", total_vector_ms / n, summary)
-        self._save_result(kb_id, "search_bench", "avg_hybrid_ms", total_hybrid_ms / n, summary)
+        # A-P2-3: _save_result is sync sqlite; three writes ran inline in the
+        # async handler, blocking the event loop for each. Push each off the
+        # loop thread.
+        await run_in_threadpool(
+            self._save_result, kb_id, "search_bench", "avg_bm25_ms", total_bm25_ms / n, summary
+        )
+        await run_in_threadpool(
+            self._save_result, kb_id, "search_bench", "avg_vector_ms", total_vector_ms / n, summary
+        )
+        await run_in_threadpool(
+            self._save_result, kb_id, "search_bench", "avg_hybrid_ms", total_hybrid_ms / n, summary
+        )
 
         logger.info(
             "Search bench complete: avg_bm25=%.1fms avg_vector=%.1fms avg_hybrid=%.1fms",

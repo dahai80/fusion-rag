@@ -102,6 +102,12 @@ class BM25Index(SqliteBase):
             "CREATE TABLE IF NOT EXISTS bm25_inverted "
             "(token TEXT, doc_id TEXT, tf INTEGER, PRIMARY KEY (token, doc_id))"
         )
+        # P-P2-1: back the remove_document DELETE (WHERE doc_id IN (...)) with
+        # an index on doc_id. The PRIMARY KEY (token, doc_id) orders by token
+        # first, so a doc_id-only delete scans every token otherwise.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_bm25_inverted_doc ON bm25_inverted(doc_id)"
+        )
         conn.commit()
 
     def _load(self) -> None:
@@ -216,8 +222,16 @@ class BM25Index(SqliteBase):
         if not to_remove:
             return 0
         removed_set = set(to_remove)
+        # P-P2-1: capture each removed doc's tokens BEFORE deleting its text so
+        # the affected-token set is known directly (O(doc tokens)). The prior
+        # loop scanned the ENTIRE _inverted dict per removed doc to find which
+        # tokens posted it — O(unique corpus tokens) per delete, a 50k-token KB
+        # did 50k iterations to delete one doc. Re-tokenizing the (small) doc
+        # text yields exactly the tokens to retract.
+        removed_tokens_by_doc: dict[str, list[str]] = {}
         total_len_delta = 0
         for did in to_remove:
+            removed_tokens_by_doc[did] = _tokenize(self._doc_texts.get(did, ""))
             del self._doc_texts[did]
             total_len_delta += self._doc_len.pop(did, 0)
             self._doc_paths.pop(did, None)
@@ -225,11 +239,10 @@ class BM25Index(SqliteBase):
         # P3-2: decrement _df incrementally per affected token instead of
         # rebuilding the whole Counter (O(unique tokens) per delete). Only the
         # tokens that appeared in a removed doc change df; pruning an empty
-        # posting list also drops the df entry. Scan the inverted index (not a
-        # re-tokenize of the deleted text) for the tokens that posted this doc.
-        for did in to_remove:
-            posted = [tok for tok, posts in self._inverted.items() if did in posts]
-            for token in posted:
+        # posting list also drops the df entry. P-P2-1: iterate the captured
+        # doc tokens (deduped), not a corpus-wide inverted scan.
+        for did, tokens in removed_tokens_by_doc.items():
+            for token in set(tokens):
                 post = self._inverted.get(token)
                 if post and did in post:
                     del post[did]

@@ -346,6 +346,9 @@ Modules migrated to fusion-core: `contextualizer`, `query_rewriter`, `reranker`,
 | `FUSION_RAG_TRAJECTORY_KEEP` | 5 | Rotated trajectory files to keep (R6) |
 | `FUSION_RAG_AUDIT_RETENTION_DAYS` | 30 | Audit log retention days (0 = keep forever) (R6) |
 | `FUSION_RAG_STORES_DIR` | ~/.fusion-rag/stores | Per-KB store root dir (R3 watch registry) |
+| `FUSION_RAG_LOG_DIR` | `./logs` | Log file dir (RotatingFileHandler, 10MB x 5 files) |
+| `FUSION_RAG_LOG_FORMAT` | text | Log line format: `text` (readable) or `json` (one JSON object/line, for ELK/Loki) |
+| `FUSION_RAG_SKIP_STARTUP_PROBE` | (empty) | Set `1` to skip the boot-time fusion-mlx reachability probe (MLX comes up later) |
 
 ### Using start.sh
 
@@ -355,6 +358,68 @@ Modules migrated to fusion-core: `contextualizer`, `query_rewriter`, `reranker`,
 ./start.sh restart    # Restart the server
 ./start.sh status     # Check server status
 ```
+
+---
+
+## Deployment
+
+fusion-rag is a single-process service (see H3 in CLAUDE.md: do NOT run `--workers N` or multiple instances against one shared `stores` dir). Three supported deploy shapes:
+
+### Docker / docker-compose
+
+```bash
+# Build + run (fusion-mlx stays on the host, reached via host.docker.internal)
+docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml logs -f
+```
+
+The compose file mounts a named volume for `~/.fusion-rag/stores` (KB data survives container recreation) and sets `FUSION_RAG_LOG_FORMAT=json` so `docker logs` emits parseable JSON. See `deploy/Dockerfile` + `deploy/docker-compose.yml`.
+
+### systemd (bare-metal / VM)
+
+```bash
+sudo cp deploy/fusion-rag.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now fusion-rag
+journalctl -u fusion-rag -f
+```
+
+The unit drains in-flight requests for 40s on stop (`TimeoutStopSec=40`, matching the 30s graceful shutdown) before SIGKILL. Per-instance env overrides live in `/etc/fusion-rag/env` (`EnvironmentFile=-`). See `deploy/fusion-rag.service`.
+
+### start.sh (dev / single-user)
+
+```bash
+./start.sh start    # nohup, logs to logs/stdout.log (bootstrap) + logs/fusion-rag.log (rotated)
+./start.sh stop     # SIGTERM, drains up to 35s, then SIGKILL
+```
+
+### Health probes
+
+| Endpoint | Purpose | Use for |
+|----------|---------|---------|
+| `GET /health` | Liveness — process up, event loop turns | restart policy (`restart: on-failure`, livenessProbe) |
+| `GET /ready` | Readiness — embedding backend reachable + store writable | routing / load-balancer (readinessProbe); NOT restart |
+
+`/health` never checks downstream deps (a transient MLX hiccup must not evict the pod). `/ready` returns 503 with a `checks` body when a dep is down.
+
+### Snapshot-safe stores backup (O-P2-1)
+
+The per-KB stores dir (`~/.fusion-rag/stores/{kb}/`) mixes SQLite WAL stores (metadata.db, bm25_index.db, versions.db, …) with LanceDB `vectors/`. A raw `tar`/`rsync` of the dir mid-write captures an inconsistent `.db` + a stale `-wal` that a restore would replay or drop. **Checkpoint before backing up**:
+
+```bash
+# Fold every WAL sidecar into its .db + compact LanceDB, THEN snapshot.
+curl -X POST -H "Authorization: Bearer $FUSION_RAG_API_KEY" \
+  http://127.0.0.1:11436/kb/bases/{kb_id}/checkpoint
+tar -czf kb-snapshot.tgz -C ~/.fusion-rag/stores {kb_id}
+```
+
+`POST /kb/bases/{kb_id}/checkpoint` runs `PRAGMA wal_checkpoint(TRUNCATE)` on every SQLite store for the KB and `table.optimize()` on the LanceDB table. Run it, then snapshot.
+
+### Structured logging + request-id (O-P1-2 / O-P2-2)
+
+- Logs rotate: `logs/fusion-rag.log` at 10MB x 5 files (RotatingFileHandler), so a long run no longer fills the disk. `FUSION_RAG_LOG_DIR` overrides the path.
+- `FUSION_RAG_LOG_FORMAT=json` emits one JSON object per line (`{ts, level, logger, msg, request_id, extra}`) for ELK/Loki; `text` (default) stays readable for dev.
+- Every HTTP request gets an `X-Request-ID` (incoming header honored, else generated), echoed on the response. All log lines for a request carry the same `request_id`, so a call is traceable end-to-end across app logs + the aggregator.
 
 ---
 

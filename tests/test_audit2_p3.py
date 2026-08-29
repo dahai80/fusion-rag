@@ -174,7 +174,10 @@ class TestR5Metrics:
         client = TestClient(app)
         # hit health (skipped from metrics) then metrics (skipped from metrics)
         client.get("/health")
-        resp = client.get("/metrics")
+        # S-P2-2: /metrics now gates on verify_api_key (same as write endpoints).
+        # NoAuth -> open; ApiKey backend -> requires a valid key. Present the
+        # admin key so the authed scrape succeeds; a missing key now 401s.
+        resp = client.get("/metrics", headers={"X-API-Key": "admin-key"})
         assert resp.status_code == 200
         assert "fusion_rag_requests_total" in resp.text or "fusion_rag_request_latency_ms" in resp.text
         auth_mod._auth_backend = None

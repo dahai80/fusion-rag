@@ -9,25 +9,28 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from .auth import AuthConfig, verify_api_key
+from .access import require_admin
+from .auth import AuthConfig
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/kb/auth", tags=["auth"])
 
 
-@router.get("/keys")
-async def list_api_keys(_: str | None = Depends(verify_api_key)) -> dict[str, Any]:
+@router.get("/keys", dependencies=[Depends(require_admin())])
+async def list_api_keys() -> dict[str, Any]:
     keys = AuthConfig().list_keys()
     return {"keys": keys}
 
 
-@router.post("/keys")
-async def create_api_key(
-    body: dict[str, Any],
-    _: str | None = Depends(verify_api_key),
-) -> dict[str, Any]:
+@router.post("/keys", dependencies=[Depends(require_admin())])
+async def create_api_key(body: dict[str, Any]) -> dict[str, Any]:
     name = body.get("name", "default")
+    # S-P0-1: belt-and-suspenders — require_admin blocks non-admin callers, and
+    # this rejects a reserved name even if an admin mistypes one. add_key also
+    # rejects it, but a clear 400 here beats a silent 500 from add_key.
+    if name in ("admin",):
+        raise HTTPException(400, "name 'admin' is reserved for the env admin key")
     key = f"frg_{secrets.token_hex(16)}"
     auth = AuthConfig()
     if auth.add_key(key, name):
@@ -36,11 +39,8 @@ async def create_api_key(
     raise HTTPException(500, "Failed to create API key")
 
 
-@router.delete("/keys/{key_hash_prefix}")
-async def delete_api_key(
-    key_hash_prefix: str,
-    _: str | None = Depends(verify_api_key),
-) -> dict[str, Any]:
+@router.delete("/keys/{key_hash_prefix}", dependencies=[Depends(require_admin())])
+async def delete_api_key(key_hash_prefix: str) -> dict[str, Any]:
     keys = AuthConfig().list_keys()
     for k in keys:
         if k["key_hash"].startswith(key_hash_prefix):

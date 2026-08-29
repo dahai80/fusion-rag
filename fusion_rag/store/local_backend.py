@@ -255,14 +255,25 @@ class LocalBackend(StoreBackend):
         except Exception as e:
             logger.warning("LocalBackend clear failed: %s", e)
 
+    def checkpoint(self) -> None:
+        # O-P2-1: fold a snapshot-consistent state before a stores-dir backup.
+        # Two parts: (1) the in-process BM25Index is a SqliteBase WAL store —
+        # checkpoint(TRUNCATE) folds its -wal into bm25_index.db. (2) LanceDB
+        # accumulates fragment files on each add; table.optimize() compacts
+        # them so a tar/rsync of vectors/ captures a compacted, consistent
+        # dataset rather than many small fragments mid-merge.
+        if self._bm25_index is not None:
+            try:
+                self._bm25_index.checkpoint()
+            except Exception as e:
+                logger.warning("LocalBackend checkpoint: BM25 checkpoint failed: %s", e)
+        try:
+            self.table.optimize()
+            logger.debug("LocalBackend checkpoint: LanceDB table optimized")
+        except Exception as e:
+            logger.warning("LocalBackend checkpoint: LanceDB optimize failed: %s", e)
+
     def close(self) -> None:
-        # P2-2: prior close() only nulled Python refs — it did NOT close the
-        # BM25Index's sqlite3 connection (SqliteBase has no __del__, sqlite3
-        # connections are not guaranteed to close on GC). Leaked connections
-        # held FDs and file locks on bm25_index.db, blocking snapshot/clear.
-        # Close the BM25 connection explicitly before dropping the reference.
-        # LanceDB holds mmap'd files released only on process exit (no close API)
-        # — documented; we null the ref so a stale handle isn't reused.
         if self._bm25_index is not None:
             try:
                 self._bm25_index._close_conn()

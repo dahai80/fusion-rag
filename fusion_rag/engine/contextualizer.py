@@ -8,6 +8,7 @@ user instruction: "按照你的方案和计划落地所有phase阶段的需求"
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -67,13 +68,23 @@ class Contextualizer:
         # truncating to the document head — a chunk at offset 15000 otherwise
         # gets context from the (unrelated) document beginning.
         client = await self._get_client()
-        failures = 0
-        for chunk in chunks:
-            try:
+        # P-P1-3: prior loop called _generate_context per chunk SEQUENTIALLY —
+        # N chunks = N serial LLM round-trips, contextualize latency = sum not
+        # max. A 200-chunk doc at ~0.5s/call blocked ingest for 100s. Fan the
+        # per-chunk context calls out concurrently behind a semaphore so the
+        # LLM backend isn't flooded (it serializes anyway, but the round-trips
+        # overlap instead of queuing one behind another).
+        sem = asyncio.Semaphore(4)
+
+        async def _one(chunk: dict[str, Any]) -> str:
+            async with sem:
                 windowed = self._window_doc_text(doc_text, chunk.get("text", ""))
-                context = await self._generate_context(client, chunk.get("text", ""), windowed)
-                chunk["context"] = context
-            except Exception as e:
+                return await self._generate_context(client, chunk.get("text", ""), windowed)
+
+        contexts = await asyncio.gather(*[_one(c) for c in chunks], return_exceptions=True)
+        failures = 0
+        for chunk, result in zip(chunks, contexts):
+            if isinstance(result, Exception):
                 # L1: record the failure. If EVERY chunk fails the LLM is down
                 # — propagate LLMUnavailable so the caller knows contextual
                 # retrieval silently degraded to plain retrieval. Per-chunk
@@ -83,9 +94,11 @@ class Contextualizer:
                 logger.warning(
                     "Context generation failed for chunk %s: %s",
                     chunk.get("id", "?"),
-                    e,
+                    result,
                 )
                 chunk["context"] = ""
+            else:
+                chunk["context"] = result
         if failures and failures == len(chunks):
             logger.warning("Contextualizer: all %d chunks failed — LLM unavailable", failures)
             raise LLMUnavailable("contextualization failed for all chunks")
@@ -111,6 +124,11 @@ class Contextualizer:
             doc_text=doc_text,
             chunk_text=chunk_text,
         )
+        import time as _time
+
+        from .metrics import record_llm_latency
+
+        _llm_start = _time.perf_counter()
         resp = await with_retry(
             lambda: client.post(
                 f"{self.mlx_url}/chat/completions",
@@ -125,10 +143,13 @@ class Contextualizer:
             retries=2,
             total_deadline=15.0,
         )
+        record_llm_latency("contextualize", (_time.perf_counter() - _llm_start) * 1000)
         resp.raise_for_status()
         content = resp.json()["choices"][0]["message"]["content"].strip()
         if not content:
-            logger.warning("Contextualizer empty content, chunk_text=%s", chunk_text[:50])
+            # O-P1-3: chunk_text is document PII — keep the warning signal but
+            # drop the text snippet so INFO+ logs carry no chunk content.
+            logger.warning("Contextualizer empty content (chunk len=%d)", len(chunk_text))
             raise ValueError("empty_content")
         # L17: configurable output cap (was hard 200). Long chunks benefit from
         # more context; callers can pass max_context_chars to tune.

@@ -8,12 +8,14 @@ user instruction: "按照你的方案和计划落地所有phase阶段的需求"
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 from typing import Any
 
 import httpx
+from fastapi.concurrency import run_in_threadpool
 from fusion_core.http_client import get_async_client, with_retry
 
 from .llm_errors import LLMUnavailable
@@ -45,11 +47,28 @@ class Reranker:
     async def rerank(self, query: str, documents: list[dict[str, Any]], top_k: int = 5) -> list[dict[str, Any]]:
         if not documents:
             return []
+        # P-P2-5: prior loop scored batches SEQUENTIALLY — N batches = N serial
+        # LLM round-trips, rerank latency = sum not max. Fan the batches out
+        # concurrently behind a semaphore so the LLM backend (sync-friendly,
+        # pool-shared) isn't flooded. Batch boundaries preserved so each scored
+        # batch maps back to its docs in order.
+        batches = [documents[i : i + self.batch_size] for i in range(0, len(documents), self.batch_size)]
+        sem = asyncio.Semaphore(4)
+
+        async def _score_batch(batch: list[dict[str, Any]]) -> list[float]:
+            async with sem:
+                return await self._batch_score(query, batch)
+
+        score_lists = await asyncio.gather(*[_score_batch(b) for b in batches], return_exceptions=True)
         all_scored = []
-        for i in range(0, len(documents), self.batch_size):
-            batch = documents[i : i + self.batch_size]
-            scores = await self._batch_score(query, batch)
-            for doc, score in zip(batch, scores):
+        for batch, result in zip(batches, score_lists):
+            if isinstance(result, Exception):
+                # L1: a single batch failure propagates LLMUnavailable from
+                # _batch_score; gather captured it. Re-raise so the route's
+                # rerank-fallback (original order) engages, not a partial rerank
+                # that silently drops the failed batch's docs.
+                raise result
+            for doc, score in zip(batch, result):
                 doc["score"] = score
                 all_scored.append(doc)
         all_scored.sort(key=lambda x: x["score"], reverse=True)
@@ -66,6 +85,11 @@ class Reranker:
         )
         try:
             client = await self._get_client()
+            import time as _time
+
+            from .metrics import record_llm_latency
+
+            _llm_start = _time.perf_counter()
             resp = await with_retry(
                 lambda: client.post(
                     f"{self.mlx_url}/chat/completions",
@@ -79,10 +103,11 @@ class Reranker:
                 retries=2,
                 total_deadline=15.0,
             )
+            record_llm_latency("rerank", (_time.perf_counter() - _llm_start) * 1000)
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"]["content"].strip()
             if not content:
-                logger.warning("Reranker empty content, query=%s", query[:50])
+                logger.warning("Reranker empty content (query len=%d)", len(query))
                 raise ValueError("empty_content")
             return self._parse_scores(content, len(docs))
         except Exception as e:
@@ -128,7 +153,8 @@ class Reranker:
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"]["content"].strip()
             if not content:
-                logger.warning("Reranker _score_relevance empty content, query=%s", query[:50])
+                # O-P1-3: query is PII — drop snippet.
+                logger.warning("Reranker _score_relevance empty content (query len=%d)", len(query))
                 raise ValueError("empty_content")
             return float(content[:4])
         except Exception as e:
@@ -162,8 +188,14 @@ class HybridSearch:
         threshold: float = 0.0,
         filters: dict | None = None,
     ) -> list[dict[str, Any]]:
-        vector_results = self.vector_store.search(query_vector, top_k=top_k * 2, threshold=0.0)
-        keyword_results = self.vector_store.keyword_search(query_text, top_k=top_k * 2)
+        # P-P1-1: vector_store.search / keyword_search are sync (LanceDB + BM25).
+        # Calling them inline in an async handler blocks the event loop for the
+        # full search duration. Push both off the loop thread; run them
+        # concurrently (independent reads) so the two backends don't serialize.
+        vector_results, keyword_results = await asyncio.gather(
+            run_in_threadpool(self.vector_store.search, query_vector, top_k=top_k * 2, threshold=0.0),
+            run_in_threadpool(self.vector_store.keyword_search, query_text, top_k=top_k * 2),
+        )
 
         if filters:
             vector_results = self._apply_filters(vector_results, filters)

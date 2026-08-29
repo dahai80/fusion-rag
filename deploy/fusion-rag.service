@@ -1,0 +1,49 @@
+# Fusion-RAG systemd unit — bare-metal / VM deploy (no Docker).
+#
+# Install:
+#   sudo cp deploy/fusion-rag.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now fusion-rag
+#
+# The service runs the venv python (monorepo .venv at /opt/fusion/.venv). Adjust
+# WorkingDirectory + ExecStart path to your install. fusion-mlx must be running
+# (its own unit) before this — OrderedByAfter is a hint, not a hard gate; the
+# startup probe exits non-zero if MLX is unreachable (set FUSION_RAG_SKIP_STARTUP_PROBE=1
+# to defer).
+#
+# Single-process (CLAUDE.md H3): do NOT run two instances against one stores dir.
+
+[Unit]
+Description=Fusion-RAG — offline vector knowledge base backend
+Documentation=https://github.com/dahai80/fusion-rag
+After=network-online.target fusion-mlx.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fusion
+Group=fusion
+WorkingDirectory=/opt/fusion/fusion-rag
+Environment="PATH=/opt/fusion/.venv/bin:/usr/bin"
+Environment="FUSION_RAG_HOST=127.0.0.1"
+Environment="FUSION_RAG_PORT=11436"
+Environment="FUSION_MLX_URL=http://127.0.0.1:11432/v1"
+Environment="FUSION_RAG_EMBED=BGE-M3"
+Environment="FUSION_RAG_LOG_FORMAT=json"
+EnvironmentFile=-/etc/fusion-rag/env
+ExecStart=/opt/fusion/.venv/bin/python -m fusion_rag.api.server
+# O-P1-5: let uvicorn drain in-flight requests (timeout_graceful_shutdown=30).
+# Give it 40s before systemd sends SIGKILL — covers the 30s drain + slack.
+TimeoutStopSec=40
+KillSignal=SIGTERM
+Restart=on-failure
+RestartSec=5
+# Stores + logs under the service user's home; harden the runtime.
+ReadWritePaths=/home/fusion/.fusion-rag
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

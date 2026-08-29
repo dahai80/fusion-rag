@@ -86,6 +86,21 @@ class SqliteBase:
             self._db = None
             self._db_closed = True
 
+    def checkpoint(self) -> None:
+        # O-P2-1: PRAGMA wal_checkpoint(TRUNCATE) — fold the -wal sidecar back
+        # into the main .db and truncate the WAL file to zero. Run before a
+        # stores-dir snapshot (tar/rsync) so the backup captures a consistent
+        # .db without a stale -wal that a restore would replay or drop. Safe
+        # under concurrent readers (WAL); a writer briefly blocks. Idempotent.
+        conn = self._get_conn()
+        with self._db_lock:
+            try:
+                row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                logger.debug("SqliteBase checkpoint %s -> %s", self.db_path, tuple(row) if row else None)
+            except sqlite3.Error as e:
+                logger.warning("SqliteBase checkpoint failed for %s: %s", self.db_path, e)
+                raise
+
     @contextmanager
     def _read_cursor(self):
         # No-lock read path. SQLite WAL lets concurrent readers proceed

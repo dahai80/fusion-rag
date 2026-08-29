@@ -77,6 +77,15 @@ class ApiKeyBackend(AuthBackend):
         raise HTTPException(401, "Invalid API key")
 
 
+# S-P0-1: reserved ACL subjects. verify() returns a stored key's `name` as the
+# ACL subject, and access.py treats subject=="admin" as a full ACL bypass. A
+# stored key named "admin" would authenticate as admin — single-request
+# privilege escalation. The admin identity is exclusively the env
+# FUSION_RAG_API_KEY (verify returns "admin" only on admin_ok). Reject any
+# stored key whose name collides with a reserved subject.
+_RESERVED_KEY_NAMES = frozenset({"admin"})
+
+
 class AuthConfig:
     """Manages API keys with SQLite persistence."""
 
@@ -109,6 +118,13 @@ class AuthConfig:
         return hashlib.sha256(key.encode()).hexdigest()
 
     def add_key(self, key: str, name: str = "default") -> bool:
+        # S-P0-1: a stored key named "admin" would authenticate as the admin
+        # subject (verify returns the name), granting full ACL bypass. The
+        # admin identity is the env key only. Reject reserved-name keys at the
+        # store so create_api_key can never mint an admin-equivalent key.
+        if name in _RESERVED_KEY_NAMES:
+            logger.warning("add_key rejected reserved name=%r (admin is env-only)", name)
+            return False
         h = self._hash_key(key)
         conn = self._get_conn()
         try:

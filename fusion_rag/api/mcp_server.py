@@ -139,7 +139,7 @@ async def mcp_handler(request: Request) -> JSONResponse:
         # MCP discovery, but tools/call must not bypass auth when it is enabled.
         api_key = request.headers.get("X-API-Key")
         try:
-            get_auth_backend().verify(api_key)
+            subject = get_auth_backend().verify(api_key)
         except Exception as e:
             detail = getattr(e, "detail", str(e))
             status = getattr(e, "status_code", 401)
@@ -149,6 +149,20 @@ async def mcp_handler(request: Request) -> JSONResponse:
             )
         tool_name = params.get("name", "")
         arguments = params.get("arguments", {})
+        # S-P0-2: REST routes enforce per-KB ACL via require_kb_action; MCP
+        # previously called only verify() and skipped ACL entirely — a
+        # subtree-restricted subject could read/upload any KB via /mcp. Enforce
+        # the same _check_kb_access gate here, mapped by tool action.
+        try:
+            _enforce_mcp_acl(tool_name, arguments, subject)
+        except _MCPError:
+            raise
+        except Exception as e:
+            status = getattr(e, "status_code", 403)
+            return JSONResponse(
+                {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32001, "message": "Access denied"}},
+                status_code=status,
+            )
         try:
             result = await _dispatch_tool(tool_name, arguments)
         except _MCPError as e:
@@ -182,6 +196,38 @@ async def mcp_handler(request: Request) -> JSONResponse:
             "error": {"code": -32601, "message": f"Method not found: {method}"},
         }
     )
+
+
+def _enforce_mcp_acl(tool_name: str, args: dict, subject: str | None) -> None:
+    """S-P0-2: apply the same per-KB ACL the REST surface enforces.
+
+    REST routes use `Depends(require_kb_action(action))`; MCP `tools/call`
+    previously skipped ACL entirely. Map each KB-scoped tool to its action and
+    run `_check_kb_access` (the shared gate behind require_kb_action).
+
+    - kb_list / kb_create: no {kb_id} to check against — auth-only (same as
+      the REST GET / POST /bases, which use plain verify_api_key). A created
+      KB is open until an admin writes rules.
+    - kb_search / kb_ask / kb_status: read on the named KB.
+    - kb_upload: write on the named KB.
+    """
+    from .access import _check_kb_access
+
+    if tool_name in ("kb_list", "kb_create"):
+        return
+    action_map = {
+        "kb_search": "read",
+        "kb_ask": "read",
+        "kb_status": "read",
+        "kb_upload": "write",
+    }
+    action = action_map.get(tool_name)
+    if action is None:
+        return  # unknown tool -> _dispatch_tool raises _MCPError(-32601)
+    kb_id = args.get("kb_id", "")
+    if not kb_id:
+        return  # missing param -> _dispatch_tool raises _MCPError(-32602)
+    _check_kb_access(kb_id, subject, action, "/")
 
 
 async def _dispatch_tool(name: str, args: dict) -> Any:

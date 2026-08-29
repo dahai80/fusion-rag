@@ -15,7 +15,6 @@ EMBED_MODEL=${FUSION_RAG_EMBED:-"BGE-M3"}
 PID_FILE="$SCRIPT_DIR/.fusion-rag.pid"
 LOG_DIR="$SCRIPT_DIR/logs"
 STDOUT_LOG="$LOG_DIR/stdout.log"
-STDERR_LOG="$LOG_DIR/stderr.log"
 
 ensure_log_dir() {
     mkdir -p "$LOG_DIR"
@@ -50,10 +49,17 @@ start() {
     echo "  Embedding model: $EMBED_MODEL"
     echo ""
 
+    # O-P1-2: nohup output is the BOOTSTRAP sink — it captures lines emitted
+    # before configure_logging runs (import errors, startup-probe stderr) and
+    # uvicorn's own lifecycle messages. The app's own logs go to
+    # logs/fusion-rag.log with a RotatingFileHandler (10MB x 5). This bootstrap
+    # file is NOT rotated by the app; keep it small by rotating externally
+    # (logrotate) or rely on the app's primary sink. Stderr merged into stdout
+    # so a single tail shows the full bootstrap trail.
     FUSION_RAG_PORT="$PORT" FUSION_RAG_HOST="$HOST" \
     FUSION_MLX_URL="$MLX_URL" FUSION_RAG_EMBED="$EMBED_MODEL" \
     nohup python3 -m fusion_rag.api.server \
-        >> "$STDOUT_LOG" 2>> "$STDERR_LOG" &
+        >> "$STDOUT_LOG" 2>&1 &
 
     PID=$!
     echo $PID > "$PID_FILE"
@@ -64,8 +70,8 @@ start() {
     if is_running; then
         echo "Fusion-RAG is running on http://$HOST:$PORT"
     else
-        echo "Failed to start. Check logs: $STDERR_LOG"
-        cat "$STDERR_LOG" | tail -10
+        echo "Failed to start. Check logs: $STDOUT_LOG"
+        cat "$STDOUT_LOG" | tail -10
         exit 1
     fi
 }
@@ -78,13 +84,17 @@ stop() {
     fi
 
     echo "Stopping Fusion-RAG (PID $pid) ..."
-    kill "$pid" 2>/dev/null || true
+    # O-P1-5: SIGTERM lets uvicorn drain in-flight requests for up to 30s
+    # (timeout_graceful_shutdown=30 in server.run_server). Poll up to 35s so a
+    # graceful stop finishes pending work (an in-flight rerank/RAG call) BEFORE
+    # the force kill. Prior 5s poll cut off the drain and kill -9'd mid-response.
+    kill -TERM "$pid" 2>/dev/null || true
     rm -f "$PID_FILE"
 
-    # Wait for process to exit
-    for i in {1..5}; do
+    # Wait for process to exit (graceful drain window)
+    for i in {1..35}; do
         if ! kill -0 "$pid" 2>/dev/null; then
-            echo "Stopped"
+            echo "Stopped (graceful)"
             return
         fi
         sleep 1

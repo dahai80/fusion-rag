@@ -55,6 +55,9 @@ fusion_rag/
 │   ├── routes_project.py  # Project-KB mapping endpoints (/kb/projects/*)
 │   ├── routes_auth.py     # Auth token/login endpoints
 │   ├── auth.py            # API key authentication (AuthConfig + verify_api_key)
+│   ├── app_state.py       # Per-app state on app.state (contextvar-bound) + resource pools
+│   ├── logging_setup.py   # O-P1-2/O-P2-2: RotatingFileHandler + JSON formatter + request-id
+│   ├── access.py          # KB action ACL (require_kb_action / require_admin over permissions/acl)
 │   └── mcp_server.py      # MCP JSON-RPC server (Claude/Cursor integration)
 ├── engine/
 │   ├── knowledge_base.py    # KnowledgeBase + KnowledgeBaseManager (CRUD, persistence via kb_meta.json)
@@ -67,10 +70,10 @@ fusion_rag/
 │   ├── reranker.py          # Reranker (batch LLM scoring) + HybridSearch (alpha-weighted + RRF fusion)
 │   ├── query_rewriter.py    # QueryRewriter — HyDE, query expansion, condensation
 │   ├── rag_chain.py         # MultiTurnRAG (token-budget history) + DocumentChain (stuff/refine/map_reduce)
-│   ├── graph_rag.py         # GraphRAG — entity extraction + relationship-aware retrieval
-│   ├── evaluator.py         # RAGEvaluator — faithfulness/relevance/context_recall scoring
+│   ├── graph_rag.py         # GraphRAG — entity extraction + relationship-aware retrieval (internal library, NOT HTTP-wired)
+│   ├── evaluator.py         # RAGEvaluator — faithfulness/relevance/context_recall scoring (internal library, NOT HTTP-wired)
 │   ├── embedding_cache.py   # EmbeddingCache — SQLite-backed vector cache with TTL
-│   ├── retrievers.py        # MMRRetriever, ContextCompressionRetriever, FusionRetriever
+│   ├── retrievers.py        # MMRRetriever, ContextCompressionRetriever, FusionRetriever (internal library, NOT HTTP-wired)
 │   ├── version_manager.py   # KB snapshot/rollback via hard-link copies
 │   ├── incremental_sync.py  # MD5 + mtime change detection for directory sync
 │   ├── search_template.py   # Preset (general/code/design) + custom search templates
@@ -142,6 +145,17 @@ fusion_rag/
 | `FUSION_RAG_TRAJECTORY_KEEP` | 5 | Rotated trajectory files kept (R6) |
 | `FUSION_RAG_AUDIT_RETENTION_DAYS` | 30 | Audit log retention days, 0 = forever (R6) |
 | `FUSION_RAG_STORES_DIR` | ~/.fusion-rag/stores | Per-KB store root (R3 watch registry) |
+| `FUSION_RAG_LOG_DIR` | `./logs` | Log file dir — RotatingFileHandler 10MB x 5 (O-P1-2) |
+| `FUSION_RAG_LOG_FORMAT` | text | Log format: `text` or `json` (one JSON obj/line for aggregators) (O-P2-2) |
+| `FUSION_RAG_SKIP_STARTUP_PROBE` | (empty) | `1` = skip boot-time fusion-mlx reachability probe (O-P2-3) |
+
+### Deployment (O-P1-7)
+
+Single-process service (H3): do NOT run `uvicorn --workers N` or multiple instances against one shared `stores` dir. Deploy artifacts in `deploy/`:
+- `Dockerfile` + `docker-compose.yml` — container deploy; fusion-mlx stays on the host (Apple Silicon metal), reached via `FUSION_MLX_URL`. Stores on a named volume.
+- `fusion-rag.service` — systemd unit; `TimeoutStopSec=40` drains in-flight requests before SIGKILL.
+- `start.sh` — dev/single-user; nohup, logs to `logs/stdout.log` (bootstrap) + `logs/fusion-rag.log` (rotated).
+Probes: `/health` = liveness (process up), `/ready` = readiness (deps reachable, 503 when down). Snapshot a KB's stores dir only after `POST /kb/bases/{kb_id}/checkpoint` (O-P2-1).
 
 ### Dependencies
 
