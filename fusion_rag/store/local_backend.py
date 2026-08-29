@@ -47,7 +47,12 @@ def _lance_string_literal(value: str) -> str:
 
 
 class LocalBackend(StoreBackend):
-    def __init__(self, vector_path: str, dimension: int = 1024):
+    def __init__(self, vector_path: str, dimension: int = 1024, **_):
+        # P4-5: accept and ignore **_ so VectorStore can route every backend
+        # through StoreBackendFactory.create(**kwargs) uniformly — remote-only
+        # params (endpoint/api_key) passed to a local backend no longer raise
+        # TypeError. Unknown kwargs are silently dropped here; this backend has
+        # no optional knobs beyond vector_path/dimension.
         self.vector_path = vector_path
         self.dimension = dimension
         self._db = None

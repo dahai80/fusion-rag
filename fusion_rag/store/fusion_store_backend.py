@@ -43,7 +43,8 @@ class FusionStoreBackend(StoreBackend):
     # reused id). Value = comma-joined int_ids; rebuild on demand if absent.
     _DOC_INDEX_PREFIX = b"d:"  # d:<doc_path> → "int_id1,int_id2,..."
 
-    def __init__(self, vector_path: str, dimension: int = 1024):
+    def __init__(self, vector_path: str, dimension: int = 1024, **_):
+        # P4-5: accept and ignore **_ for uniform factory routing (see LocalBackend).
         self.vector_path = vector_path
         self.dimension = dimension
         self._store = None

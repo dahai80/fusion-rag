@@ -26,19 +26,19 @@ class VectorStore:
         self.dimension = dimension
         self.backend_type = backend_type
 
-        if backend_type == "local":
-            self._backend: StoreBackend = LocalBackend(vector_path=vector_path, dimension=dimension)
-        elif backend_type == "remote":
-            self._backend = RemoteBackend(**backend_kwargs)
-        elif backend_type == "fusion-store":
-            self._backend = FusionStoreBackend(vector_path=vector_path, dimension=dimension)
-        else:
-            self._backend = StoreBackendFactory.create(
-                store_type=backend_type,
-                vector_path=vector_path,
-                dimension=dimension,
-                **backend_kwargs,
-            )
+        # P4-5: route every backend (including local/remote/fusion-store) through
+        # StoreBackendFactory.create uniformly. The prior hardcoded 3-branch
+        # bypassed the factory for the built-ins, so a 4th registered backend
+        # used a different path — inconsistent. Backends now accept **_ to ignore
+        # params not meant for them (remote endpoint/api_key vs local vector_path),
+        # so a single factory call serves all. Unknown backend_type raises here
+        # (P2-10) rather than silently swapping to a different storage engine.
+        self._backend: StoreBackend = StoreBackendFactory.create(
+            store_type=backend_type,
+            vector_path=vector_path,
+            dimension=dimension,
+            **backend_kwargs,
+        )
 
         logger.info(
             "VectorStore initialized: path=%s backend=%s",
