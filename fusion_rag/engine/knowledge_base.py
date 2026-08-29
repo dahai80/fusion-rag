@@ -70,7 +70,17 @@ class KnowledgeBaseConfig:
 
     @classmethod
     def from_dict(cls, data: dict) -> KnowledgeBaseConfig:
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+        # P4-7: surface unknown keys instead of silently dropping them. A typo
+        # in a persisted field (e.g. "chunk_strategie") used to vanish here and
+        # the config silently reverted to the default — undetectable. Log a
+        # warning naming the dropped keys so the drift is visible, not silent.
+        known = cls.__dataclass_fields__
+        unknown = [k for k in data if k not in known]
+        if unknown:
+            logger.warning(
+                "KnowledgeBaseConfig.from_dict ignoring unknown keys: %s", unknown
+            )
+        return cls(**{k: v for k, v in data.items() if k in known})
 
 
 @dataclass
@@ -119,10 +129,40 @@ class KnowledgeBase:
 
     @classmethod
     def from_dict(cls, data: dict) -> KnowledgeBase:
+        # P4-7: this is the LOAD path (reading persisted kb_meta.json). An empty
+        # id here means the meta file is corrupt/truncated, not a fresh create.
+        # The prior code let __post_init__ regenerate a uuid4 — so the next
+        # save wrote kb_meta.json under a NEW id while the orphaned on-disk
+        # vectors/metadata sat under the old (now unknown) path forever, and
+        # any caller holding the old id 404'd. That is silent data loss.
+        # Distinguish the two cases: fresh create goes through KnowledgeBase()
+        # directly (id="" → __post_init__ regenerates, which is correct); load
+        # goes through from_dict, where an empty id must fail loudly so the
+        # operator recovers the meta file rather than writing a fresh one.
+        kb_id = data.get("id", "")
+        if not kb_id:
+            raise ValueError(
+                "KnowledgeBase.from_dict: persisted meta has empty/missing 'id' — "
+                "refusing to regenerate (would orphan existing storage). "
+                f"Fix or delete the corrupt meta file. data keys={list(data.keys())}"
+            )
+        # storage_path empty on load is the same class of silent-orphan risk:
+        # __post_init__ would derive one from storage_dir + the id, masking the
+        # fact that the persisted path was lost. Warn + let __post_init__ rebuild
+        # only when storage_dir is present; if BOTH are empty the derived path
+        # lands under ~/.fusion-rag/stores/{id} which is the documented default,
+        # so that specific case is recoverable, not a silent orphan.
+        if not data.get("storage_path") and not data.get("storage_dir"):
+            logger.warning(
+                "KnowledgeBase.from_dict: id=%s has no storage_path nor storage_dir; "
+                "falling back to default ~/.fusion-rag/stores/%s",
+                kb_id,
+                kb_id,
+            )
         cfg_data = {k: data[k] for k in KnowledgeBaseConfig.__dataclass_fields__ if k in data}
         config = KnowledgeBaseConfig(**cfg_data)
         return cls(
-            id=data.get("id", ""),
+            id=kb_id,
             config=config,
             storage_path=data.get("storage_path", ""),
             storage_dir=data.get("storage_dir", ""),

@@ -9,7 +9,7 @@ Local vector knowledge base service for the Fusion-MLX ecosystem — 100% offlin
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/Tests-243-success.svg)](tests/)
-[![Version](https://img.shields.io/badge/Version-0.7.1-blue.svg)]()
+[![Version](https://img.shields.io/badge/Version-0.7.2-blue.svg)]()
 
 [Quick Start](#quick-start) · [API Reference](#api-reference) · [Architecture](#architecture) · [Documentation](docs/)
 
@@ -362,6 +362,15 @@ ruff check fusion_rag/
 ```
 
 ---
+
+## What's New in v0.7.2
+
+- **Audit P4 + architecture hardwounds (Task #10-18)** — maintainability fixes and 硬伤 A-F 收口 from the adversarial audit (`audit/fusion-rag-audit-0827.md`):
+  - **硬伤 B 收口** — the three-store ingest write (vectors / bm25 / metadata) now writes the hard-undo side **first**: `vectors → bm25 → metadata` via a single `_write_doc_to_stores` helper shared by all four ingest paths (`_index_document`, `ingest_content`, `replace_document`, `scan_directory`). A crash now leaves recoverable orphan vectors (re-ingest over `doc_path`) instead of orphan metadata that makes `list_documents` lie. Unified rollback across all paths (P4-1).
+  - **硬伤 C 收口** — auth→identity→ACL wired: `require_kb_action` chains `verify_api_key` (resolves subject) → `PermissionManager.check_permission`, enforced on every `/bases/{kb_id}/*` route including reads (P0-5/6/7 already landed; this PR confirms the full chain).
+  - **P4 maintainability** — `BM25Index._init_db` no longer double-opens a SQLite connection (P4-2); `EmbeddingCache` eviction uses a `created_at`-index subquery instead of an O(n) `OFFSET` scan (P4-3), and `_hash` switches MD5→blake2b and drops the 1000-char text truncation that made the stored column disagree with the hash key (P4-4); `VectorStore` routes every backend through `StoreBackendFactory` uniformly (no more hardcoded 3-branch), backends accept `**_` to ignore irrelevant kwargs (P4-5); `SearchTemplateManager` seeds builtins once per DB (not per construction) and uses `ON CONFLICT DO UPDATE` so a new release's builtin defaults actually apply (P4-6); `KnowledgeBase`/`KnowledgeBaseConfig.from_dict` warn on unknown keys and raise on a load-time empty `id` instead of silently regenerating one (which orphaned storage) (P4-7); `validate_identifier` dead code removed and template validation now checks name charset/length, description cap, and `doc_type_filter` items (P4-8).
+  - **硬伤 D 部分收口** — fusion-store backend uses `score = 1/(1+dist)` + threshold tuning (P0-10); the root fix (exposing `Store.open(metric=...)` in the upstream fusion-store binding) is tracked as an upstream issue. Default `local` backend (LanceDB cosine) is unaffected and recommended for production.
+- 243 tests green (random + ordered), ruff clean.
 
 ## What's New in v0.7.1
 

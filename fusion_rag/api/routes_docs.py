@@ -96,6 +96,103 @@ def _get_meta_store(kb_id: str) -> MetadataStore:
     return MetadataStore(kb.metadata_path)
 
 
+def _write_doc_to_stores(
+    *,
+    vec_store: VectorStore,
+    meta_store: MetadataStore,
+    doc_id: str,
+    doc_path: str,
+    doc_name: str,
+    doc_type: str,
+    file_size: int,
+    metadata: dict,
+    chunks: list,
+    vectors: list,
+    chunk_dicts: list,
+    chars: int,
+    chunk_metadata: dict | None = None,
+) -> tuple[bool, str | None]:
+    """P4-1 + 硬伤B: the ONE place that writes a doc's chunks to all stores.
+
+    Dedupes the four ingest write paths (_index_document / ingest_content /
+    replace_document / scan_directory) which each copy-pasted the
+    build-records → add_batch → roll-back sequence. More than dedup: the prior
+    order wrote metadata FIRST (add_document + add_chunk) then vectors — the
+    invert of safe. vectors are the hard-undo side (LanceDB/LMDB have no
+    per-row tx; an orphan vector is only identifiable by re-embedding and
+    re-matching), metadata is cheap and row-atomic in SQLite. Per 硬伤B, write
+    the hard-undo side FIRST so a crash leaves orphan vectors (recoverable by
+    re-ingest over the same doc_path) rather than orphan metadata (makes
+    list_documents lie about docs that have no searchable vectors).
+
+    Order now: build records → add_batch (vectors + bm25, one call per P0-1) →
+    metadata (add_document + add_chunk per row) → update_chunk_count. On ANY
+    failure the caller-provided rollback removes what this call wrote: vectors
+    via delete_by_doc (also clears bm25), metadata via delete_chunks_by_doc +
+    delete_document. Returns (ok, error_msg); ok=False means rolled back clean.
+
+    chunk_metadata: per-chunk metadata for ingest_content (inline content has
+    user metadata on each chunk); None uses result.metadata on the record only.
+    """
+    records = []
+    for i, (chunk, vector, cd) in enumerate(zip(chunks, vectors, chunk_dicts)):
+        chunk_id = f"{doc_id}_{i}"
+        records.append(
+            {
+                "id": chunk_id,
+                "vector": vector,
+                "text": chunk.text,
+                "doc_path": doc_path,
+                "doc_name": doc_name,
+                "doc_type": doc_type,
+                "chunk_index": i,
+                "metadata": metadata,
+                "context": cd.get("context", ""),
+            }
+        )
+
+    # 硬伤B: write the hard-undo side (vectors + bm25) FIRST.
+    try:
+        # P0-1: add_batch writes vectors AND bm25 in one call (both backends
+        # do the bm25 add inside add_batch). One write, one rollback path.
+        vec_store.add_batch(records)
+    except Exception as e:
+        logger.error("_write_doc_to_stores: add_batch (vectors+bm25) failed for doc %s: %s", doc_id, e)
+        try:
+            vec_store.delete_by_doc(doc_path)
+        except Exception as de:
+            logger.error("_write_doc_to_stores: rollback delete_by_doc failed for %s: %s", doc_id, de)
+        return (False, f"index write failed: {e}")
+
+    # Metadata SECOND — cheap, atomic in SQLite. If this throws, the vectors
+    # are already durable, so roll them back too and return a clean failure
+    # (the caller decides whether to retry). A crash BETWEEN add_batch and
+    # here leaves orphan vectors — recoverable by re-ingest over doc_path, the
+    # strictly better of the two orphan kinds per 硬伤B.
+    try:
+        meta_store.add_document(doc_id, doc_path, doc_name, doc_type, file_size, metadata=metadata)
+        for i, (chunk, cd) in enumerate(zip(chunks, chunk_dicts)):
+            chunk_id = f"{doc_id}_{i}"
+            per_chunk_meta = chunk_metadata if chunk_metadata is not None else metadata
+            meta_store.add_chunk(chunk_id, doc_id, doc_path, i, chunk.text, chunk.tokens, metadata=per_chunk_meta)
+        meta_store.update_chunk_count(doc_id, len(chunks), chars)
+    except Exception as e:
+        logger.error("_write_doc_to_stores: metadata write failed for doc %s (rolling back vectors): %s", doc_id, e)
+        try:
+            vec_store.delete_by_doc(doc_path)
+        except Exception as de:
+            logger.error("_write_doc_to_stores: metadata-rollback delete_by_doc failed for %s: %s", doc_id, de)
+        try:
+            meta_store.delete_chunks_by_doc(doc_id)
+            meta_store.delete_document(doc_id)
+        except Exception as de:
+            logger.error("_write_doc_to_stores: metadata-rollback meta cleanup failed for %s: %s", doc_id, de)
+        return (False, f"metadata write failed: {e}")
+
+    logger.info("_write_doc_to_stores: doc %s indexed, %d chunks", doc_id, len(chunks))
+    return (True, None)
+
+
 async def _index_document(kb_id: str, file_path: str, contextualize: bool = True) -> dict:
     kb = _get_base(kb_id)
     # F15: LFI guard — reject paths escaping the configured ingest root.
@@ -133,50 +230,24 @@ async def _index_document(kb_id: str, file_path: str, contextualize: bool = True
     meta_store = _get_meta_store(kb_id)
 
     doc_id = uuid.uuid4().hex[:16]
-    # L7: prepare ALL records before any write, then order the three stores
-    # (metadata → vectors → bm25) and roll back in reverse on partial failure.
-    # Before: a failure mid-sequence left orphan chunks (vectors w/o metadata
-    # or metadata w/o vectors), corrupting retrieval and delete.
-    meta_store.add_document(
-        doc_id, result.file_path, result.file_name, result.doc_type.value, result.metadata.get("size", 0)
+    # P4-1 + 硬伤B: single write path. vectors-first ordering (hard-undo side
+    # before cheap metadata) with unified rollback lives in _write_doc_to_stores.
+    ok, err = _write_doc_to_stores(
+        vec_store=vec_store,
+        meta_store=meta_store,
+        doc_id=doc_id,
+        doc_path=result.file_path,
+        doc_name=result.file_name,
+        doc_type=result.doc_type.value,
+        file_size=result.metadata.get("size", 0),
+        metadata=result.metadata,
+        chunks=chunks,
+        vectors=vectors,
+        chunk_dicts=chunk_dicts,
+        chars=result.chars,
     )
-    records = []
-    for i, (chunk, vector, cd) in enumerate(zip(chunks, vectors, chunk_dicts)):
-        chunk_id = f"{doc_id}_{i}"
-        meta_store.add_chunk(chunk_id, doc_id, result.file_path, i, chunk.text, chunk.tokens)
-        records.append(
-            {
-                "id": chunk_id,
-                "vector": vector,
-                "text": chunk.text,
-                "doc_path": result.file_path,
-                "doc_name": result.file_name,
-                "doc_type": result.doc_type.value,
-                "chunk_index": i,
-                "metadata": result.metadata,
-                "context": cd.get("context", ""),
-            }
-        )
-    try:
-        # P0-1: add_batch writes vectors AND bm25 in one call (both LocalBackend
-        # and FusionStoreBackend do the bm25 add inside add_batch). The prior
-        # separate vec_store.bm25.add_documents(records) was a SECOND write —
-        # double-counting _corpus_size and splitting the rollback across two
-        # store calls. One write, one rollback path.
-        vec_store.add_batch(records)
-    except Exception as e:
-        # L7: vector/bm25 write failed — roll back metadata for this doc. The
-        # backend add_batch is all-or-nothing per store; delete_by_doc (if any
-        # partial vectors landed) cleans both vectors + bm25 atomically.
-        logger.error("index_document: add_batch failed, rolling back doc %s: %s", doc_id, e)
-        try:
-            vec_store.delete_by_doc(result.file_path)
-        except Exception as de:
-            logger.error("index_document: rollback delete_by_doc failed for %s: %s", doc_id, de)
-        meta_store.delete_chunks_by_doc(doc_id)
-        meta_store.delete_document(doc_id)
-        return {"error": f"index write failed: {e}"}
-    meta_store.update_chunk_count(doc_id, len(chunks), result.chars)
+    if not ok:
+        return {"error": err}
 
     # L12: per-KB lock so concurrent ingest can't both read N and write N+1.
     async with _kb_lock(kb_id):
@@ -281,41 +352,25 @@ async def ingest_content(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     meta_store = _get_meta_store(kb_id)
 
     doc_id = uuid.uuid4().hex[:16]
-    meta_store.add_document(doc_id, doc_path, doc_name, content_type, len(content.encode("utf-8")), metadata=metadata)
-
-    records = []
-    for i, (chunk, vector, cd) in enumerate(zip(chunks, vectors, chunk_dicts)):
-        chunk_id = f"{doc_id}_{i}"
-        meta_store.add_chunk(chunk_id, doc_id, doc_path, i, chunk.text, chunk.tokens, metadata=metadata)
-        records.append(
-            {
-                "id": chunk_id,
-                "vector": vector,
-                "text": chunk.text,
-                "doc_path": doc_path,
-                "doc_name": doc_name,
-                "doc_type": content_type,
-                "chunk_index": i,
-                "metadata": metadata,
-                "context": cd.get("context", ""),
-            }
-        )
-
-    # P0-1/P0-8: add_batch writes vectors+bm25 in one call; wrap in rollback so
-    # a write failure doesn't leave orphan metadata rows (doc + chunks) with no
-    # vectors. Prior code had no try/except here at all.
-    try:
-        vec_store.add_batch(records)
-    except Exception as e:
-        logger.error("ingest_content: add_batch failed, rolling back doc %s: %s", doc_id, e)
-        try:
-            vec_store.delete_by_doc(doc_path)
-        except Exception as de:
-            logger.error("ingest_content: rollback delete_by_doc failed for %s: %s", doc_id, de)
-        meta_store.delete_chunks_by_doc(doc_id)
-        meta_store.delete_document(doc_id)
-        raise HTTPException(500, f"index write failed: {e}") from e
-    meta_store.update_chunk_count(doc_id, len(chunks), len(content))
+    # P4-1 + 硬伤B: single write path, vectors-first. chunk_metadata=metadata
+    # so the inline content's user metadata lands on each chunk row too.
+    ok, err = _write_doc_to_stores(
+        vec_store=vec_store,
+        meta_store=meta_store,
+        doc_id=doc_id,
+        doc_path=doc_path,
+        doc_name=doc_name,
+        doc_type=content_type,
+        file_size=len(content.encode("utf-8")),
+        metadata=metadata,
+        chunks=chunks,
+        vectors=vectors,
+        chunk_dicts=chunk_dicts,
+        chars=len(content),
+        chunk_metadata=metadata,
+    )
+    if not ok:
+        raise HTTPException(500, err)
 
     # L12: per-KB lock around the count read-modify-write.
     async with _kb_lock(kb_id):
@@ -412,8 +467,8 @@ async def replace_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dic
 
     # New content prepared successfully — now swap. Old index is removed, new
     # index written. On a vector/bm25 write failure the old index is already
-    # gone (unavoidable for a replace), but the doc row + new chunks are
-    # written so the state is consistent (new doc, fully or partially indexed).
+    # gone (unavoidable for a replace); _write_doc_to_stores rolls back the new
+    # write so the KB stays consistent (old gone, new gone, metadata clean).
     old_path = doc.get("file_path", "")
     old_chunks = meta_store.get_chunks_by_doc(doc_id)
     old_chunk_count = len(old_chunks)
@@ -421,45 +476,23 @@ async def replace_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dic
     meta_store.delete_chunks_by_doc(doc_id)
     meta_store.delete_document(doc_id)
 
-    meta_store.add_document(
-        doc_id, result.file_path, result.file_name, result.doc_type.value, result.metadata.get("size", 0)
+    # P4-1 + 硬伤B: single write path, vectors-first. doc_id reused for replace.
+    ok, err = _write_doc_to_stores(
+        vec_store=vec_store,
+        meta_store=meta_store,
+        doc_id=doc_id,
+        doc_path=result.file_path,
+        doc_name=result.file_name,
+        doc_type=result.doc_type.value,
+        file_size=result.metadata.get("size", 0),
+        metadata=result.metadata,
+        chunks=chunks,
+        vectors=vectors,
+        chunk_dicts=chunk_dicts,
+        chars=result.chars,
     )
-
-    records = []
-    for i, (chunk, vector, cd) in enumerate(zip(chunks, vectors, chunk_dicts)):
-        chunk_id = f"{doc_id}_{i}"
-        meta_store.add_chunk(chunk_id, doc_id, result.file_path, i, chunk.text, chunk.tokens)
-        records.append(
-            {
-                "id": chunk_id,
-                "vector": vector,
-                "text": chunk.text,
-                "doc_path": result.file_path,
-                "doc_name": result.file_name,
-                "doc_type": result.doc_type.value,
-                "chunk_index": i,
-                "metadata": result.metadata,
-                "context": cd.get("context", ""),
-            }
-        )
-
-    # P0-1/P0-8: add_batch writes vectors+bm25 in one call. Old index is already
-    # deleted (above); on a write failure we must not leave the new doc row with
-    # zero vectors — roll it back so the KB stays consistent (old gone, new gone,
-    # metadata clean). The doc is unrecoverable either way for a replace, but
-    # the store state is not corrupted.
-    try:
-        vec_store.add_batch(records)
-    except Exception as e:
-        logger.error("replace_document: add_batch failed, rolling back new doc %s: %s", doc_id, e)
-        try:
-            vec_store.delete_by_doc(result.file_path)
-        except Exception as de:
-            logger.error("replace_document: rollback delete_by_doc failed for %s: %s", doc_id, de)
-        meta_store.delete_chunks_by_doc(doc_id)
-        meta_store.delete_document(doc_id)
-        raise HTTPException(500, f"replacement index write failed: {e}") from e
-    meta_store.update_chunk_count(doc_id, len(chunks), result.chars)
+    if not ok:
+        raise HTTPException(500, err)
 
     # L12: guard the read-modify-write of chunk_count under the per-KB lock.
     async with _kb_lock(kb_id):
@@ -561,44 +594,25 @@ async def scan_directory(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
         vectors = await embed.embed_batch(embed_texts)
 
         doc_id = uuid.uuid4().hex[:16]
-        meta_store.add_document(
-            doc_id, result.file_path, result.file_name, result.doc_type.value, result.metadata.get("size", 0)
+        # P4-1 + 硬伤B: single write path, vectors-first, unified rollback.
+        # On failure this file is rolled back clean; continue scanning the rest.
+        ok, err = _write_doc_to_stores(
+            vec_store=vec_store,
+            meta_store=meta_store,
+            doc_id=doc_id,
+            doc_path=result.file_path,
+            doc_name=result.file_name,
+            doc_type=result.doc_type.value,
+            file_size=result.metadata.get("size", 0),
+            metadata=result.metadata,
+            chunks=chunks,
+            vectors=vectors,
+            chunk_dicts=chunk_dicts,
+            chars=result.chars,
         )
-
-        records = []
-        for i, (chunk, vector, cd) in enumerate(zip(chunks, vectors, chunk_dicts)):
-            chunk_id = f"{doc_id}_{i}"
-            meta_store.add_chunk(chunk_id, doc_id, result.file_path, i, chunk.text, chunk.tokens)
-            records.append(
-                {
-                    "id": chunk_id,
-                    "vector": vector,
-                    "text": chunk.text,
-                    "doc_path": result.file_path,
-                    "doc_name": result.file_name,
-                    "doc_type": result.doc_type.value,
-                    "chunk_index": i,
-                    "metadata": result.metadata,
-                    "context": cd.get("context", ""),
-                }
-            )
-
-        # P0-1/P0-8: add_batch writes vectors+bm25 in one call. Roll back this
-        # file's metadata on failure so a mid-scan write error doesn't leave
-        # orphan doc/chunk rows; continue scanning the rest.
-        try:
-            vec_store.add_batch(records)
-        except Exception as e:
-            logger.error("scan: add_batch failed for %s (doc %s): %s", result.file_name, doc_id, e)
-            try:
-                vec_store.delete_by_doc(result.file_path)
-            except Exception as de:
-                logger.error("scan: rollback delete_by_doc failed for %s: %s", doc_id, de)
-            meta_store.delete_chunks_by_doc(doc_id)
-            meta_store.delete_document(doc_id)
-            errors.append({"file": result.file_name, "error": f"index write failed: {e}"})
+        if not ok:
+            errors.append({"file": result.file_name, "error": err})
             continue
-        meta_store.update_chunk_count(doc_id, len(chunks), result.chars)
         total_chunks += len(chunks)
         total_chars += result.chars
         file_count += 1

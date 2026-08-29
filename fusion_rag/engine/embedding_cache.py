@@ -19,6 +19,11 @@ from .sqlite_base import SqliteBase
 
 logger = logging.getLogger(__name__)
 
+# P4-4: blake2b (non-crypto hash, ~2x faster than md5) avoids the MD5 scanner
+# flag without any perf cost at this scale; 128-bit digest has no birthday
+# collision risk under 100k entries. Keyed on f"{model}:{text}" full text so
+# two texts differing only after char 1000 hash differently.
+
 
 class EmbeddingCache(SqliteBase):
     """SQLite-backed cache for embedding vectors to avoid redundant API calls."""
@@ -45,12 +50,13 @@ class EmbeddingCache(SqliteBase):
                     created_at REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_embed_cache_hash ON embed_cache(text_hash);
+                CREATE INDEX IF NOT EXISTS idx_embed_cache_created ON embed_cache(created_at);
             """)
             conn.commit()
 
     def _hash(self, text: str, model: str = "") -> str:
         key = f"{model}:{text}"
-        return hashlib.md5(key.encode()).hexdigest()
+        return hashlib.blake2b(key.encode(), digest_size=16).hexdigest()
 
     def get(self, text: str, model: str = "") -> list[float] | None:
         h = self._hash(text, model)
@@ -87,7 +93,7 @@ class EmbeddingCache(SqliteBase):
                 conn.execute(
                     """INSERT OR REPLACE INTO embed_cache (text_hash, text, vector, model, created_at)
                        VALUES (?, ?, ?, ?, ?)""",
-                    (h, text[:1000], json.dumps(vector), model, time.time()),
+                    (h, text, json.dumps(vector), model, time.time()),
                 )
                 conn.commit()
                 self._evict_if_needed(conn)
@@ -131,7 +137,7 @@ class EmbeddingCache(SqliteBase):
             if self._is_zero_vector(v):
                 logger.warning("skip caching zero vector for text=%s model=%s", t[:60], model)
                 continue
-            rows.append((h(t, model), t[:1000], json.dumps(v), model, now))
+            rows.append((h(t, model), t, json.dumps(v), model, now))
         if not rows:
             return
         with self._db_lock:
@@ -162,13 +168,21 @@ class EmbeddingCache(SqliteBase):
     def _evict_if_needed(self, conn: Any) -> None:
         row = conn.execute("SELECT COUNT(*) as cnt FROM embed_cache").fetchone()
         if row and row["cnt"] > self.max_entries:
-            cutoff = conn.execute(
-                "SELECT created_at FROM embed_cache ORDER BY created_at ASC LIMIT 1 OFFSET ?",
-                (self.max_entries // 2,),
-            ).fetchone()
-            if cutoff:
-                conn.execute(
-                    "DELETE FROM embed_cache WHERE created_at < ?",
-                    (cutoff["created_at"],),
-                )
-                conn.commit()
+            # P4-3: prior OFFSET (max_entries//2) scan discarded that many rows
+            # to find the cutoff timestamp — O(max_entries/2) per eviction, i.e.
+            # ~50k rows scanned on every set once the cache is full. Use a
+            # subquery over the created_at index: keep the newest max_entries//2
+            # rows, delete everything older than the oldest kept timestamp.
+            # idx_embed_cache_created (added in _init_db) backs the ORDER BY.
+            keep = max(self.max_entries // 2, 1)
+            conn.execute(
+                """DELETE FROM embed_cache
+                   WHERE created_at < (
+                       SELECT MIN(created_at) FROM (
+                           SELECT created_at FROM embed_cache
+                           ORDER BY created_at DESC LIMIT ?
+                       )
+                   )""",
+                (keep,),
+            )
+            conn.commit()

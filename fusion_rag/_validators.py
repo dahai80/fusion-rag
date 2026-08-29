@@ -53,11 +53,13 @@ def validate_identifier(name: str, *, field: str = "identifier") -> str:
 
     Rejects path separators, dots, and any non-whitelisted char.
     """
+    # P4-8: the regex ^[A-Za-z0-9_\\-]{1,64}$ already rejects "."/".." (dots
+    # not in the charset), so the prior `if name in (".", "..")` branch was
+    # unreachable dead code — a sign the validation layers weren't reasoning
+    # about each other. Removed; the regex is the sole authority.
     if not name or not _IDENT_RE.match(name):
         logger.warning("validate_identifier reject: field=%s value=%r", field, name)
         raise ValidationError(f"invalid {field}: must match [A-Za-z0-9_-]{{1,64}}")
-    if name in (".", ".."):
-        raise ValidationError(f"invalid {field}: path traversal denied")
     return name
 
 

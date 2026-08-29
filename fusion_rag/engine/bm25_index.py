@@ -76,21 +76,27 @@ class BM25Index(SqliteBase):
         self._load()
 
     def _init_db(self) -> None:
+        # P4-2: prior `self._db = self._get_conn()` bypassed SqliteBase's lazy
+        # contract — _get_conn sets _db_closed=False internally, but a direct
+        # assign left _db_closed=True (set in __init__), so the next _get_conn
+        # saw _db_closed==True, re-entered the lock, and opened a SECOND
+        # connection to the same file — the first never closed (leak per
+        # instance). Call _get_conn() and use the return; let it manage _db + _db_closed.
         self.store_path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = self._get_conn()
-        self._db.execute("CREATE TABLE IF NOT EXISTS bm25_meta (key TEXT PRIMARY KEY, value TEXT)")
-        self._db.execute("CREATE TABLE IF NOT EXISTS bm25_docs (doc_id TEXT PRIMARY KEY, text TEXT, doc_len INTEGER)")
+        conn = self._get_conn()
+        conn.execute("CREATE TABLE IF NOT EXISTS bm25_meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS bm25_docs (doc_id TEXT PRIMARY KEY, text TEXT, doc_len INTEGER)")
         # L5: store doc_path per chunk so remove_document can match exactly
         # instead of substring-scanning every doc text (which deleted chunks
         # whose text merely contained the path string).
-        cols = {row[1] for row in self._db.execute("PRAGMA table_info(bm25_docs)").fetchall()}
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(bm25_docs)").fetchall()}
         if "doc_path" not in cols:
-            self._db.execute("ALTER TABLE bm25_docs ADD COLUMN doc_path TEXT NOT NULL DEFAULT ''")
-        self._db.execute(
+            conn.execute("ALTER TABLE bm25_docs ADD COLUMN doc_path TEXT NOT NULL DEFAULT ''")
+        conn.execute(
             "CREATE TABLE IF NOT EXISTS bm25_inverted "
             "(token TEXT, doc_id TEXT, tf INTEGER, PRIMARY KEY (token, doc_id))"
         )
-        self._db.commit()
+        conn.commit()
 
     def _load(self) -> None:
         # L6: distinguish a recoverable SQLite operational error (corrupt/locked
