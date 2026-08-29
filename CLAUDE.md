@@ -39,7 +39,7 @@ python scripts/benchmark.py   # PRD metrics: BM25 <100ms, cache >90%, RRF fusion
 
 ### Known Limitations
 
-- **No MLX embedding model**: fusion-mlx currently has no MLX-format embedding model (BGE-M3 uses pytorch_model.bin, not safetensors). Server runs but embedding/RAG endpoints return errors until an MLX embedding model is available upstream.
+- **Embedding model lazy-loads on first call**: fusion-mlx serves BGE-M3 embeddings (MLX-format `model.safetensors`, resolved via fusion-mlx issue #248). The model is NOT loaded at startup — the first `/v1/embeddings` request after a cold start returns 502 while fusion-mlx loads the weights, then succeeds. fusion-rag's `EmbeddingClient` retries transparently, so this is a one-time startup latency, not a functional gap. Tests mock `embed_batch` (`patch.object(EmbeddingClient, "embed_batch", _fake_embed_batch)` → `[[0.01]*1024]`) so they never depend on a live fusion-mlx.
 
 ## Architecture
 
