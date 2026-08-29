@@ -45,6 +45,11 @@ class EmbeddingCache(SqliteBase):
         self.max_entries = max_entries
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         super().__init__()
+        # P-P2-2: in-memory row counter so count() and the _evict_if_needed
+        # check don't run SELECT COUNT(*) on every set()/get() — a full table
+        # scan on a 100k-row cache per write. Hydrated once at _init_db; kept in
+        # sync on insert (set/set_batch +1/+N) and clear (reset).
+        self._row_count = 0
         self._init_db()
 
     def _init_db(self) -> None:
@@ -62,6 +67,9 @@ class EmbeddingCache(SqliteBase):
                 CREATE INDEX IF NOT EXISTS idx_embed_cache_created ON embed_cache(created_at);
             """)
             conn.commit()
+            # P-P2-2: hydrate the in-memory counter once from disk so count()
+            # and eviction checks never re-scan. Existing rows survive restart.
+            self._row_count = conn.execute("SELECT COUNT(*) FROM embed_cache").fetchone()[0]
 
     def _hash(self, text: str, model: str = "") -> str:
         key = f"{model}:{text}"
@@ -81,6 +89,8 @@ class EmbeddingCache(SqliteBase):
                 if self.ttl and (time.time() - row["created_at"]) > self.ttl:
                     conn.execute("DELETE FROM embed_cache WHERE text_hash = ?", (h,))
                     conn.commit()
+                    # P-P2-2: keep the in-memory counter honest on TTL eviction.
+                    self._row_count = max(0, self._row_count - 1)
                     return None
                 return json.loads(row["vector"])
             except Exception as e:
@@ -99,12 +109,20 @@ class EmbeddingCache(SqliteBase):
         with self._db_lock:
             conn = self._get_conn()
             try:
+                # P-P2-2: total_changes is cumulative for the connection, so
+                # capture the delta around this statement. INSERT OR REPLACE
+                # reports delta=1 for a brand-new key and delta=2 for a replaced
+                # existing key (delete + insert); only a NEW key grows the row
+                # count, so map delta==1 to +1 and any replace to +0.
+                before = conn.total_changes
                 conn.execute(
                     """INSERT OR REPLACE INTO embed_cache (text_hash, text, vector, model, created_at)
                        VALUES (?, ?, ?, ?, ?)""",
                     (h, text, json.dumps(vector), model, time.time()),
                 )
                 conn.commit()
+                if conn.total_changes - before == 1:
+                    self._row_count += 1
                 self._evict_if_needed(conn)
             except Exception as e:
                 logger.warning("EmbeddingCache set failed: %s", e)
@@ -152,12 +170,22 @@ class EmbeddingCache(SqliteBase):
         with self._db_lock:
             conn = self._get_conn()
             try:
+                # P-P2-2: executemany's total_changes delta counts all touched
+                # rows (replaces count as 2 each). Only NEW keys grow the cache,
+                # but per-row new-vs-replace isn't exposed by executemany. Bound
+                # the counter: it can't grow by more than the rows written.
+                before = conn.total_changes
                 conn.executemany(
                     """INSERT OR REPLACE INTO embed_cache (text_hash, text, vector, model, created_at)
                        VALUES (?, ?, ?, ?, ?)""",
                     rows,
                 )
                 conn.commit()
+                delta = conn.total_changes - before
+                # each row contributes 1 (new) or 2 (replace); net new rows =
+                # rows - replaces = rows - (delta - rows) = 2*rows - delta.
+                net_new = max(0, 2 * len(rows) - delta)
+                self._row_count += net_new
                 self._evict_if_needed(conn)
             except Exception as e:
                 logger.warning("EmbeddingCache set_batch failed: %s", e)
@@ -167,16 +195,19 @@ class EmbeddingCache(SqliteBase):
             conn = self._get_conn()
             conn.execute("DELETE FROM embed_cache")
             conn.commit()
+            # P-P2-2: reset the in-memory counter to match the wiped table.
+            self._row_count = 0
 
     def count(self) -> int:
-        with self._db_lock:
-            conn = self._get_conn()
-            row = conn.execute("SELECT COUNT(*) as cnt FROM embed_cache").fetchone()
-            return row["cnt"] if row else 0
+        # P-P2-2: return the in-memory counter instead of a SELECT COUNT(*)
+        # full-table scan on every call. Hydrated at init, maintained on every
+        # insert/clear/eviction.
+        return self._row_count
 
     def _evict_if_needed(self, conn: Any) -> None:
-        row = conn.execute("SELECT COUNT(*) as cnt FROM embed_cache").fetchone()
-        if row and row["cnt"] > self.max_entries:
+        # P-P2-2: check the in-memory counter, not SELECT COUNT(*) — a full scan
+        # on every set() once the cache is near capacity.
+        if self._row_count > self.max_entries:
             # P4-3: prior OFFSET (max_entries//2) scan discarded that many rows
             # to find the cutoff timestamp — O(max_entries/2) per eviction, i.e.
             # ~50k rows scanned on every set once the cache is full. Use a
@@ -195,3 +226,7 @@ class EmbeddingCache(SqliteBase):
                 (keep,),
             )
             conn.commit()
+            # P-P2-2: after trimming to the `keep` newest rows, the row count is
+            # `keep` (the DELETE leaves exactly the LIMIT keep rows). Re-sync the
+            # in-memory counter rather than scanning again.
+            self._row_count = keep

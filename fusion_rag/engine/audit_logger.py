@@ -203,14 +203,17 @@ class AuditLogger(SqliteBase):
         return count
 
     def export_logs(self, kb_id: str, fmt: str = "json") -> str:
-        # M7: param renamed from `format` to `fmt` to avoid shadowing the
-        # builtin. Behavior unchanged.
-        rows = self.query_logs(kb_id, limit=100000, offset=0)
+        # P-P2-4: prior impl called query_logs(limit=100000) — materializing up
+        # to 100k rows into one list, then building a multi-MB string. Stream via
+        # iter_logs (keyset pagination, constant memory) so a 100k-row KB exports
+        # without holding the whole result set. The json path streams into a
+        # buffer row-by-row instead of json.dumps(entire_list).
         if fmt == "csv":
             buf = io.StringIO()
             writer = csv.writer(buf)
             writer.writerow(["id", "kb_id", "query", "caller", "results_count", "latency_ms", "created_at"])
-            for row in rows:
+            count = 0
+            for row in self.iter_logs(kb_id):
                 # P0-12: neutralize formula-injection on user-controlled string
                 # cells (query, caller come straight from search input). id /
                 # counts / latency / created_at are numeric — safe.
@@ -225,10 +228,22 @@ class AuditLogger(SqliteBase):
                         row["created_at"],
                     ]
                 )
-            logger.info("export_logs: kb_id=%s fmt=csv rows=%d", kb_id, len(rows))
+                count += 1
+            logger.info("export_logs: kb_id=%s fmt=csv rows=%d", kb_id, count)
             return buf.getvalue()
-        logger.info("export_logs: kb_id=%s fmt=json rows=%d", kb_id, len(rows))
-        return json.dumps(rows, ensure_ascii=False, indent=2)
+        # json: stream rows into a manually-built array buffer so the whole
+        # export never sits in memory as one list + one string simultaneously.
+        buf = io.StringIO()
+        buf.write("[")
+        count = 0
+        for row in self.iter_logs(kb_id):
+            if count:
+                buf.write(",\n")
+            buf.write(json.dumps(row, ensure_ascii=False))
+            count += 1
+        buf.write("]")
+        logger.info("export_logs: kb_id=%s fmt=json rows=%d", kb_id, count)
+        return buf.getvalue()
 
     def delete_old_logs(self, kb_id: str, before_time: float) -> int:
         with self._cursor() as cur:

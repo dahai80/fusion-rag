@@ -41,6 +41,8 @@ class RuntimeConfig:
     rag_token_budget: int = 8192
     rag_max_history_turns: int = 10
     search_fetch_k_multiplier: int = 4
+    max_content_chars: int = 2_000_000
+    max_batch_files: int = 200
 
     @classmethod
     def from_env(cls) -> RuntimeConfig:
@@ -57,6 +59,10 @@ class RuntimeConfig:
             search_fetch_k_multiplier=_env_int(
                 "FUSION_RAG_FETCH_K_MULTIPLIER", 4, minimum=1
             ),
+            max_content_chars=_env_int(
+                "FUSION_RAG_MAX_CONTENT_CHARS", 2_000_000, minimum=1
+            ),
+            max_batch_files=_env_int("FUSION_RAG_MAX_BATCH_FILES", 200, minimum=1),
         )
 
     def to_dict(self) -> dict:

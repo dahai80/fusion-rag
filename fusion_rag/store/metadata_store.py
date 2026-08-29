@@ -175,9 +175,16 @@ class MetadataStore:
         d["metadata"] = json.loads(d.get("metadata") or "{}")
         return d
 
-    def list_documents(self) -> list[dict[str, Any]]:
+    def list_documents(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        # P-P2-3: prior list_documents returned the ENTIRE documents table in one
+        # shot — a 100k-doc KB pulled 100k rows into memory per /documents call.
+        # LIMIT/OFFSET caps the page; the route defaults to 100 and accepts
+        # limit/offset query params so a UI pages instead of loading all at once.
         with self._read_cursor() as conn:
-            rows = conn.execute("SELECT * FROM documents ORDER BY updated_at DESC").fetchall()
+            rows = conn.execute(
+                "SELECT * FROM documents ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
         results = []
         for r in rows:
             d = dict(r)
@@ -212,6 +219,36 @@ class MetadataStore:
                 (chunk_id, doc_id, doc_path, chunk_index, text, tokens, meta_json, time.time()),
             )
 
+    def add_chunks(self, chunks: list[dict[str, Any]]) -> None:
+        # P-P1-2: a doc with N chunks ran N add_chunk calls = N separate
+        # transactions (each its own _cursor → lock → commit). On a 500-chunk
+        # doc that is 500 lock-acquire/commit cycles against the shared conn,
+        # serializing every concurrent ingest behind it. Batch into ONE
+        # executemany under a single transaction — one lock, one commit.
+        now = time.time()
+        rows = []
+        for c in chunks:
+            meta_json = json.dumps(c.get("metadata") or {}, ensure_ascii=False)
+            rows.append(
+                (
+                    c["chunk_id"],
+                    c["doc_id"],
+                    c["doc_path"],
+                    c["chunk_index"],
+                    c["text"],
+                    c.get("tokens", 0),
+                    meta_json,
+                    now,
+                )
+            )
+        with self._cursor() as conn:
+            conn.executemany(
+                """INSERT OR REPLACE INTO chunks
+                   (id, doc_id, doc_path, chunk_index, text, tokens, metadata, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                rows,
+            )
+
     def delete_chunks_by_doc(self, doc_id: str) -> None:
         with self._cursor() as conn:
             conn.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
@@ -235,6 +272,18 @@ class MetadataStore:
         with self._read_cursor() as conn:
             row = conn.execute("SELECT COUNT(*) as cnt FROM chunks").fetchone()
         return row["cnt"] if row else 0
+
+    def checkpoint(self) -> None:
+        # O-P2-1: fold the WAL sidecar back into the main .db before a stores-dir
+        # snapshot. See SqliteBase.checkpoint for the rationale.
+        conn = self._get_conn()
+        with self._lock:
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                logger.debug("MetadataStore checkpoint %s", self.db_path)
+            except sqlite3.Error as e:
+                logger.warning("MetadataStore checkpoint failed for %s: %s", self.db_path, e)
+                raise
 
     def close(self) -> None:
         if self._conn:

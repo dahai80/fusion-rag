@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.concurrency import run_in_threadpool
 
 from .._validators import validate_identifier
-from .access import require_kb_action
+from .access import require_admin, require_kb_action
 from .app_state import (
     get_audit_logger,
     get_bench_runner,
@@ -138,7 +138,7 @@ async def list_permissions(kb_id: str) -> list[dict[str, Any]]:
     return pm.list_rules(kb_id)
 
 
-@router.post("/bases/{kb_id}/permissions", dependencies=[Depends(require_kb_action("write"))])
+@router.post("/bases/{kb_id}/permissions", dependencies=[Depends(require_admin())])
 async def add_permission(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     _get_base(kb_id)
     from ..permissions import PermissionRule
@@ -155,7 +155,7 @@ async def add_permission(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     return pm.add_rule(rule)
 
 
-@router.delete("/bases/{kb_id}/permissions/{rule_id}", dependencies=[Depends(require_kb_action("delete"))])
+@router.delete("/bases/{kb_id}/permissions/{rule_id}", dependencies=[Depends(require_admin())])
 async def delete_permission(kb_id: str, rule_id: str) -> dict[str, Any]:
     _get_base(kb_id)
     pm = get_permission_manager(_get_kb_storage_path(kb_id))
@@ -250,6 +250,56 @@ async def incremental_sync(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
 
 
 # ── Bench ──
+
+
+@router.post("/bases/{kb_id}/checkpoint", dependencies=[Depends(require_kb_action("write"))])
+async def checkpoint_kb(kb_id: str) -> dict[str, Any]:
+    # O-P2-1: fold a snapshot-consistent state before a stores-dir backup.
+    # SqliteBase WAL stores (metadata.db, bm25_index.db, versions.db,
+    # templates.db, permissions.db, audit.db, bench.db) checkpoint(TRUNCATE) so
+    # a tar/rsync of the stores dir captures the .db WITHOUT a stale -wal that a
+    # restore would replay or drop. LanceDB vectors/ is compacted via optimize.
+    # Run this, then snapshot. Sync work (LanceDB optimize + N sqlite
+    # checkpoints) — off the event loop so concurrent requests are not frozen.
+    _get_base(kb_id)
+    storage_path = _get_kb_storage_path(kb_id)
+
+    from .routes import _get_meta_store, _get_vector_store
+
+    # checkpoint every pooled SqliteBase admin store for this KB.
+    ck_list: list[dict[str, str]] = []
+    for getter, tag in (
+        (get_version_manager, "versions"),
+        (get_template_manager, "templates"),
+        (get_permission_manager, "permissions"),
+        (get_audit_logger, "audit"),
+        (get_bench_runner, "bench"),
+    ):
+        mgr = getter(storage_path)
+        ck = getattr(mgr, "checkpoint", None)
+        if ck is not None:
+            try:
+                await run_in_threadpool(ck)
+                ck_list.append({"store": tag, "status": "ok"})
+            except Exception as e:
+                logger.warning("checkpoint %s failed: %s", tag, e)
+                ck_list.append({"store": tag, "status": f"failed: {e}"})
+    # metadata store (own conn, not SqliteBase)
+    try:
+        await run_in_threadpool(_get_meta_store(kb_id).checkpoint)
+        ck_list.append({"store": "metadata", "status": "ok"})
+    except Exception as e:
+        logger.warning("checkpoint metadata failed: %s", e)
+        ck_list.append({"store": "metadata", "status": f"failed: {e}"})
+    # vector store (LanceDB optimize + BM25 checkpoint)
+    try:
+        await run_in_threadpool(_get_vector_store(kb_id).checkpoint)
+        ck_list.append({"store": "vectors", "status": "ok"})
+    except Exception as e:
+        logger.warning("checkpoint vectors failed: %s", e)
+        ck_list.append({"store": "vectors", "status": f"failed: {e}"})
+    logger.info("checkpoint completed for kb %s: %s", kb_id, ck_list)
+    return {"kb_id": kb_id, "checkpoint": ck_list}
 
 
 @router.post("/bases/{kb_id}/bench", dependencies=[Depends(require_kb_action("write"))])

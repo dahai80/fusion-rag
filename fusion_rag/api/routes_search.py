@@ -26,21 +26,31 @@ def _audit_and_trajectory(
     latency_ms: float,
     metadata: dict | None = None,
 ) -> None:
-    from ..engine.audit_logger import AuditLogger
-    from ..engine.trajectory_writer import TrajectoryWriter
     from .routes import _get_kb_storage_path
 
     top_sources = [
         {"doc_name": r.get("doc_name", ""), "score": r.get("score", 0.0), "id": r.get("id", "")} for r in results[:5]
     ]
     try:
-        al = AuditLogger(f"{_get_kb_storage_path(kb_id)}/audit.db")
+        # A-P1-2: reuse the pooled AuditLogger (app_state admin pool) instead of
+        # constructing one per call — each prior AuditLogger(...) opened a fresh
+        # sqlite conn + ran _init_db on every search. One per storage path,
+        # reused; closed from the lifespan shutdown.
+        from .app_state import get_audit_logger
+
+        al = get_audit_logger(f"{_get_kb_storage_path(kb_id)}/audit.db")
         al.log_search(kb_id, query, caller, len(results), top_sources, latency_ms, metadata)
     except Exception as e:
         logger.warning("audit log_search failed: %s", e)
     try:
-        tw = TrajectoryWriter()
-        tw.write(kb_id, query, caller, len(results), top_sources, latency_ms, metadata)
+        # A-P2-1: reuse the process-singleton TrajectoryWriter (app_state) —
+        # each prior TrajectoryWriter() re-read env + reopened the JSONL file
+        # per search, and _maybe_rotate ran unguarded. One writer per process.
+        from .app_state import get_trajectory_writer
+
+        tw = get_trajectory_writer()
+        if tw is not None:
+            tw.write(kb_id, query, caller, len(results), top_sources, latency_ms, metadata)
     except Exception as e:
         logger.warning("trajectory write failed: %s", e)
 
@@ -85,11 +95,15 @@ async def search(
     template = data.get("template")
 
     if template:
-        from ..engine.search_template import SearchTemplateManager
+        # A-P1-2: reuse the pooled SearchTemplateManager (app_state admin pool)
+        # instead of constructing one per request — each prior
+        # SearchTemplateManager(...) opened a fresh sqlite conn + re-seeded
+        # builtins every search.
+        from .app_state import get_template_manager
         from .routes import _get_kb_storage_path
 
         # P8/硬伤8: SearchTemplateManager opens + queries sqlite synchronously.
-        tpl_mgr = SearchTemplateManager(f"{_get_kb_storage_path(kb_id)}/templates.db")
+        tpl_mgr = get_template_manager(f"{_get_kb_storage_path(kb_id)}/templates.db")
         tpl = await run_in_threadpool(tpl_mgr.get_template, kb_id, template)
         if tpl:
             top_k = tpl.get("top_k", top_k)
@@ -125,36 +139,56 @@ async def search(
             # hybrid=True + rewrite_mode=... (behavior fork vs the non-rewrite
             # path). Honor use_hybrid per sub-query, and over-fetch so the
             # post-fusion _apply_search_filters (L10) doesn't truncate below
-            # top_k when many rows are filtered out.
+            # top_k when many rows are filtered out. F-P2-2: widen fetch_k when
+            # doc_type_filter is set too — filtering doc_type AFTER the top_k
+            # truncation shrinks the result set below top_k when many rows are
+            # of a different type; over-fetch like folder_prefix/metadata_filter.
             fetch_k = max(top_k * 4, top_k)
-            all_results = []
-            for q in rewritten:
-                qv = await embed.embed(q)
+            if doc_type_filter:
+                fetch_k = max(fetch_k, top_k * get_runtime_config().search_fetch_k_multiplier)
+            # P-P1-4: the per-sub-query loop did embed.embed(q) + search
+            # sequentially — N rewrites = N serial LLM embed round-trips + N
+            # serial searches, latency = sum not max. Batch all rewrites into one
+            # embed_batch (single round-trip), then fan the searches out with
+            # asyncio.gather behind a semaphore so the LanceDB/BM25 backends (sync,
+            # run_in_threadpool) don't exhaust the threadpool.
+            import asyncio as _asyncio
+
+            valid_rewrites = [q for q in rewritten if q]
+            vectors = await embed.embed_batch(valid_rewrites)
+            sem = _asyncio.Semaphore(4)
+
+            async def _one_search(q, qv):
                 if not qv or all(v == 0.0 for v in qv):
-                    continue
-                if use_hybrid:
-                    hs = HybridSearch(vec_store, alpha=hybrid_alpha, method=hybrid_method)
-                    sub_filters = {}
-                    if folder_prefix:
-                        sub_filters["folder_prefix"] = folder_prefix
-                    sub = await hs.search(
-                        qv,
-                        q,
-                        top_k=fetch_k,
-                        threshold=threshold,
-                        filters=sub_filters if sub_filters else None,
-                    )
-                else:
+                    return []
+                async with sem:
+                    if use_hybrid:
+                        hs = HybridSearch(vec_store, alpha=hybrid_alpha, method=hybrid_method)
+                        sub_filters = {}
+                        if folder_prefix:
+                            sub_filters["folder_prefix"] = folder_prefix
+                        return await hs.search(
+                            qv,
+                            q,
+                            top_k=fetch_k,
+                            threshold=threshold,
+                            filters=sub_filters if sub_filters else None,
+                        )
                     # P8/硬伤8: vec_store.search is sync LanceDB+BM25; push off-loop.
                     sub = await run_in_threadpool(vec_store.search, qv, top_k=fetch_k, threshold=threshold)
-                    sub = await run_in_threadpool(_apply_search_filters, sub, folder_prefix, metadata_filter)
-                all_results.extend(sub)
+                    return await run_in_threadpool(_apply_search_filters, sub, folder_prefix, metadata_filter)
+
+            sub_lists = await _asyncio.gather(*[_one_search(q, qv) for q, qv in zip(valid_rewrites, vectors)])
+            all_results = [r for sub in sub_lists for r in sub]
             seen = {}
             for r in all_results:
                 rid = r.get("id", "")
                 if rid not in seen or r.get("score", 0) > seen[rid].get("score", 0):
                     seen[rid] = r
             results = sorted(seen.values(), key=lambda x: x.get("score", 0), reverse=True)[:top_k]
+            # F-P2-2: doc_type_filter applied after fusion+truncation above is
+            # now safe because fetch_k was widened to compensate — same pattern
+            # as folder_prefix/metadata_filter over-fetch.
             if doc_type_filter:
                 results = [r for r in results if r.get("doc_type", "") in doc_type_filter]
             if use_rerank:
@@ -183,9 +217,11 @@ async def search(
         # L10: fetch wider than top_k so _apply_search_filters (folder_prefix /
         # metadata_filter, applied client-side AFTER the top_k truncation) does
         # not silently shrink the result set below top_k when many rows are
-        # filtered out. Matching rows may sit just past top_k.
+        # filtered out. Matching rows may sit just past top_k. F-P2-2: include
+        # doc_type_filter in the over-fetch trigger — it is also a post-fetch
+        # client-side filter, so widening fetch_k keeps top_k intact after it.
         fetch_mult = get_runtime_config().search_fetch_k_multiplier
-        fetch_k = top_k * fetch_mult if (folder_prefix or metadata_filter) else top_k
+        fetch_k = top_k * fetch_mult if (folder_prefix or metadata_filter or doc_type_filter) else top_k
         # P8/硬伤8: sync LanceDB search + per-row json.loads filter block the
         # event loop if run inline in an async handler.
         results = await run_in_threadpool(vec_store.search, query_vector, top_k=fetch_k, threshold=threshold)

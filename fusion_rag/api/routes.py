@@ -61,7 +61,13 @@ def _get_vector_store(kb_id: str) -> VectorStore:
 
 def _get_meta_store(kb_id: str) -> MetadataStore:
     kb = _get_base(kb_id)
-    return MetadataStore(kb.metadata_path)
+    # A-P1-1: reuse the pooled MetadataStore (one conn per metadata_path) via
+    # app_state. The prior per-request MetadataStore(kb.metadata_path) opened a
+    # fresh sqlite conn each call and never closed it — FD leak across a long
+    # run. The pool closes all conns from the lifespan shutdown.
+    from .app_state import get_meta_store
+
+    return get_meta_store(kb.metadata_path)
 
 
 def _get_kb_storage_path(kb_id: str) -> str:
@@ -136,6 +142,11 @@ async def _generate_answer(
 
     try:
         client = get_async_client(mlx_base_url, timeout=60.0)
+        import time as _time
+
+        from ..engine.metrics import record_llm_latency
+
+        _llm_start = _time.perf_counter()
         resp = await with_retry(
             lambda: client.post(
                 mlx_url,
@@ -150,11 +161,13 @@ async def _generate_answer(
             retries=2,
             total_deadline=30.0,
         )
+        record_llm_latency("generate", (_time.perf_counter() - _llm_start) * 1000)
         resp.raise_for_status()
         data = resp.json()
         answer_text = data["choices"][0]["message"]["content"]
         if not answer_text or not answer_text.strip():
-            logger.warning("RAG answer empty content, question=%s", question[:50])
+            # O-P1-3: question is PII — drop snippet, keep the warning signal.
+            logger.warning("RAG answer empty content (question len=%d)", len(question))
             raise ValueError("empty_content")
     except Exception as e:
         # L9: do not return "Failed to generate answer: {e}" with HTTP 200 —

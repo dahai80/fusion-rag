@@ -58,9 +58,13 @@ def _check_kb_access(kb_id: str, subject: str | None, action: str, resource_path
         return
     kb = _resolve_base(kb_id)
     storage_path = kb.vector_path.rsplit("/vectors", 1)[0] if "/vectors" in kb.vector_path else kb.vector_path
-    from ..permissions import PermissionManager
+    # A-P1-2: reuse the pooled PermissionManager (app_state admin pool) instead
+    # of constructing one per request — each prior PermissionManager(...) opened
+    # a fresh sqlite conn + re-initialized on every ACL check. One per storage
+    # path, reused; closed from the lifespan shutdown.
+    from .app_state import get_permission_manager
 
-    pm = PermissionManager(f"{storage_path}/permissions.db")
+    pm = get_permission_manager(storage_path)
     # Open-KB path: if no rules exist for this KB at all, treat it as open.
     # Enforcement only engages once a rule is written (backward compat).
     try:
@@ -88,6 +92,27 @@ def _check_kb_access(kb_id: str, subject: str | None, action: str, resource_path
         logger.warning("access denied: kb=%s subject=%s action=%s path=%s", kb_id, subject, action, resource_path)
         raise HTTPException(403, "Access denied")
     logger.debug("access granted: kb=%s subject=%s action=%s path=%s", kb_id, subject, action, resource_path)
+
+
+def require_admin():
+    """S-P1-3/S-P1-1/S-P1-2: admin-only FastAPI dependency for destructive
+    mutations that must not be reachable by a non-admin subject — API key
+    management (create/delete/list keys) and permission-rule mutation
+    (add/delete rules).
+
+    Semantics match the ACL bypass path: NoAuth (subject is None) -> allow
+    (local-first default); admin subject -> allow; any other authenticated
+    subject -> 403. A stored key can never authenticate as "admin" (auth.py
+    rejects reserved names), so this gate cannot be passed by a non-admin key.
+    """
+    def _dep(subject: str | None = Depends(verify_api_key)) -> str | None:
+        if subject is None:
+            return subject
+        if subject == "admin":
+            return subject
+        logger.warning("admin-only endpoint denied to subject=%s", subject)
+        raise HTTPException(403, "Admin privileges required")
+    return _dep
 
 
 def require_kb_action(action: str, resolve_doc_path: bool = False):
@@ -132,9 +157,12 @@ def _resolve_doc_resource_path(kb_id: str, doc_id: str) -> str:
         return "/"
     storage_path = kb.vector_path.rsplit("/vectors", 1)[0] if "/vectors" in kb.vector_path else kb.vector_path
     try:
-        from ..store.metadata_store import MetadataStore
+        # A-P1-1: reuse the pooled MetadataStore (app_state meta pool) instead
+        # of constructing one per doc-level ACL resolution — each prior
+        # MetadataStore(...) opened a fresh sqlite conn on every gated request.
+        from .app_state import get_meta_store
 
-        ms = MetadataStore(f"{storage_path}/metadata.db")
+        ms = get_meta_store(f"{storage_path}/metadata.db")
         doc = ms.get_document(doc_id)
         if not doc:
             return "/"

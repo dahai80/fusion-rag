@@ -155,6 +155,15 @@ class EmbeddingClient:
         # Check cache
         if self._cache:
             cached = self._cache.get_batch(texts, self.model)
+            # O-P1-6: record cache hit/miss so the hit rate is observable — a
+            # falling hit rate is the earliest signal of cache thrash / eviction.
+            from ..engine.metrics import record_cache
+
+            hits = sum(1 for v in cached if v is not None)
+            for _ in range(hits):
+                record_cache(True)
+            for _ in range(len(cached) - hits):
+                record_cache(False)
             uncached_indices = [i for i, v in enumerate(cached) if v is None]
             if not uncached_indices:
                 logger.debug("EmbeddingCache: all %d texts hit cache", len(texts))

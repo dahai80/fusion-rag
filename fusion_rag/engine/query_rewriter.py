@@ -101,7 +101,9 @@ class QueryRewriter:
         resp.raise_for_status()
         content = resp.json()["choices"][0]["message"]["content"].strip()
         if content:
-            logger.info("HyDE rewrite: %s -> %s", query[:50], content[:50])
+            # O-P1-3: query + generated passage are PII; log at DEBUG only so a
+            # production INFO sink never captures user query text.
+            logger.debug("HyDE rewrite produced %d chars", len(content))
         return content if content else query
 
     async def _expand(self, query: str) -> list[str]:
@@ -124,7 +126,8 @@ class QueryRewriter:
         variants = self._parse_variants(content)
         if variants:
             result = [query] + variants
-            logger.info("Query expansion: %d variants for '%s'", len(variants), query[:50])
+            # O-P1-3: query is PII — count only at INFO, no query text.
+            logger.info("Query expansion produced %d variants", len(variants))
             return result
         return [query]
 
@@ -149,7 +152,8 @@ class QueryRewriter:
         resp.raise_for_status()
         content = resp.json()["choices"][0]["message"]["content"].strip()
         if content:
-            logger.info("Condensed: %s -> %s", query[:50], content[:50])
+            # O-P1-3: query is PII — DEBUG only.
+            logger.debug("Condense produced %d chars", len(content))
         return content if content else query
 
     @staticmethod

@@ -101,6 +101,17 @@ class VectorStore:
     def count(self) -> int:
         return self._backend.count()
 
+    def checkpoint(self) -> None:
+        # O-P2-1: delegate when the backend exposes checkpoint (LocalBackend
+        # does: BM25 WAL checkpoint + LanceDB optimize). Backends without it
+        # (remote stub) raise nothing — a no-op is the safe default for a
+        # snapshot hook on a backend that has no local WAL to fold.
+        ck = getattr(self._backend, "checkpoint", None)
+        if ck is not None:
+            ck()
+        else:
+            logger.debug("VectorStore.checkpoint: backend %s has no checkpoint, no-op", self.backend_type)
+
     def delete_by_doc(self, doc_path: str) -> int:
         return self._backend.delete_by_doc(doc_path)
 

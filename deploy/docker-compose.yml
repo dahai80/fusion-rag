@@ -1,0 +1,49 @@
+# Fusion-RAG docker-compose — single-instance local deploy.
+#
+# fusion-rag container + a named volume for KB stores. fusion-mlx (MLX inference)
+# is NOT containerized here — it is Apple Silicon native and runs on the host,
+# reached at host.docker.internal. Point FUSION_MLX_URL at it.
+#
+# Up:
+#   docker compose -f deploy/docker-compose.yml up -d
+# Logs:
+#   docker compose -f deploy/docker-compose.yml logs -f
+# Down:
+#   docker compose -f deploy/docker-compose.yml down
+#
+# Single-process constraint (CLAUDE.md H3): do not add `scale: N` or replicas
+# sharing one volume. One volume per instance; scale behind a stateless LB with
+# a distinct stores volume per replica.
+
+services:
+  fusion-rag:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: fusion-rag:0.7.2
+    container_name: fusion-rag
+    ports:
+      - "11436:11436"
+    environment:
+      # fusion-mlx on the host (Apple Silicon metal). Override for a separate MLX node.
+      FUSION_MLX_URL: "http://host.docker.internal:11432/v1"
+      FUSION_RAG_EMBED: "BGE-M3"
+      # Structured logs to stdout (container collects) — JSON for an aggregator.
+      FUSION_RAG_LOG_FORMAT: "json"
+      FUSION_RAG_LOG_LEVEL: "INFO"
+      # Auth: set FUSION_RAG_API_KEY to enable API-key auth (empty = open, local only).
+      FUSION_RAG_API_KEY: ""
+      # Opt out of the startup probe if MLX comes up after fusion-rag.
+      FUSION_RAG_SKIP_STARTUP_PROBE: "1"
+    volumes:
+      - fusion-rag-stores:/root/.fusion-rag/stores
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:11436/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+volumes:
+  fusion-rag-stores:

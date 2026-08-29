@@ -47,11 +47,22 @@ def _kb_lock(kb_id: str) -> asyncio.Lock:
     # L12: per-KB lock guarding the read-modify-write of file_count/chunk_count.
     # Concurrent ingest on the same KB otherwise loses updates (both read N,
     # both write N+1). Keyed by kb_id; lazily created in app.state.kb_locks.
+    # A-P2-2: the check-then-act on the shared dict is itself a race — two
+    # concurrent ingest paths both see lock=None, both create, one overwrites
+    # the other's lock, so the "mutual exclusion" never actually happens.
+    # Guard the lazy create with kb_locks_lock (a sync threading.Lock — the
+    # create is fast, and asyncio.Lock construction does not await).
+    from .app_state import _state
+
     locks = get_kb_locks()
     lock = locks.get(kb_id)
     if lock is None:
-        lock = asyncio.Lock()
-        locks[kb_id] = lock
+        with _state().kb_locks_lock:
+            locks = get_kb_locks()
+            lock = locks.get(kb_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                locks[kb_id] = lock
     return lock
 
 
@@ -102,7 +113,13 @@ def _get_vector_store(kb_id: str) -> VectorStore:
 
 def _get_meta_store(kb_id: str) -> MetadataStore:
     kb = _get_base(kb_id)
-    return MetadataStore(kb.metadata_path)
+    # A-P1-1: reuse the pooled MetadataStore (one sqlite conn per metadata_path)
+    # via app_state. The prior per-request MetadataStore(kb.metadata_path) opened
+    # a fresh sqlite conn each call and never closed it — FD leak across a long
+    # run. The pool closes all conns from the lifespan shutdown.
+    from .app_state import get_meta_store as _pool_meta_store
+
+    return _pool_meta_store(kb.metadata_path)
 
 
 def _check_embed_model(kb_id: str) -> None:
@@ -215,12 +232,24 @@ async def _write_doc_to_stores(
         await run_in_threadpool(
             meta_store.add_document, doc_id, doc_path, doc_name, doc_type, file_size, metadata=metadata
         )
-        for i, (chunk, cd) in enumerate(zip(chunks, chunk_dicts)):
-            chunk_id = f"{doc_id}_{i}"
-            per_chunk_meta = chunk_metadata if chunk_metadata is not None else metadata
-            await run_in_threadpool(
-                meta_store.add_chunk, chunk_id, doc_id, doc_path, i, chunk.text, chunk.tokens, metadata=per_chunk_meta
-            )
+        # P-P1-2: batch all chunk inserts into ONE meta_store.add_chunks call
+        # (executemany, single transaction) instead of N add_chunk round-trips
+        # each acquiring the shared-conn lock + committing. On a 500-chunk doc
+        # this drops 500 lock/commit cycles to 1.
+        per_chunk_meta = chunk_metadata if chunk_metadata is not None else metadata
+        chunk_rows = [
+            {
+                "chunk_id": f"{doc_id}_{i}",
+                "doc_id": doc_id,
+                "doc_path": doc_path,
+                "chunk_index": i,
+                "text": chunk.text,
+                "tokens": chunk.tokens,
+                "metadata": per_chunk_meta,
+            }
+            for i, chunk in enumerate(chunks)
+        ]
+        await run_in_threadpool(meta_store.add_chunks, chunk_rows)
         await run_in_threadpool(meta_store.update_chunk_count, doc_id, len(chunks), chars)
     except Exception as e:
         logger.error("_write_doc_to_stores: metadata write failed for doc %s (rolling back vectors): %s", doc_id, e)
@@ -275,6 +304,21 @@ async def _index_document(kb_id: str, file_path: str, contextualize: bool = True
         }
     # F15: LFI guard — reject paths escaping the configured ingest root.
     _check_ingest_root(file_path)
+
+    # F-P1-1/F-P1-2: ingest dedup. Before this, re-ingesting an already-indexed
+    # file_path created a SECOND doc (new doc_id) over the same path — duplicate
+    # vectors, duplicate chunks, and /documents listed the same file twice. The
+    # watch loop and scan both re-call _index_document on changed files, so the
+    # dup accumulated every poll. Resolve the existing doc by file_path; if one
+    # exists, reuse its doc_id (replace semantics) so the path stays unique.
+    # F-P1-2: also compute the content hash up front and persist it into the
+    # doc metadata, so incremental_sync's get_document_by_metadata can skip a
+    # genuinely-unchanged file without re-parsing it.
+    doc_hash = _file_hash(file_path)
+    meta_store = _get_meta_store(kb_id)
+    existing = await run_in_threadpool(meta_store.get_document_by_path, file_path)
+    doc_id = existing["id"] if existing else uuid.uuid4().hex[:16]
+
     result = await _doc_parser.parse(file_path)
     if result.error:
         return {"error": result.error}
@@ -304,9 +348,23 @@ async def _index_document(kb_id: str, file_path: str, contextualize: bool = True
     vectors = await embed.embed_batch(embed_texts)
 
     vec_store = _get_vector_store(kb_id)
-    meta_store = _get_meta_store(kb_id)
 
-    doc_id = uuid.uuid4().hex[:16]
+    # F-P1-2: stamp the content hash into the persisted doc metadata so a later
+    # sync/scan can short-circuit an unchanged file by hash without re-parsing.
+    doc_metadata = dict(result.metadata)
+    if doc_hash:
+        doc_metadata["content_hash"] = doc_hash
+    # F-P1-1: re-ingest of an existing path is a REPLACE, not an append. Tear
+    # down the old index (vectors + chunks + doc row) BEFORE writing the new one
+    # so the path keeps a single doc. Mirrors replace_document's swap order.
+    old_chunk_count = 0
+    if existing:
+        old_path = existing.get("file_path", file_path)
+        old_chunks = await run_in_threadpool(meta_store.get_chunks_by_doc, doc_id)
+        old_chunk_count = len(old_chunks)
+        await run_in_threadpool(vec_store.delete_by_doc, old_path)
+        await run_in_threadpool(meta_store.delete_chunks_by_doc, doc_id)
+        await run_in_threadpool(meta_store.delete_document, doc_id)
     # P4-1 + 硬伤B: single write path. vectors-first ordering (hard-undo side
     # before cheap metadata) with unified rollback lives in _write_doc_to_stores.
     ok, err, rollback_failed = await _write_doc_to_stores(
@@ -317,7 +375,7 @@ async def _index_document(kb_id: str, file_path: str, contextualize: bool = True
         doc_name=result.file_name,
         doc_type=result.doc_type.value,
         file_size=result.metadata.get("size", 0),
-        metadata=result.metadata,
+        metadata=doc_metadata,
         chunks=chunks,
         vectors=vectors,
         chunk_dicts=chunk_dicts,
@@ -333,9 +391,14 @@ async def _index_document(kb_id: str, file_path: str, contextualize: bool = True
         return {"error": msg, "status_code": code, "rollback_failed": rollback_failed}
 
     # L12: per-KB lock so concurrent ingest can't both read N and write N+1.
+    # F-P1-1: on a re-ingest (existing doc) the file_count does NOT grow — it's
+    # the same file — only chunk_count adjusts by the delta.
     async with _kb_lock(kb_id):
-        kb.file_count += 1
-        kb.chunk_count += len(chunks)
+        if existing:
+            kb.chunk_count = max(0, kb.chunk_count - old_chunk_count + len(chunks))
+        else:
+            kb.file_count += 1
+            kb.chunk_count += len(chunks)
         _get_kb_manager().update(kb_id, file_count=kb.file_count, chunk_count=kb.chunk_count)
 
     return {"doc_id": doc_id, "chunks": len(chunks), "chars": result.chars}
@@ -357,6 +420,19 @@ async def batch_upload_documents(kb_id: str, data: dict[str, Any]) -> dict[str, 
     file_paths = data.get("file_paths", [])
     if not file_paths:
         raise HTTPException(400, "file_paths is required")
+    # S-P2-1: unbounded file_paths → a client POSTing 10k paths drives 10k
+    # parse+embed+write cycles in one request (exhausts memory + blocks the
+    # event loop for minutes). Cap at RuntimeConfig.max_batch_files; a caller
+    # over the cap gets 413 + the limit so it can chunk its batch.
+    from ..engine.runtime_config import get_runtime_config
+
+    max_batch = get_runtime_config().max_batch_files
+    if len(file_paths) > max_batch:
+        raise HTTPException(
+            413,
+            f"file_paths length {len(file_paths)} exceeds max_batch_files={max_batch}. "
+            f"Split into smaller batches or raise FUSION_RAG_MAX_BATCH_FILES.",
+        )
 
     contextualize = data.get("contextualize", True)
     total_chunks = 0
@@ -399,6 +475,19 @@ async def ingest_content(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     content = data.get("content", "")
     if not content:
         raise HTTPException(400, "content is required")
+    # S-P2-1: unbounded inline content → a client POSTing a 500MB string drives
+    # one giant embed_batch + 100k-chunk write in one request (memory blowout +
+    # event-loop freeze). Cap at RuntimeConfig.max_content_chars; over the cap
+    # is 413 with the limit so the caller can split or upload a file instead.
+    from ..engine.runtime_config import get_runtime_config
+
+    max_content = get_runtime_config().max_content_chars
+    if len(content) > max_content:
+        raise HTTPException(
+            413,
+            f"content length {len(content)} exceeds max_content_chars={max_content}. "
+            f"Split the content or ingest as a file, or raise FUSION_RAG_MAX_CONTENT_CHARS.",
+        )
     content_type = data.get("content_type", "text")
     metadata = data.get("metadata", {})
     doc_name = data.get("doc_name", f"inline_{uuid.uuid4().hex[:8]}.{content_type}")
@@ -425,7 +514,17 @@ async def ingest_content(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     embed = _get_embed_client()
     contextualizer = Contextualizer(enabled=contextualize, api_key=embed.api_key)
     chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
-    chunk_dicts = await contextualizer.contextualize(chunk_dicts, content)
+    # F-P2-1: ingest_content was the ONE ingest path that did NOT wrap
+    # contextualize in try/except LLMUnavailable — a total LLM failure here
+    # raised out of the handler as a bare 500 (the file/scan/replace paths all
+    # degrade gracefully to empty context). Inline ingest should match: log +
+    # proceed with empty context rather than fail-closed on an enhancement.
+    try:
+        chunk_dicts = await contextualizer.contextualize(chunk_dicts, content)
+    except LLMUnavailable as e:
+        logger.warning("ingest_content: contextualization unavailable, ingesting without context: %s", e)
+        for cd in chunk_dicts:
+            cd.setdefault("context", "")
 
     embed_texts = []
     for cd, c in zip(chunk_dicts, chunks):
