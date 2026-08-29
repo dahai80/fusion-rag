@@ -28,7 +28,16 @@ logger = logging.getLogger(__name__)
 class EmbeddingCache(SqliteBase):
     """SQLite-backed cache for embedding vectors to avoid redundant API calls."""
 
-    def __init__(self, db_path: str = "", ttl: int = 86400 * 7, max_entries: int = 100000):
+    def __init__(self, db_path: str = "", ttl: int | None = None, max_entries: int | None = None):
+        # D4: ttl/max_entries default from RuntimeConfig (env-overridable) when
+        # the caller omits them. Was hardcoded 7d / 100k with no override.
+        from .runtime_config import get_runtime_config
+
+        cfg = get_runtime_config()
+        if ttl is None:
+            ttl = cfg.embedding_cache_ttl_seconds
+        if max_entries is None:
+            max_entries = cfg.embedding_cache_max_entries
         if not db_path:
             db_path = str(Path.home() / ".fusion-rag" / "embed_cache.db")
         self.db_path = db_path

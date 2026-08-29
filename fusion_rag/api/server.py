@@ -108,6 +108,13 @@ def create_app(
     # not in the lifespan — middleware cannot be added after the stack starts.
     app.middleware("http")(bind_app_state)
 
+    # R5: RED metrics — record request count / latency / errors per
+    # endpoint+kb_id. Registered after bind_app_state (order matters: this runs
+    # last in the stack, so route params + final status are available).
+    from ..engine.metrics import get_metrics, metrics_middleware
+
+    app.middleware("http")(metrics_middleware)
+
     app.include_router(kb_router)
     app.include_router(mcp_router)
     app.include_router(auth_router)
@@ -115,6 +122,18 @@ def create_app(
     @app.get("/health")
     async def health():
         return {"status": "ok", "service": "fusion-rag"}
+
+    @app.get("/metrics")
+    async def metrics() -> str:
+        # R5: Prometheus text exposition. No auth — a scrape is read-only
+        # aggregate counters (no per-user PII); protecting it would require
+        # the operator to configure auth on their scrape target too.
+        from starlette.responses import PlainTextResponse
+
+        return PlainTextResponse(
+            get_metrics().render_prometheus(),
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
 
     return app
 

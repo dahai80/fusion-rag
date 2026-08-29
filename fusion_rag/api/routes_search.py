@@ -10,6 +10,7 @@ from fastapi.concurrency import run_in_threadpool
 from ..engine.llm_errors import LLMUnavailable
 from ..engine.query_rewriter import QueryRewriter
 from ..engine.reranker import HybridSearch
+from ..engine.runtime_config import get_runtime_config
 from .access import require_kb_action
 
 logger = logging.getLogger(__name__)
@@ -183,7 +184,8 @@ async def search(
         # metadata_filter, applied client-side AFTER the top_k truncation) does
         # not silently shrink the result set below top_k when many rows are
         # filtered out. Matching rows may sit just past top_k.
-        fetch_k = top_k * 4 if (folder_prefix or metadata_filter) else top_k
+        fetch_mult = get_runtime_config().search_fetch_k_multiplier
+        fetch_k = top_k * fetch_mult if (folder_prefix or metadata_filter) else top_k
         # P8/硬伤8: sync LanceDB search + per-row json.loads filter block the
         # event loop if run inline in an async handler.
         results = await run_in_threadpool(vec_store.search, query_vector, top_k=fetch_k, threshold=threshold)
@@ -265,7 +267,8 @@ async def ask(
             filters=filters if filters else None,
         )
     else:
-        fetch_k = top_k * 4 if (folder_prefix or metadata_filter) else top_k
+        fetch_mult = get_runtime_config().search_fetch_k_multiplier
+        fetch_k = top_k * fetch_mult if (folder_prefix or metadata_filter) else top_k
         # P8/硬伤8: sync LanceDB search + filter block the event loop.
         chunks = await run_in_threadpool(
             vec_store.search, query_vector, top_k=fetch_k, threshold=kb.config.similarity_threshold

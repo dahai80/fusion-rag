@@ -2,6 +2,7 @@ import csv
 import io
 import json
 import logging
+import os
 import time
 from contextlib import contextmanager
 
@@ -44,7 +45,13 @@ CREATE INDEX IF NOT EXISTS idx_audit_kb_created ON audit_log(kb_id, created_at);
 
 
 class AuditLogger(SqliteBase):
-    def __init__(self, db_path: str, retention_days: int = 30):
+    # R6: prune every N inserts so a long-running process does not grow
+    # audit.db forever. The audit logger is pooled (one per KB storage path),
+    # so a background asyncio task per logger would multiply; an insert-count
+    # reaper is simpler and bounded. 0 = reaper off (construction prune only).
+    _REAPER_EVERY = 1000
+
+    def __init__(self, db_path: str, retention_days: int | None = None):
         # P2-7: inherit SqliteBase for the shared locked connection. The prior
         # self._conn was opened with check_same_thread=False but the _cursor
         # context manager took NO lock — under the async threadpool two threads
@@ -52,13 +59,30 @@ class AuditLogger(SqliteBase):
         # rolled back the other's in-flight audit insert). SqliteBase exists
         # precisely for this; adopt it.
         self.db_path = db_path
+        # R6: retention_days via env (FUSION_RAG_AUDIT_RETENTION_DAYS), default
+        # 30. 0 = keep forever. Was hardcoded 30 with no override — an operator
+        # could not tune disk pressure without a code change.
+        if retention_days is None:
+            raw = os.environ.get("FUSION_RAG_AUDIT_RETENTION_DAYS", "").strip()
+            if raw:
+                try:
+                    retention_days = int(raw)
+                except ValueError:
+                    logger.warning("invalid FUSION_RAG_AUDIT_RETENTION_DAYS=%r, defaulting to 30", raw)
+                    retention_days = 30
+            else:
+                retention_days = 30
         # P3-5: retention window in days. 0 = keep forever (legacy behavior).
         # Prune on construction so a long-running server doesn't grow audit.db
         # without bound; the (kb_id, created_at) index makes the delete cheap.
         self.retention_seconds = retention_days * 86400 if retention_days > 0 else 0
+        self._insert_count = 0
         super().__init__()
         conn = self._get_conn()
-        conn.execute(_CREATE_TABLE_SQL)
+        # _CREATE_TABLE_SQL holds CREATE TABLE + CREATE INDEX (two statements);
+        # conn.execute() accepts ONE statement only (else ProgrammingError). DDL
+        # bootstrap runs via executescript, which handles multi-statement SQL.
+        conn.executescript(_CREATE_TABLE_SQL)
         conn.commit()
         if self.retention_seconds:
             self.prune()
@@ -110,6 +134,18 @@ class AuditLogger(SqliteBase):
             results_count,
             latency_ms,
         )
+        # R6: periodic reaper. prune() ran once at construction; a long-running
+        # process never pruned again, so audit.db grew unbounded. Re-prune every
+        # _REAPER_EVERY inserts (best-effort, never blocks the search path on
+        # failure — log the error and continue).
+        if self.retention_seconds:
+            self._insert_count += 1
+            if self._insert_count >= self._REAPER_EVERY:
+                self._insert_count = 0
+                try:
+                    self.prune()
+                except Exception as e:
+                    logger.warning("audit periodic prune failed: %s", e)
         return log_id
 
     def query_logs(

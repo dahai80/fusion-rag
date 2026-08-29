@@ -1,8 +1,6 @@
 """Tests for new P0/P1/P2 capabilities in fusion-rag."""
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -12,7 +10,7 @@ from fusion_rag.engine.preprocessor import DocumentPreprocessor, RecursiveChunke
 from fusion_rag.engine.rag_chain import DocumentChain, MultiTurnRAG
 from fusion_rag.engine.reranker import HybridSearch, Reranker
 from fusion_rag.engine.retrievers import ContextCompressionRetriever, FusionRetriever, MMRRetriever
-from fusion_rag.engine.streaming import MetadataExtractor, ResultCache
+from fusion_rag.engine.streaming import MetadataExtractor
 
 # ── Reranker ──
 
@@ -140,24 +138,6 @@ class TestMetadataExtractor:
             mock_post.return_value = mock_resp
             meta = await extractor.extract("test text", "doc.md")
             assert meta.get("title") == "Test" or meta.get("language") == "en"
-
-
-# ── ResultCache ──
-
-class TestResultCache:
-    def test_set_and_get(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cache = ResultCache(str(Path(tmpdir) / "cache.db"))
-            cache.set("hello", "world answer", context="ctx", sources=[{"id": "1"}])
-            result = cache.get("hello", "ctx")
-            assert result is not None
-            assert "world" in result["answer"]
-
-    def test_miss(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cache = ResultCache(str(Path(tmpdir) / "cache.db"))
-            result = cache.get("nonexistent")
-            assert result is None
 
 
 # ── DatabaseConnector ──

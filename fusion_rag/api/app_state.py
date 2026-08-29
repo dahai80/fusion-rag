@@ -1,4 +1,4 @@
-"""硬伤1 per-app state on app.state, read via contextvar (multi-worker safe).
+"""硬伤1 per-app state on app.state, read via contextvar.
 
 Before this, 6 route files held module-level globals (_kb_manager /
 _embed_client / _tasks / _watches / _kb_locks / _project_kb_map) that a
@@ -12,17 +12,35 @@ Fix: all per-app state lives on `app.state`, populated once by
 `init_app_state` in the lifespan. A middleware binds `app.state` to a
 contextvar each request, so the no-arg accessors below read the *current
 request's* app state without threading `Request` through ~40 endpoint
-signatures. Multi-worker: each worker's app has its own app.state (correct
-— tasks/watches are inherently per-process), and reload rebuilds app.state
-fresh (no stale module globals).
+signatures. Reload rebuilds app.state fresh (no stale module globals).
+
+H3 — DEPLOYMENT CONSTRAINT (single-process only):
+    The per-app dicts (tasks/watches/kb_locks) and the SqliteBase
+    connection model (one in-process threading.RLock guarding one shared
+    sqlite connection per store) are single-process safe ONLY.
+    `uvicorn --workers N > 1` or a multi-node deployment sharing one
+    `~/.fusion-rag/stores` dir is UNSUPPORTED and will corrupt data:
+    each worker opens its own sqlite connection to the same metadata.db
+    / bm25_index.db / versions.db / permissions.db, the RLock does NOT
+    serialize across processes, and concurrent writes hit
+    `database is locked` (5s busy_timeout) or interleave writes and
+    corrupt the index. `_atomic_write_json` uses fcntl.flock for
+    kb_meta.json only — the sqlite stores have no cross-process lock.
+    Run fusion-rag as a SINGLE worker on a SINGLE node. Multi-node /
+    multi-worker requires moving these stores to a real cross-process
+    backend (PostgreSQL or an external sqlite daemon). Do NOT claim
+    multi-node availability without that.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextvars
+import json
 import logging
+import os
 import threading
+from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException, Request
@@ -33,6 +51,69 @@ from ..engine.knowledge_base import KnowledgeBaseManager
 logger = logging.getLogger(__name__)
 
 _current_app: contextvars.ContextVar[Any] = contextvars.ContextVar("fusion_rag_current_app")
+
+# R3: per-KB watch concurrency cap. Without it a client loop-calling /watch
+# spawned an unbounded number of _watch_loop background tasks (os.stat polling)
+# → FD/CPU exhaustion. Env-overridable; default 16.
+_DEFAULT_WATCH_CAP = 16
+
+
+def _watch_cap() -> int:
+    raw = os.environ.get("FUSION_RAG_WATCH_CAP", "").strip()
+    if not raw:
+        return _DEFAULT_WATCH_CAP
+    try:
+        val = int(raw)
+        return val if val > 0 else _DEFAULT_WATCH_CAP
+    except ValueError:
+        logger.warning("invalid FUSION_RAG_WATCH_CAP=%r, defaulting to %d", raw, _DEFAULT_WATCH_CAP)
+        return _DEFAULT_WATCH_CAP
+
+
+def _watch_registry_path() -> Path:
+    # R3: persisted under the stores root so a restart restores watches instead
+    # of silently dropping them (operator thought monitoring was on; it wasn't).
+    base = os.environ.get("FUSION_RAG_STORES_DIR", "")
+    if not base:
+        base = str(Path.home() / ".fusion-rag")
+    return Path(base) / "watch_registry.json"
+
+
+def _persist_watches(watches: dict[str, dict[str, Any]]) -> None:
+    # R3: write the registry without the runtime-only fields (_task, hashes).
+    # hashes rebuild on restore (re-hash the files); _task is recreated.
+    serializable = {}
+    for wid, w in watches.items():
+        if not w.get("active"):
+            continue
+        serializable[wid] = {
+            "watch_id": w["watch_id"],
+            "kb_id": w["kb_id"],
+            "file_paths": list(w["file_paths"]),
+            "poll_interval": w.get("poll_interval", 30),
+            "changes_detected": w.get("changes_detected", 0),
+        }
+    path = _watch_registry_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(serializable, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+        logger.debug("watch registry persisted: %d watches", len(serializable))
+    except Exception as e:
+        logger.warning("watch registry persist failed: %s", e)
+
+
+def _load_watch_registry() -> list[dict[str, Any]]:
+    path = _watch_registry_path()
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return list(data.values()) if isinstance(data, dict) else []
+    except Exception as e:
+        logger.warning("watch registry load failed: %s", e)
+        return []
 
 
 def init_app_state(app: Any, kb_manager: KnowledgeBaseManager, embed_client: EmbeddingClient) -> None:
@@ -64,7 +145,62 @@ def init_app_state(app: Any, kb_manager: KnowledgeBaseManager, embed_client: Emb
     # shutdown. Keyed by a string tag so the pool is one dict, lock-guarded.
     app.state.admin_pool: dict[str, Any] = {}
     app.state.admin_pool_lock = threading.Lock()
+    # R3: restore persisted watches so a restart does not silently drop every
+    # directory monitor (operator believes monitoring is live; without restore
+    # it was gone with no signal). Rebuild hashes from the files on disk + spawn
+    # a fresh _watch_loop per persisted watch. Files that no longer exist are
+    # skipped (logged). The watch cap is honored: if the registry exceeds the
+    # cap, restore up to the cap and log the rest dropped.
+    _restore_watches(app.state)
     logger.info("app.state initialized: kb_manager=%d bases", kb_manager.count)
+
+
+def _restore_watches(state: Any) -> None:
+    registry = _load_watch_registry()
+    if not registry:
+        return
+    cap = _watch_cap()
+    restored = 0
+    # late import: _watch_loop lives in routes_docs; avoid a cycle at import time
+    try:
+        from .routes_docs import _file_hash, _watch_loop
+    except Exception as e:
+        logger.warning("watch restore: cannot import _watch_loop: %s", e)
+        return
+    per_kb: dict[str, int] = {}
+    for w in registry[:cap]:
+        kb_id = w.get("kb_id", "")
+        if not kb_id:
+            continue
+        if per_kb.get(kb_id, 0) >= cap:
+            logger.warning("watch restore: KB %s at cap %d, dropping watch %s", kb_id, cap, w.get("watch_id"))
+            continue
+        file_paths = [fp for fp in w.get("file_paths", []) if os.path.isfile(fp)]
+        if not file_paths:
+            logger.info("watch restore: watch %s has no existing files, skipping", w.get("watch_id"))
+            continue
+        hashes = {}
+        for fp in file_paths:
+            h = _file_hash(fp)
+            if h:
+                hashes[fp] = h
+        watch_id = w.get("watch_id") or f"restored-{restored}"
+        watch = {
+            "watch_id": watch_id,
+            "kb_id": kb_id,
+            "file_paths": file_paths,
+            "poll_interval": w.get("poll_interval", 30),
+            "hashes": hashes,
+            "active": True,
+            "changes_detected": w.get("changes_detected", 0),
+        }
+        state.watches[watch_id] = watch
+        watch["_task"] = asyncio.create_task(_watch_loop(watch_id))
+        per_kb[kb_id] = per_kb.get(kb_id, 0) + 1
+        restored += 1
+        logger.info("watch restore: restored watch %s (kb=%s, %d files)", watch_id, kb_id, len(file_paths))
+    if restored:
+        logger.info("watch restore: %d watches re-spawned on startup", restored)
 
 
 async def bind_app_state(request: Request, call_next):

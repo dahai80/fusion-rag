@@ -198,6 +198,7 @@ Fusion-RAG provides a REST API at `/kb/*` for knowledge base operations.
 | POST | `/kb/bases/{id}/sync` | Incremental directory sync |
 | POST | `/kb/bases/{id}/bench` | Run search benchmark |
 | GET | `/kb/bases/{id}/bench/results` | List benchmark results |
+| GET | `/kb/config` | View runtime config (env-driven knobs, read-only) |
 
 ### Project-KB Mapping
 
@@ -219,6 +220,7 @@ Fusion-RAG provides a REST API at `/kb/*` for knowledge base operations.
 |--------|----------|-------------|
 | GET | `/kb/status` | Service status |
 | GET | `/health` | Health check |
+| GET | `/metrics` | Prometheus metrics (RED: request count, latency histogram, error count by endpoint + kb_id) |
 
 ---
 
@@ -333,6 +335,17 @@ Modules migrated to fusion-core: `contextualizer`, `query_rewriter`, `reranker`,
 | `FUSION_RAG_FALLBACK_API_KEY` | (empty) | Cloud fallback API key |
 | `FUSION_RAG_STORE_BACKEND` | local | Vector store backend: `local` (LanceDB) or `fusion-store` (HNSW via the in-tree fusion-store PyO3 binding). `fusion-store` requires `pip install -e ../fusion-store` (maturin); not on PyPI |
 | `FUSION_TRAJECTORY_DIR` | ~/.fusion/trajectories/rag | RAG retrieval trajectory output dir (D1 轨迹飞轮) |
+| `FUSION_RAG_SCAN_MAX_FILES` | 1000 | Max files a single `scan_directory` ingests (D4) |
+| `FUSION_RAG_EMBED_CACHE_TTL` | 604800 | Embedding cache entry TTL in seconds (D4, default 7d) |
+| `FUSION_RAG_EMBED_CACHE_MAX_ENTRIES` | 100000 | Max rows in the embedding cache before LRU eviction (D4) |
+| `FUSION_RAG_TOKEN_BUDGET` | 8192 | Multi-turn RAG token budget per turn (D4) |
+| `FUSION_RAG_MAX_HISTORY_TURNS` | 10 | Max conversation turns kept in RAG history (D4) |
+| `FUSION_RAG_FETCH_K_MULTIPLIER` | 4 | Over-fetch factor for filtered search (D4) |
+| `FUSION_RAG_WATCH_CAP` | 16 | Max concurrent directory watches per process (R3) |
+| `FUSION_RAG_TRAJECTORY_MAX_MB` | 100 | Max trajectory file size in MB before rotation (R6) |
+| `FUSION_RAG_TRAJECTORY_KEEP` | 5 | Rotated trajectory files to keep (R6) |
+| `FUSION_RAG_AUDIT_RETENTION_DAYS` | 30 | Audit log retention days (0 = keep forever) (R6) |
+| `FUSION_RAG_STORES_DIR` | ~/.fusion-rag/stores | Per-KB store root dir (R3 watch registry) |
 
 ### Using start.sh
 

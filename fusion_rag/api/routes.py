@@ -148,6 +148,7 @@ async def _generate_answer(
                 headers=headers,
             ),
             retries=2,
+            total_deadline=30.0,
         )
         resp.raise_for_status()
         data = resp.json()

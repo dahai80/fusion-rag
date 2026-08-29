@@ -38,10 +38,19 @@ class MultiTurnRAG:
         self,
         mlx_url: str = "http://127.0.0.1:11432/v1",
         model: str = "qwen3.5-9b",
-        token_budget: int = 8192,
-        max_history_turns: int = 10,
+        token_budget: int | None = None,
+        max_history_turns: int | None = None,
         system_prompt: str = "",
     ):
+        # D4: token_budget/max_history default from RuntimeConfig (env-overridable)
+        # when the caller omits them. Was hardcoded 8192 / 10 with no override.
+        from .runtime_config import get_runtime_config
+
+        cfg = get_runtime_config()
+        if token_budget is None:
+            token_budget = cfg.rag_token_budget
+        if max_history_turns is None:
+            max_history_turns = cfg.rag_max_history_turns
         self.mlx_url = mlx_url.rstrip("/")
         self.model = model
         self.token_budget = token_budget
@@ -81,6 +90,7 @@ class MultiTurnRAG:
                     },
                 ),
                 retries=2,
+                total_deadline=30.0,
             )
             resp.raise_for_status()
             data = resp.json()

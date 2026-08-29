@@ -49,7 +49,7 @@ def _resolve_base(kb_id: str):
         raise HTTPException(404, f"Knowledge base '{kb_id}' not found")
 
 
-def _check_kb_access(kb_id: str, subject: str | None, action: str) -> None:
+def _check_kb_access(kb_id: str, subject: str | None, action: str, resource_path: str = "/") -> None:
     # NoAuth -> subject is None -> open (local-first default).
     if subject is None:
         return
@@ -72,27 +72,73 @@ def _check_kb_access(kb_id: str, subject: str | None, action: str) -> None:
     if not all_rules:
         logger.debug("access: no permission rules for kb=%s -> open KB, allow", kb_id)
         return
+    # H4 fix: pass the REAL resource_path, not a hardcoded "/". The prior code
+    # always checked "/" — and every path-prefixed rule matches "/" (rule root
+    # is a prefix of "/"), so path-level ACL was never enforced: a subject
+    # restricted to "/docs/restricted/*" could read "/docs/public/*" too.
+    # KB-scoped endpoints pass "/" (the KB is the resource); doc-specific
+    # endpoints resolve doc_id -> file_path so a rule scoped to a subtree only
+    # permits that subtree.
     try:
-        allowed = pm.check_permission(kb_id, subject, action, "/")
+        allowed = pm.check_permission(kb_id, subject, action, resource_path)
     except Exception as e:
         logger.error("permission check failed for kb=%s subject=%s, denying: %s", kb_id, subject, e)
         raise HTTPException(403, "Access denied")
     if not allowed:
-        logger.warning("access denied: kb=%s subject=%s action=%s", kb_id, subject, action)
+        logger.warning("access denied: kb=%s subject=%s action=%s path=%s", kb_id, subject, action, resource_path)
         raise HTTPException(403, "Access denied")
-    logger.debug("access granted: kb=%s subject=%s action=%s", kb_id, subject, action)
+    logger.debug("access granted: kb=%s subject=%s action=%s path=%s", kb_id, subject, action, resource_path)
 
 
-def require_kb_action(action: str):
+def require_kb_action(action: str, resolve_doc_path: bool = False):
     """Build a FastAPI dependency enforcing `action` on the path's kb_id.
 
     Usage: `dependencies=[Depends(require_kb_action("read"))]` on a route that
     has a {kb_id} path param, or `subject = Depends(require_kb_action("read"))`
     as a handler param to also receive the subject string.
+
+    resolve_doc_path: for doc-specific routes (/bases/{kb_id}/documents/{doc_id})
+    set True — the dependency resolves doc_id -> the doc's stored file_path and
+    passes it as the ACL resource_path, so a rule scoped to a path subtree only
+    permits that subtree. KB-scoped routes leave it False (resource = "/" = KB).
     """
 
-    def _dep(kb_id: str, subject: str | None = Depends(verify_api_key)) -> str | None:
-        _check_kb_access(kb_id, subject, action)
+    def _dep(
+        kb_id: str,
+        doc_id: str | None = None,
+        subject: str | None = Depends(verify_api_key),
+    ) -> str | None:
+        resource_path = "/"
+        if resolve_doc_path and doc_id:
+            resource_path = _resolve_doc_resource_path(kb_id, doc_id)
+        _check_kb_access(kb_id, subject, action, resource_path)
         return subject
 
     return _dep
+
+
+def _resolve_doc_resource_path(kb_id: str, doc_id: str) -> str:
+    # H4: map a path-param doc_id to the stored file_path so ACL rules scoped to
+    # a path subtree can actually enforce at the doc level. If the doc is absent
+    # (404) or the store read errors, fall back to "/" — the handler will 404
+    # on the missing doc anyway, and failing open to "/" here would let a
+    # subtree-restricted subject delete a doc outside its subtree. Instead, on
+    # a store error we deny (fail-closed) by returning a path unlikely to match
+    # any rule, so ACL.check's no-match -> deny fires. A missing doc returns "/"
+    # because the subsequent handler 404s regardless.
+    try:
+        kb = _resolve_base(kb_id)
+    except HTTPException:
+        return "/"
+    storage_path = kb.vector_path.rsplit("/vectors", 1)[0] if "/vectors" in kb.vector_path else kb.vector_path
+    try:
+        from ..store.metadata_store import MetadataStore
+
+        ms = MetadataStore(f"{storage_path}/metadata.db")
+        doc = ms.get_document(doc_id)
+        if not doc:
+            return "/"
+        return doc.get("file_path", "/") or "/"
+    except Exception as e:
+        logger.warning("access: doc resource_path resolve failed for kb=%s doc=%s: %s", kb_id, doc_id, e)
+        return "/__acl_unresolved__"
