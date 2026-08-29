@@ -61,8 +61,12 @@ class Chunker:
             return self._chunk_fixed(result)
 
     def _should_use_ast(self, result: ParseResult) -> bool:
+        # D2: compare to the enum's .value (lowercase "code_python"), not the
+        # enum NAME "CODE_PYTHON". result.doc_type.value is lowercase; the prior
+        # uppercase compare was always False, so Python AST auto-detection was
+        # dead code (a .py file only got the AST path via explicit strategy="ast").
         dtype = result.doc_type.value if hasattr(result.doc_type, "value") else str(result.doc_type)
-        return dtype == "CODE_PYTHON" and self.strategy != "code"
+        return dtype == "code_python" and self.strategy != "code"
 
     def _chunk_semantic(self, result: ParseResult) -> list[Chunk]:
         """Split by semantic boundaries (paragraphs, sections)."""

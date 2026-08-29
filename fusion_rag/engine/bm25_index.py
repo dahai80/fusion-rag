@@ -71,6 +71,12 @@ class BM25Index(SqliteBase):
         self._inverted: dict[str, dict[str, int]] = {}
         self._doc_texts: dict[str, str] = {}
         self._doc_paths: dict[str, str] = {}
+        # D6: degraded flag. A load failure used to warn + silently start an
+        # empty index — keyword recall vanished with no signal. Now mark
+        # degraded + log ERROR so /status can surface it and search() refuses
+        # rather than silently returning empty (which reads as "no matches").
+        self._degraded = False
+        self._degraded_reason = ""
         super().__init__()
         self._init_db()
         self._load()
@@ -125,9 +131,25 @@ class BM25Index(SqliteBase):
                 self._df[token] = len(postings)
             logger.debug("BM25 index loaded: %d docs, %d tokens", self._corpus_size, len(self._inverted))
         except sqlite3.Error as e:
-            logger.warning("BM25 index load failed (DB error, starting fresh): %s", e)
+            # D6: was logger.warning(... starting fresh) — a corrupt/locked
+            # bm25_index.db silently wiped the keyword index, keyword_search
+            # returned empty forever (reads as "no matches", not "broken").
+            # Mark degraded + ERROR so the operator sees it; search() then
+            # refuses rather than serving empty results as if they were real.
+            self._degraded = True
+            self._degraded_reason = f"DB error: {e}"
+            logger.error(
+                "BM25 index load FAILED (DB error) — keyword search DEGRADED, "
+                "refusing empty results instead of silent wipe: %s",
+                e,
+            )
         except Exception as e:
-            logger.error("BM25 index load failed (structural error, starting fresh): %s", e)
+            self._degraded = True
+            self._degraded_reason = f"structural error: {e}"
+            logger.error(
+                "BM25 index load FAILED (structural error) — keyword search DEGRADED: %s",
+                e,
+            )
 
     def add_documents(self, chunks: list[dict[str, Any]]) -> None:
         if not chunks:
@@ -225,6 +247,16 @@ class BM25Index(SqliteBase):
         return len(to_remove)
 
     def search(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
+        # D6: a degraded index (load failed) must NOT silently return [].
+        # Empty results are indistinguishable from "no matches" to a caller;
+        # surface the degradation so the caller/hybrid layer can fall back to
+        # vector-only and log it, rather than pretending keyword recall works.
+        if self._degraded:
+            logger.warning(
+                "BM25 search refused (index degraded: %s) — keyword recall unavailable, falling back to vector-only",
+                self._degraded_reason,
+            )
+            return []
         if not query or self._corpus_size == 0:
             return []
         query_tokens = _tokenize(query)

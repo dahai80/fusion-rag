@@ -77,6 +77,7 @@ class Reranker:
                     },
                 ),
                 retries=2,
+                total_deadline=15.0,
             )
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"]["content"].strip()

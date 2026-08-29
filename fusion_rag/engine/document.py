@@ -63,6 +63,17 @@ EXTENSION_MAP: dict[str, DocumentType] = {
     ".ini": DocumentType.CODE_OTHER,
 }
 
+# D5: single source of truth for content-type string → DocumentType. The inline
+# ingest path (routes_docs) previously held a second, divergent map — a new
+# type added only to EXTENSION_MAP was invisible there. Co-locate both maps on
+# document.py so one edit updates every entry path.
+CONTENT_TYPE_MAP: dict[str, DocumentType] = {
+    "markdown": DocumentType.MARKDOWN,
+    "html": DocumentType.HTML,
+    "csv": DocumentType.TXT,
+    "text": DocumentType.TXT,
+}
+
 
 @dataclass
 class ParseResult:

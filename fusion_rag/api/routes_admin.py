@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.concurrency import run_in_threadpool
 
 from .._validators import validate_identifier
 from .access import require_kb_action
@@ -15,6 +16,7 @@ from .app_state import (
     get_template_manager,
     get_version_manager,
 )
+from .auth import verify_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -234,14 +236,17 @@ async def incremental_sync(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
 
     sync = IncrementalSyncEngine()
     meta_store = _get_meta_store(kb_id)
-    docs = meta_store.list_documents()
+    # R1: list_documents (SQLite scan) + sync_directory (filesystem walk +
+    # MD5) are both sync; wrap so a large directory sync doesn't freeze the
+    # event loop for concurrent requests.
+    docs = await run_in_threadpool(meta_store.list_documents)
     for d in docs:
         d["file_path"] = d.get("file_path", "")
         d["file_hash"] = d.get("metadata", {}).get("file_hash", "") if isinstance(d.get("metadata"), dict) else ""
         d["doc_id"] = d.get("doc_id", d.get("id", ""))
 
     patterns = data.get("patterns")
-    return sync.sync_directory(directory, docs, patterns)
+    return await run_in_threadpool(sync.sync_directory, directory, docs, patterns)
 
 
 # ── Bench ──
@@ -267,3 +272,16 @@ async def list_bench_results(kb_id: str, test_name: str | None = None) -> list[d
     _get_base(kb_id)
     bench = get_bench_runner(_get_kb_storage_path(kb_id))
     return bench.list_results(kb_id, test_name)
+
+
+# ── Runtime config (D4) ──
+
+
+@router.get("/config", dependencies=[Depends(verify_api_key)])
+async def get_runtime_config_view() -> dict[str, Any]:
+    # D4: read-only view of the env-driven operator knobs (scan cap, embed
+    # cache TTL/size, RAG token budget, fetch_k multiplier). Lets an operator
+    # confirm what a running instance applied without grepping env + source.
+    from ..engine.runtime_config import get_runtime_config
+
+    return {"runtime": get_runtime_config().to_dict()}

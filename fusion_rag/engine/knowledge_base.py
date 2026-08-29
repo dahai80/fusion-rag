@@ -273,9 +273,37 @@ class KnowledgeBaseManager:
         kb = self._bases[kb_id]
         import shutil
 
+        # R4: evict the pooled VectorStore handle BEFORE rmtree. A pooled
+        # VectorStore holds an open LanceDB/HNSW handle on the KB's vectors dir.
+        # Rmtree under it leaves a stale handle; if the KB id is later reused
+        # (create with same kb_id), the pool returns the stale handle pointing
+        # at the now-recreated dir → ENOENT / corrupt reads. Drop + close first.
+        self._evict_vec_store_pool(kb.storage_path)
         shutil.rmtree(Path(kb.storage_path), ignore_errors=True)
         del self._bases[kb_id]
         return True
+
+    @staticmethod
+    def _evict_vec_store_pool(storage_path: str) -> None:
+        # R4: best-effort pool eviction. No-op outside the server (no app.state
+        # bound, e.g. unit tests / direct manager calls). Lazy import avoids a
+        # cycle (app_state imports KnowledgeBaseManager).
+        try:
+            from ..api.app_state import get_vec_store_pool, get_vec_store_pool_lock
+
+            pool = get_vec_store_pool()
+        except Exception:
+            return
+        lock = get_vec_store_pool_lock()
+        vector_path = str(Path(storage_path) / "vectors")
+        with lock:
+            vs = pool.pop(vector_path, None)
+        if vs is not None:
+            try:
+                vs.close()
+            except Exception as e:
+                logger.warning("delete: pooled vec_store close failed for %s: %s", vector_path, e)
+            logger.info("delete: evicted pooled vec_store for %s", vector_path)
 
     def update(self, kb_id: str, **kwargs) -> KnowledgeBase:
         """Update knowledge base configuration."""

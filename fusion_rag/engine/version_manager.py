@@ -64,7 +64,14 @@ class VersionManager(SqliteBase):
         # links. Append a uuid8 so same-second snapshots get distinct dirs;
         # assert the dir does not exist before writing.
         version_id = f"v_{int(time.time())}_{uuid.uuid4().hex[:8]}"
-        snapshot_dir = Path(kb_storage_path) / "snapshots" / version_id
+        # H1 fix: snapshot MUST live OUTSIDE kb_storage_path. The prior layout
+        # (kb_storage_path/snapshots/) meant rollback's move-the-live-dir step
+        # also moved the snapshots away, then the copy-back read from the
+        # moved path (all .exists() False → skipped), then rmtree deleted the
+        # backup that now contained both live data + snapshots → total loss.
+        # New layout: sibling .snapshots dir next to the KB dir, never inside it.
+        snapshot_root = Path(kb_storage_path).parent / ".snapshots" / kb_id
+        snapshot_dir = snapshot_root / version_id
         if snapshot_dir.exists():
             logger.error("Snapshot dir already exists (unexpected): %s", snapshot_dir)
             raise FileExistsError(f"snapshot dir already exists: {snapshot_dir}")
@@ -140,6 +147,22 @@ class VersionManager(SqliteBase):
         return dict(row)
 
     def rollback(self, kb_id: str, kb_storage_path: str, version_id: str) -> dict:
+        # H1 fix: in-place per-artifact restore. The prior code moved the entire
+        # live dir to a backup, then tried to copy back from the snapshot — but
+        # the snapshot was NESTED inside the moved live dir, so every
+        # snapshot_X.exists() was False (skipped), then it rmtree'd the backup
+        # (which now held live data + snapshots). rollback returned success:True
+        # leaving an empty KB, data unrecoverable. The recovery feature WAS the
+        # data loss.
+        #
+        # New approach: never move the live dir. For each artifact in the
+        # snapshot (vectors/ metadata.db bm25_index.db), write the restored
+        # copy to a sibling temp path, then os.replace (atomic on POSIX) into
+        # the live dir. A failure mid-restore leaves the un-replaced artifacts
+        # intact; the replaced ones already match the snapshot. We never rmtree
+        # the live dir, so a crash can't widen the loss. Admin DBs (versions.db
+        # /permissions.db/templates.db/audit.db) are NOT in snapshots and are
+        # left untouched — rollback only restores searchable data.
         snapshot = self.get_snapshot(kb_id, version_id)
         if snapshot is None:
             logger.error("Snapshot %s not found for kb %s", version_id, kb_id)
@@ -151,56 +174,113 @@ class VersionManager(SqliteBase):
             return {"success": False, "error": f"Snapshot directory {snapshot_dir} does not exist"}
 
         kb_path = Path(kb_storage_path)
-        backup_dir = kb_path.parent / f"{kb_path.name}_backup_{int(time.time())}"
+        kb_path.mkdir(parents=True, exist_ok=True)
 
-        logger.info("Rolling back kb %s to snapshot %s", kb_id, version_id)
+        logger.info("Rolling back kb %s to snapshot %s (in-place restore)", kb_id, version_id)
 
+        # R4 tie-in: a pooled VectorStore holds an open LanceDB/HNSW handle on
+        # kb_path/vectors. Swapping the vectors dir under it corrupts the handle.
+        # Evict the pool entry first so the next request reopens the restored
+        # data. Best-effort — the pool lives on app.state and may be absent in
+        # unit tests / direct calls.
+        self._evict_vec_store_pool(kb_path)
+
+        # Re-evaluate snapshot location: legacy snapshots nested inside
+        # kb_storage_path/snapshots/ are unsupported under in-place restore
+        # (copying vectors/ onto itself). Detect and refuse loudly — operator
+        # must migrate. New snapshots live outside (create_snapshot H1 fix).
         try:
-            logger.info("Backing up current data to %s", backup_dir)
-            shutil.move(str(kb_path), str(backup_dir))
-
-            kb_path.mkdir(parents=True, exist_ok=True)
-
-            snapshot_vectors = snapshot_dir / "vectors"
-            if snapshot_vectors.exists():
-                shutil.copytree(
-                    str(snapshot_vectors),
-                    str(kb_path / "vectors"),
-                    copy_function=os.link,
-                )
-                logger.info("Restored vectors from snapshot")
-
-            snapshot_metadata = snapshot_dir / "metadata.db"
-            if snapshot_metadata.exists():
-                shutil.copy2(str(snapshot_metadata), str(kb_path / "metadata.db"))
-                logger.info("Restored metadata.db from snapshot")
-
-            snapshot_bm25 = snapshot_dir / "bm25_index.db"
-            if snapshot_bm25.exists():
-                shutil.copy2(str(snapshot_bm25), str(kb_path / "bm25_index.db"))
-                logger.info("Restored bm25_index.db from snapshot")
-
-            shutil.rmtree(str(backup_dir), ignore_errors=True)
-            logger.info("Removed backup directory after successful rollback")
-
+            snapshot_dir.relative_to(kb_path)
+            logger.error(
+                "rollback: snapshot %s is nested inside kb_storage_path %s — "
+                "legacy layout, refusing in-place restore (would copy onto self). "
+                "Re-create snapshots under the new external layout.",
+                snapshot_dir,
+                kb_path,
+            )
             return {
-                "success": True,
-                "version_id": version_id,
-                "kb_id": kb_id,
-                "message": f"Rolled back to snapshot {version_id}",
+                "success": False,
+                "error": "snapshot is nested inside kb_storage_path (legacy layout); "
+                "delete and re-create snapshots to migrate",
             }
+        except ValueError:
+            pass  # snapshot outside live dir — correct, proceed.
+
+        restored: list[str] = []
+        try:
+            for name, is_dir in (("vectors", True), ("metadata.db", False), ("bm25_index.db", False)):
+                src = snapshot_dir / name
+                if not src.exists():
+                    logger.info("rollback: %s absent in snapshot, leaving live copy untouched", name)
+                    continue
+                dst = kb_path / name
+                self._restore_artifact(src, dst, is_dir)
+                restored.append(name)
+                logger.info("rollback: restored %s from snapshot", name)
         except Exception as e:
-            logger.error("Rollback failed: %s", e)
-            if backup_dir.exists():
-                logger.info("Attempting to restore from backup %s", backup_dir)
-                try:
-                    if kb_path.exists():
-                        shutil.rmtree(str(kb_path), ignore_errors=True)
-                    shutil.move(str(backup_dir), str(kb_path))
-                    logger.info("Restored original data from backup")
-                except Exception as restore_err:
-                    logger.error("Failed to restore backup: %s", restore_err)
-            return {"success": False, "error": str(e)}
+            logger.error(
+                "rollback FAILED mid-restore (restored so far: %s): %s. "
+                "Live dir NOT deleted — replaced artifacts match snapshot, "
+                "unreplaced ones retain prior state.",
+                restored,
+                e,
+            )
+            return {"success": False, "error": str(e), "restored": restored}
+
+        return {
+            "success": True,
+            "version_id": version_id,
+            "kb_id": kb_id,
+            "restored": restored,
+            "message": f"Rolled back to snapshot {version_id}",
+        }
+
+    @staticmethod
+    def _evict_vec_store_pool(kb_path: Path) -> None:
+        # R4: drop the pooled VectorStore handle for this KB's vector_path so the
+        # in-place vectors/ swap isn't observed by a stale open handle. No-op
+        # outside the server (no app.state bound). Import lazily to avoid a
+        # cycle (app_state imports nothing from engine; keep it that way).
+        try:
+            from ..api.app_state import get_vec_store_pool, get_vec_store_pool_lock
+
+            pool = get_vec_store_pool()
+        except Exception:
+            return
+        lock = get_vec_store_pool_lock()
+        vector_path = str(kb_path / "vectors")
+        with lock:
+            vs = pool.pop(vector_path, None)
+        if vs is not None:
+            try:
+                vs.close()
+            except Exception as e:
+                logger.warning("rollback: pooled vec_store close failed for %s: %s", vector_path, e)
+            logger.info("rollback: evicted pooled vec_store for %s", vector_path)
+
+    @staticmethod
+    def _restore_artifact(src: Path, dst: Path, is_dir: bool) -> None:
+        # Atomic per-artifact restore: write to a sibling temp, os.replace
+        # (atomic rename on POSIX) into the live path. A crash before replace
+        # leaves the live artifact untouched.
+        parent = dst.parent
+        tmp = parent / f".{dst.name}.rollback_tmp_{uuid.uuid4().hex[:8]}"
+        try:
+            if is_dir:
+                if dst.exists():
+                    shutil.rmtree(str(dst), ignore_errors=True)
+                shutil.copytree(str(src), str(tmp), copy_function=os.link)
+                os.replace(str(tmp), str(dst))
+            else:
+                shutil.copy2(str(src), str(tmp))
+                os.replace(str(tmp), str(dst))
+        except Exception:
+            if tmp.exists():
+                if tmp.is_dir():
+                    shutil.rmtree(str(tmp), ignore_errors=True)
+                else:
+                    tmp.unlink(missing_ok=True)
+            raise
 
     def delete_snapshot(self, kb_id: str, version_id: str) -> bool:
         snapshot = self.get_snapshot(kb_id, version_id)

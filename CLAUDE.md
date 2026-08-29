@@ -77,7 +77,9 @@ fusion_rag/
 │   ├── audit_logger.py      # Search audit trail with JSON/CSV export
 │   ├── trajectory_writer.py # D1 retrieval trajectory sink (JSONL → ~/.fusion/trajectories/rag/)
 │   ├── bench.py             # Search latency benchmark runner + SQLite results
-│   └── streaming.py         # SSEStreamer, MetadataExtractor, ResultCache
+│   ├── runtime_config.py    # RuntimeConfig — env-driven operator knobs (scan cap, cache TTL, token budget) + reset for tests
+│   ├── metrics.py           # R5 RED metrics registry + middleware → /metrics (Prometheus text format)
+│   └── streaming.py         # SSEStreamer, MetadataExtractor
 ├── parse/
 │   ├── __init__.py          # DatabaseConnector (SQLite/PostgreSQL) + WebLoader
 │   └── git_loader.py        # Git repo clone + .gitignore-aware file indexing
@@ -107,7 +109,10 @@ fusion_rag/
 - **fusion_core in-tree dependency**: LLM HTTP calls (reranker, contextualizer, query_rewriter, rag_chain, graph_rag, evaluator, streaming, routes._generate_answer) use `fusion_core.http_client.get_async_client` (shared connection pool, LRU-keyed by loop+base_url) + `with_retry` (auto-retry on 429/5xx + transient errors). Auth headers passed per-request, not baked into pooled client. `fusion_core` lives at `../fusion-core` (in-tree), already in the monorepo venv; CI installs it via `pip install git+https://github.com/dahai80/fusion-core.git`. Non-LLM httpx (`embed/client.py`, `connectors`) and SSE streaming (`streaming.SSEStreamer`) keep raw httpx (own retry / `httpx.stream`).
 - **LanceDB lazy import**: `lancedb` and `pyarrow` imported via `_lancedb()` / `_pa()` helpers in `vector_store.py`
 - **Per-KB isolation**: Each KB gets its own `vectors/` (LanceDB) + `metadata.db` (SQLite) under `~/.fusion-rag/stores/{kb_id}/`
-- **Server wiring**: `server.py` creates `KnowledgeBaseManager` + `EmbeddingClient`, injects into `routes.py` via `set_kb_context()`. `routes.py` is the hub router (`/kb` prefix) that mounts 5 sub-routers (kb/docs/search/admin/project); it also holds `/status`, `/stats`, and shared helpers (`_get_base`, `_do_rerank`, `_generate_answer`). MCP router mounted at `/mcp`, auth router at top level. Auth via `Depends(verify_api_key)` on write endpoints.
+- **Server wiring**: `server.py` creates `KnowledgeBaseManager` + `EmbeddingClient`, injects into `routes.py` via `set_kb_context()`. `routes.py` is the hub router (`/kb` prefix) that mounts 5 sub-routers (kb/docs/search/admin/project); it also holds `/status`, `/stats`, and shared helpers (`_get_base`, `_do_rerank`, `_generate_answer`). MCP router mounted at `/mcp`, auth router at top level. Auth via `Depends(verify_api_key)` on write endpoints. `/metrics` (Prometheus, no auth) + `/health` mounted at top level.
+- **Single-process only**: directory watches (`routes_docs._watch_loop`) and the watch registry live in process memory — no cross-process coordination. Scale horizontally behind a stateless load balancer, NOT by running multiple fusion-rag processes against the same `FUSION_RAG_STORES_DIR`. A multi-process deployment would double-watch and corrupt the registry (R3/H3).
+- **Single embedding model**: the service builds ONE `EmbeddingClient` from `FUSION_RAG_EMBED` at startup; all KBs share it. A KB created with a different `embedding_model` config is rejected at ingest (400) rather than silently persisting cross-model vectors (D7). To change the model, re-create the KB or restart the service with a new `FUSION_RAG_EMBED`.
+- **Runtime config (D4)**: operator knobs (scan cap, embed cache TTL/size, RAG token budget, fetch_k multiplier) are env-driven via `RuntimeConfig` — see `runtime_config.py`. `get_runtime_config()` lazy-loads once, `reset_runtime_config()` for tests. Read-only view at `GET /kb/config`.
 
 ### Environment Variables
 
@@ -126,6 +131,17 @@ fusion_rag/
 | `FUSION_RAG_STORE_BACKEND` | local | Vector store backend: `local` (LanceDB) or `fusion-store` (HNSW via in-tree fusion-store PyO3 binding; install with `pip install -e ../fusion-store`, not on PyPI) |
 | `FUSION_TRAJECTORY_DIR` | ~/.fusion/trajectories/rag | D1 retrieval trajectory output dir |
 | `FUSION_RAG_LOG_LEVEL` | INFO | Server log level |
+| `FUSION_RAG_SCAN_MAX_FILES` | 1000 | Max files a single scan_directory ingests (D4) |
+| `FUSION_RAG_EMBED_CACHE_TTL` | 604800 | Embedding cache TTL seconds (D4, default 7d) |
+| `FUSION_RAG_EMBED_CACHE_MAX_ENTRIES` | 100000 | Max embedding cache rows before LRU eviction (D4) |
+| `FUSION_RAG_TOKEN_BUDGET` | 8192 | Multi-turn RAG token budget (D4) |
+| `FUSION_RAG_MAX_HISTORY_TURNS` | 10 | Max RAG history turns kept (D4) |
+| `FUSION_RAG_FETCH_K_MULTIPLIER` | 4 | Over-fetch factor for filtered search (D4) |
+| `FUSION_RAG_WATCH_CAP` | 16 | Max concurrent directory watches per process (R3) |
+| `FUSION_RAG_TRAJECTORY_MAX_MB` | 100 | Max trajectory file MB before rotation (R6) |
+| `FUSION_RAG_TRAJECTORY_KEEP` | 5 | Rotated trajectory files kept (R6) |
+| `FUSION_RAG_AUDIT_RETENTION_DAYS` | 30 | Audit log retention days, 0 = forever (R6) |
+| `FUSION_RAG_STORES_DIR` | ~/.fusion-rag/stores | Per-KB store root (R3 watch registry) |
 
 ### Dependencies
 
