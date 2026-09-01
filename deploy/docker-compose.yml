@@ -17,10 +17,12 @@
 
 services:
   fusion-rag:
+    # The canonical Dockerfile lives at the repo ROOT (issue #55). Build from
+    # the monorepo root so `build: ../fusion-rag` overlays resolve correctly.
     build:
       context: ..
-      dockerfile: deploy/Dockerfile
-    image: fusion-rag:0.7.2
+      dockerfile: Dockerfile
+    image: fusion-rag:0.8.0rc1
     container_name: fusion-rag
     ports:
       - "11436:11436"
