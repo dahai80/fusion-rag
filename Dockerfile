@@ -29,9 +29,12 @@ ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
 
-# PyMuPDF / lancedb need libglib + libxml2 runtime libs on slim.
+# PyMuPDF / lancedb need libglib + libxml2 runtime libs on slim; git is
+# required by pip's VCS install of fusion-core (git+https://...). curl is
+# used by the HEALTHCHECK. All build-only deps (git) are kept here for
+# simplicity — the image stays under 500MB on slim.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libglib2.0-0 libxml2 libgl1 curl \
+        libglib2.0-0 libxml2 libgl1 curl git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
