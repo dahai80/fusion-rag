@@ -151,8 +151,8 @@ fusion_rag/
 
 ### Deployment (O-P1-7)
 
-Single-process service (H3): do NOT run `uvicorn --workers N` or multiple instances against one shared `stores` dir. Deploy artifacts in `deploy/`:
-- `Dockerfile` + `docker-compose.yml` — container deploy; fusion-mlx stays on the host (Apple Silicon metal), reached via `FUSION_MLX_URL`. Stores on a named volume.
+Single-process service (H3): do NOT run `uvicorn --workers N` or multiple instances against one shared `stores` dir. Deploy artifacts:
+- Root `Dockerfile` (issue #55) + `deploy/docker-compose.yml` — container deploy; `docker build -t fusion-rag .` from repo root. fusion-mlx stays on the host (Apple Silicon metal), reached via `FUSION_MLX_URL=http://host.docker.internal:11432/v1`. Stores on a named volume. No fusion-memory dependency (no UDS socket mount needed).
 - `fusion-rag.service` — systemd unit; `TimeoutStopSec=40` drains in-flight requests before SIGKILL.
 - `start.sh` — dev/single-user; nohup, logs to `logs/stdout.log` (bootstrap) + `logs/fusion-rag.log` (rotated).
 Probes: `/health` = liveness (process up), `/ready` = readiness (deps reachable, 503 when down). Snapshot a KB's stores dir only after `POST /kb/bases/{kb_id}/checkpoint` (O-P2-1).
