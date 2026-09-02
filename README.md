@@ -371,6 +371,8 @@ Modules migrated to fusion-core: `contextualizer`, `query_rewriter`, `reranker`,
 
 ## Deployment
 
+> **Enterprise / commercial deployment**: see [`DEPLOYMENT.md`](DEPLOYMENT.md) for hard constraints (single-process, single-embedding-model, external MLX dependency), the cold-start runbook, the security checklist, the performance baseline, and the commercial-release gap tracker.
+
 fusion-rag is a single-process service (see H3 in CLAUDE.md: do NOT run `--workers N` or multiple instances against one shared `stores` dir). Three supported deploy shapes:
 
 ### Docker / docker-compose
@@ -378,10 +380,10 @@ fusion-rag is a single-process service (see H3 in CLAUDE.md: do NOT run `--worke
 ```bash
 # Build from the repo root (issue #55): the canonical Dockerfile lives at the
 # repo root so the monorepo compose overlay (`build: ../fusion-rag`) resolves.
-docker build -t fusion-rag:0.8.0rc1 .
+docker build -t fusion-rag:0.8.0rc4 .
 docker run -p 11436:11436 \
     -e FUSION_MLX_URL=http://host.docker.internal:11432/v1 \
-    -v fusion-rag-stores:/root/.fusion-rag/stores fusion-rag:0.8.0rc1
+    -v fusion-rag-stores:/root/.fusion-rag/stores fusion-rag:0.8.0rc4
 curl http://127.0.0.1:11436/health   # → 200
 
 # Or via the compose file (builds from the root Dockerfile):
