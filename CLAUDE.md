@@ -58,6 +58,7 @@ fusion_rag/
 │   ├── app_state.py       # Per-app state on app.state (contextvar-bound) + resource pools
 │   ├── logging_setup.py   # O-P1-2/O-P2-2: RotatingFileHandler + JSON formatter + request-id
 │   ├── access.py          # KB action ACL (require_kb_action / require_admin over permissions/acl)
+│   ├── tenant.py          # Issue #61: gateway-origin enforcement + X-Fusion-Tenant scoping (multi-tenant isolation)
 │   └── mcp_server.py      # MCP JSON-RPC server (Claude/Cursor integration)
 ├── engine/
 │   ├── knowledge_base.py    # KnowledgeBase + KnowledgeBaseManager (CRUD, persistence via kb_meta.json)
@@ -116,6 +117,7 @@ fusion_rag/
 - **Single-process only**: directory watches (`routes_docs._watch_loop`) and the watch registry live in process memory — no cross-process coordination. Scale horizontally behind a stateless load balancer, NOT by running multiple fusion-rag processes against the same `FUSION_RAG_STORES_DIR`. A multi-process deployment would double-watch and corrupt the registry (R3/H3).
 - **Single embedding model**: the service builds ONE `EmbeddingClient` from `FUSION_RAG_EMBED` at startup; all KBs share it. A KB created with a different `embedding_model` config is rejected at ingest (400) rather than silently persisting cross-model vectors (D7). To change the model, re-create the KB or restart the service with a new `FUSION_RAG_EMBED`.
 - **Runtime config (D4)**: operator knobs (scan cap, embed cache TTL/size, RAG token budget, fetch_k multiplier) are env-driven via `RuntimeConfig` — see `runtime_config.py`. `get_runtime_config()` lazy-loads once, `reset_runtime_config()` for tests. Read-only view at `GET /kb/config`.
+- **Multi-tenant isolation (#61)**: opt-in via `FUSION_RAG_REQUIRE_GATEWAY=1`. When on, `/kb/*` requests must carry `X-Fusion-Route: gateway-decision` (the gateway origin signal) or are rejected 403, and KB list/get are scoped to the `X-Fusion-Tenant` header (the authoritative, gateway-derived tenant). A `tenant` field on `KnowledgeBase` stamps ownership at create time; existing KBs have `tenant=None` and are invisible to tenant-scoped callers. The per-KB ACL (`access.py`) is the second defense (sub-tenant path rules); tenant scoping is the first (list/get hide other tenants' KBs). Default OFF — single-tenant local-first dev sees zero behavior change. `/health`, `/ready`, `/metrics`, `/mcp`, and auth routes are exempt from the gateway-origin gate so the service stays observable when the gateway is down.
 
 ### Environment Variables
 
@@ -148,6 +150,9 @@ fusion_rag/
 | `FUSION_RAG_LOG_DIR` | `./logs` | Log file dir — RotatingFileHandler 10MB x 5 (O-P1-2) |
 | `FUSION_RAG_LOG_FORMAT` | text | Log format: `text` or `json` (one JSON obj/line for aggregators) (O-P2-2) |
 | `FUSION_RAG_SKIP_STARTUP_PROBE` | (empty) | `1` = skip boot-time fusion-mlx reachability probe (O-P2-3) |
+| `FUSION_RAG_REQUIRE_GATEWAY` | (empty) | `1` = enforce multi-tenant isolation (issue #61): reject `/kb/*` requests missing `X-Fusion-Route: gateway-decision` (403), and scope KB list/get to the `X-Fusion-Tenant` header. Default OFF — single-tenant local-first dev unaffected. |
+| `X-Fusion-Tenant` | — | Request header. Authoritative tenant (gateway-derived from key→team binding); KBs are scoped to it when `FUSION_RAG_REQUIRE_GATEWAY=1`. Ignored as a scoping key otherwise. |
+| `X-Fusion-Route` | — | Request header. `gateway-decision` = the request transited fusion-gateway; required on `/kb/*` when isolation is on. `X-Space-Id` is a non-authoritative passthrough, ignored for scoping. |
 
 ### Deployment (O-P1-7)
 

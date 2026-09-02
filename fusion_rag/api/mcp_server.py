@@ -246,11 +246,20 @@ async def _dispatch_tool(name: str, args: dict) -> Any:
         return args[key]
 
     if name == "kb_list":
-        return _get_kb_manager().list()
+        # Issue #61: scope to the request tenant when isolation is on.
+        from .tenant import tenant_scope
+
+        _tenant, _require_match = tenant_scope()
+        return _get_kb_manager().list(tenant=_tenant, require_tenant_match=_require_match)
 
     if name == "kb_create":
         kb_name = _require("name")
-        kb = _get_kb_manager().create(name=kb_name, description=args.get("description", ""))
+        # Issue #61: stamp the request's authoritative tenant on the new KB.
+        from .tenant import get_request_tenant
+
+        kb = _get_kb_manager().create(
+            name=kb_name, description=args.get("description", ""), tenant=get_request_tenant()
+        )
         return {"id": kb.id, "name": kb.config.name, "status": "created"}
 
     if name == "kb_search":

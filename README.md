@@ -349,6 +349,9 @@ Modules migrated to fusion-core: `contextualizer`, `query_rewriter`, `reranker`,
 | `FUSION_RAG_LOG_DIR` | `./logs` | Log file dir (RotatingFileHandler, 10MB x 5 files) |
 | `FUSION_RAG_LOG_FORMAT` | text | Log line format: `text` (readable) or `json` (one JSON object/line, for ELK/Loki) |
 | `FUSION_RAG_SKIP_STARTUP_PROBE` | (empty) | Set `1` to skip the boot-time fusion-mlx reachability probe (MLX comes up later) |
+| `FUSION_RAG_REQUIRE_GATEWAY` | (empty) | Set `1` to enforce multi-tenant isolation (#61): `/kb/*` requests require the `X-Fusion-Route: gateway-decision` header (403 without it), and KB access is scoped to the `X-Fusion-Tenant` header. Default off — single-tenant deployments are unaffected. |
+
+**Multi-tenant isolation (#61).** When `FUSION_RAG_REQUIRE_GATEWAY=1`, fusion-rag enforces the backend half of fusion-gateway's tenant scoping: every `/kb/*` request must transit the gateway (proven by the `X-Fusion-Route: gateway-decision` header) and carries an authoritative `X-Fusion-Tenant`. KBs are stamped with their tenant at creation and scoped on list/get — a tenant-A caller never sees tenant-B's KBs. The client-supplied `X-Space-Id` is a non-authoritative passthrough, ignored for scoping. `/health`, `/ready`, `/metrics`, `/mcp`, and auth routes stay open so the service remains observable when the gateway is down. Default off; no migration needed (existing KBs have `tenant=null`).
 
 ### Using start.sh
 

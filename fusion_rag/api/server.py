@@ -152,6 +152,15 @@ def create_app(
 
     app.middleware("http")(metrics_middleware)
 
+    # Issue #61: gateway-origin + tenant scoping. Binds the authoritative
+    # tenant (X-Fusion-Tenant) for the request and, when
+    # FUSION_RAG_REQUIRE_GATEWAY is on, rejects /kb/* requests that did not
+    # transit the gateway (missing X-Fusion-Route). Registered outermost so the
+    # tenant contextvar is set before any route handler reads it.
+    from .tenant import tenant_middleware
+
+    app.middleware("http")(tenant_middleware)
+
     app.include_router(kb_router)
     app.include_router(mcp_router)
     app.include_router(auth_router)

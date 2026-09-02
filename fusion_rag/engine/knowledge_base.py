@@ -95,6 +95,12 @@ class KnowledgeBase:
     chunk_count: int = 0
     created_at: float = 0.0
     updated_at: float = 0.0
+    # Issue #61: the authoritative tenant this KB belongs to. None = no tenant
+    # isolation (single-tenant local dev, or a KB created before tenant
+    # scoping). Set at create time from the gateway-stamped X-Fusion-Tenant.
+    # KBs with tenant=None are visible to every caller (backward compat); a
+    # caller whose request tenant is set only sees KBs whose tenant matches.
+    tenant: str | None = None
 
     def __post_init__(self):
         if not self.id:
@@ -125,6 +131,7 @@ class KnowledgeBase:
             "chunk_count": self.chunk_count,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "tenant": self.tenant,
         }
 
     @classmethod
@@ -170,6 +177,7 @@ class KnowledgeBase:
             chunk_count=data.get("chunk_count", 0),
             created_at=data.get("created_at", 0.0),
             updated_at=data.get("updated_at", 0.0),
+            tenant=data.get("tenant"),
         )
 
 
@@ -235,35 +243,84 @@ class KnowledgeBaseManager:
         chunk_strategy: str = "semantic",
         embedding_model: str = "BGE-M3",
         kb_id: str = "",
+        tenant: str | None = None,
     ) -> KnowledgeBase:
-        """Create a new knowledge base. If kb_id given and already exists, return existing (idempotent)."""
+        """Create a new knowledge base. If kb_id given and already exists, return existing (idempotent).
+
+        Issue #61: `tenant` stamps the authoritative tenant on the new KB. None
+        = no tenant isolation (single-tenant local dev). The idempotent return
+        path checks the tenant matches when scoping is in effect — a caller
+        whose tenant differs from an existing kb_id's tenant does NOT get a
+        silent cross-tenant return; it creates a fresh KB (or, if kb_id is
+        caller-supplied and collides across tenants, the validate_identifier
+        gate upstream prevents the collision in practice).
+        """
         if kb_id and kb_id in self._bases:
-            logger.info("KB '%s' already exists, returning existing", kb_id)
-            return self._bases[kb_id]
+            existing = self._bases[kb_id]
+            # Issue #61: if tenant isolation is in effect and the existing KB
+            # belongs to a different tenant, do NOT return it — that would leak
+            # another tenant's KB id/handle. Treat as not-found so the caller
+            # creates a distinct KB. The None==None case (both unscoped) and
+            # the matching-tenant case both return the existing KB.
+            if existing.tenant == tenant:
+                logger.info("KB '%s' already exists, returning existing", kb_id)
+                return existing
+            logger.warning(
+                "create: kb_id=%s exists under tenant=%r but caller tenant=%r — not returning cross-tenant",
+                kb_id,
+                existing.tenant,
+                tenant,
+            )
         config = KnowledgeBaseConfig(
             name=name,
             description=description,
             chunk_strategy=chunk_strategy,
             embedding_model=embedding_model,
         )
-        kb = KnowledgeBase(id=kb_id or "", config=config, storage_dir=str(self._storage_dir))
+        kb = KnowledgeBase(id=kb_id or "", config=config, storage_dir=str(self._storage_dir), tenant=tenant)
         self._bases[kb.id] = kb
         self._save_meta(kb)
-        logger.info("Created KB '%s' (id=%s)", name, kb.id)
+        logger.info("Created KB '%s' (id=%s, tenant=%s)", name, kb.id, tenant)
         return kb
 
-    def get(self, kb_id: str) -> KnowledgeBase:
-        """Get a knowledge base by ID."""
+    def get(self, kb_id: str, tenant: str | None = None, require_tenant_match: bool = False) -> KnowledgeBase:
+        """Get a knowledge base by ID.
+
+        Issue #61: when `tenant` is not None and `require_tenant_match` is True,
+        a KB whose tenant does not match raises KeyError (404) — a tenant-A
+        caller cannot address tenant-B's KB by id. When `tenant` is None (no
+        isolation in effect) or `require_tenant_match` is False, no filtering
+        happens (backward compat for internal/admin callers that list/get
+        without a request tenant).
+        """
         if kb_id not in self._bases:
             # P0-11: cross-worker reconciliation — re-read from disk on miss.
             reloaded = self._try_reload_from_disk(kb_id)
             if reloaded is None:
                 raise KeyError(f"Knowledge base '{kb_id}' not found")
-            return reloaded
-        return self._bases[kb_id]
+            kb = reloaded
+        else:
+            kb = self._bases[kb_id]
+        if require_tenant_match and tenant is not None and kb.tenant != tenant:
+            logger.warning(
+                "get: kb=%s tenant=%r denied to caller tenant=%r — 404",
+                kb_id,
+                kb.tenant,
+                tenant,
+            )
+            raise KeyError(f"Knowledge base '{kb_id}' not found")
+        return kb
 
-    def list(self) -> list[dict[str, Any]]:
-        """List all knowledge bases."""
+    def list(self, tenant: str | None = None, require_tenant_match: bool = False) -> list[dict[str, Any]]:
+        """List all knowledge bases.
+
+        Issue #61: when `tenant` is not None and `require_tenant_match` is True,
+        only KBs whose tenant matches are returned (plus KBs with tenant=None
+        are excluded — a tenant-scoped caller must not see unscoped legacy
+        KBs). When `tenant` is None, all KBs are returned (backward compat).
+        """
+        if require_tenant_match and tenant is not None:
+            return [kb.to_dict() for kb in self._bases.values() if kb.tenant == tenant]
         return [kb.to_dict() for kb in self._bases.values()]
 
     def delete(self, kb_id: str) -> bool:

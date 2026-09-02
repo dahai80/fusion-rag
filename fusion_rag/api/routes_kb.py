@@ -24,15 +24,23 @@ def _get_base(kb_id: str):
         validate_identifier(kb_id, field="kb_id")
     except ValueError:
         raise HTTPException(400, f"Invalid kb_id: {kb_id}")
+    # Issue #61: scope by the request's authoritative tenant when isolation is on.
+    from .tenant import tenant_scope
+
+    tenant, require_match = tenant_scope()
     try:
-        return _get_kb_manager().get(kb_id)
+        return _get_kb_manager().get(kb_id, tenant=tenant, require_tenant_match=require_match)
     except KeyError:
         raise HTTPException(404, f"Knowledge base '{kb_id}' not found")
 
 
 @router.get("/bases", dependencies=[Depends(verify_api_key)])
 async def list_knowledge_bases() -> list[dict[str, Any]]:
-    return _get_kb_manager().list()
+    # Issue #61: filter to the request tenant when isolation is on.
+    from .tenant import tenant_scope
+
+    tenant, require_match = tenant_scope()
+    return _get_kb_manager().list(tenant=tenant, require_tenant_match=require_match)
 
 
 @router.post("/bases", dependencies=[Depends(verify_api_key)])
@@ -55,13 +63,19 @@ async def create_knowledge_base(data: dict[str, Any]) -> dict[str, Any]:
     description = data.get("description", "")
     chunk_strategy = data.get("chunk_strategy", "semantic")
     embedding_model = data.get("embedding_model", "BGE-M3")
-    existing = kb_id and kb_id in _get_kb_manager()._bases
+    # Issue #61: stamp the request's authoritative tenant on the new KB so
+    # later list/get scope it to this tenant. None when isolation is off.
+    from .tenant import get_request_tenant
+
+    tenant = get_request_tenant()
+    existing = kb_id and kb_id in _get_kb_manager()._bases and _get_kb_manager()._bases[kb_id].tenant == tenant
     kb = _get_kb_manager().create(
         name=name,
         description=description,
         chunk_strategy=chunk_strategy,
         embedding_model=embedding_model,
         kb_id=kb_id,
+        tenant=tenant,
     )
     status = "exists" if existing else "created"
     return {"id": kb.id, "name": kb.config.name, "status": status}
