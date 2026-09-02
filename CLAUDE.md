@@ -97,6 +97,7 @@ fusion_rag/
     ├── store_backend.py     # StoreBackend ABC + StoreBackendFactory
     ├── local_backend.py     # LocalBackend — LanceDB + BM25 implementation
     ├── remote_backend.py    # RemoteBackend — HTTP client to a remote fusion-rag node's /store/* surface
+    ├── qdrant_backend.py    # QdrantBackend — Qdrant vector DB + per-tenant collection isolation (#66)
     ├── vector_store.py      # VectorStore — StoreBackend wrapper, hybrid search
     ├── fusion_store_backend.py  # FusionStoreBackend — fusion-store HNSW (PyO3) + in-process BM25
     └── metadata_store.py    # MetadataStore — SQLite document/chunk metadata
@@ -119,6 +120,7 @@ fusion_rag/
 - **Single embedding model**: the service builds ONE `EmbeddingClient` from `FUSION_RAG_EMBED` at startup; all KBs share it. A KB created with a different `embedding_model` config is rejected at ingest (400) rather than silently persisting cross-model vectors (D7). To change the model, re-create the KB or restart the service with a new `FUSION_RAG_EMBED`.
 - **Runtime config (D4)**: operator knobs (scan cap, embed cache TTL/size, RAG token budget, fetch_k multiplier) are env-driven via `RuntimeConfig` — see `runtime_config.py`. `get_runtime_config()` lazy-loads once, `reset_runtime_config()` for tests. Read-only view at `GET /kb/config`.
 - **Multi-tenant isolation (#61)**: opt-in via `FUSION_RAG_REQUIRE_GATEWAY=1`. When on, `/kb/*` requests must carry `X-Fusion-Route: gateway-decision` (the gateway origin signal) or are rejected 403, and KB list/get are scoped to the `X-Fusion-Tenant` header (the authoritative, gateway-derived tenant). A `tenant` field on `KnowledgeBase` stamps ownership at create time; existing KBs have `tenant=None` and are invisible to tenant-scoped callers. The per-KB ACL (`access.py`) is the second defense (sub-tenant path rules); tenant scoping is the first (list/get hide other tenants' KBs). Default OFF — single-tenant local-first dev sees zero behavior change. `/health`, `/ready`, `/metrics`, `/mcp`, and auth routes are exempt from the gateway-origin gate so the service stays observable when the gateway is down.
+- **Per-tenant vector collection isolation (#66)**: when `FUSION_RAG_STORE_BACKEND=qdrant`, `QdrantBackend` picks the Qdrant collection PER REQUEST from `tenant.get_request_tenant()` (the `X-Fusion-Tenant` contextvar). Tenant set → `tenant_id_{tenant}`; tenant None → shared `fusion_rag_kb_{kb_id}`. This is the physical data-layer isolation tier (cross-tenant vectors invisible at the collection level); the #61 KB `tenant` field is the logical tier. The backend reads the tenant lazily per call — one pooled backend serves all tenants, collection chosen per request. `chunk_id` (str) → Qdrant point id (int) via deterministic blake2b, so re-ingest overwrites. Keyword search stays in-process BM25 (Qdrant is vector-only). Default `local` backend unaffected.
 
 ### Environment Variables
 
@@ -134,11 +136,14 @@ fusion_rag/
 | `FUSION_RAG_SYSTEM_PROMPT` | (built-in) | Custom system prompt for RAG generation |
 | `FUSION_RAG_FALLBACK_URL` | (empty) | Cloud embedding fallback URL (used when local embed fails) |
 | `FUSION_RAG_FALLBACK_API_KEY` | (empty) | Cloud fallback API key |
-| `FUSION_RAG_STORE_BACKEND` | local | Vector store backend: `local` (LanceDB), `fusion-store` (HNSW via in-tree fusion-store PyO3 binding; install with `pip install -e ../fusion-store`, not on PyPI), or `remote` (HTTP client to another fusion-rag node's `/kb/bases/{kb_id}/store/*` surface — see `FUSION_RAG_REMOTE_*`) |
+| `FUSION_RAG_STORE_BACKEND` | local | Vector store backend: `local` (LanceDB), `fusion-store` (HNSW via in-tree fusion-store PyO3 binding; install with `pip install -e ../fusion-store`, not on PyPI), `qdrant` (Qdrant vector DB with per-tenant collection isolation, #66; install with `pip install 'fusion-rag[qdrant]'`, see `QDRANT_*`), or `remote` (HTTP client to another fusion-rag node's `/kb/bases/{kb_id}/store/*` surface — see `FUSION_RAG_REMOTE_*`) |
 | `FUSION_RAG_REMOTE_ENDPOINT` | (empty) | Base URL of the remote node for the `remote` backend (e.g. `http://node-b:11436`). Required when `FUSION_RAG_STORE_BACKEND=remote`. |
 | `FUSION_RAG_REMOTE_API_KEY` | (empty) | API key sent as `X-API-Key` to the remote node. Empty = no auth. |
 | `FUSION_RAG_REMOTE_KB_ID` | (derived) | KB id on the remote node. Defaults to this node's kb_id (leaf of `vector_path`). |
 | `FUSION_RAG_REMOTE_TIMEOUT` | 30 | Per-request timeout (seconds) for the `remote` backend. |
+| `QDRANT_URL` | :memory: | Qdrant endpoint for the `qdrant` backend. `:memory:` = in-process local mode (no server, dev/test); otherwise remote Qdrant URL. |
+| `QDRANT_API_KEY` | (empty) | API key for the remote Qdrant server (ignored in `:memory:` mode). |
+| `QDRANT_COLLECTION_PREFIX` | tenant_id_ | Prefix for per-tenant collection names. Tenant `T` → `{prefix}{T}`; no tenant → shared `fusion_rag_kb_{kb_id}`. |
 | `FUSION_TRAJECTORY_DIR` | ~/.fusion/trajectories/rag | D1 retrieval trajectory output dir |
 | `FUSION_RAG_LOG_LEVEL` | INFO | Server log level |
 | `FUSION_RAG_SCAN_MAX_FILES` | 1000 | Max files a single scan_directory ingests (D4) |

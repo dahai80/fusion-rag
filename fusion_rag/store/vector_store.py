@@ -18,6 +18,12 @@ try:
     StoreBackendFactory.register("fusion-store", FusionStoreBackend)
 except ImportError:
     logger.debug("FusionStoreBackend unavailable (fusion_store not installed); backend 'fusion-store' disabled")
+try:
+    from .qdrant_backend import QdrantBackend
+
+    StoreBackendFactory.register("qdrant", QdrantBackend)
+except ImportError:
+    logger.debug("QdrantBackend unavailable (qdrant-client not installed); backend 'qdrant' disabled")
 
 
 class VectorStore:
