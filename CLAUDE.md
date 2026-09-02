@@ -54,6 +54,7 @@ fusion_rag/
 │   ├── routes_admin.py    # Versions, templates, permissions, audit, sync, bench endpoints
 │   ├── routes_project.py  # Project-KB mapping endpoints (/kb/projects/*)
 │   ├── routes_auth.py     # Auth token/login endpoints
+│   ├── routes_store.py    # /kb/bases/{kb_id}/store/* — M2M vector store surface (RemoteBackend server half)
 │   ├── auth.py            # API key authentication (AuthConfig + verify_api_key)
 │   ├── app_state.py       # Per-app state on app.state (contextvar-bound) + resource pools
 │   ├── logging_setup.py   # O-P1-2/O-P2-2: RotatingFileHandler + JSON formatter + request-id
@@ -95,7 +96,7 @@ fusion_rag/
 └── store/
     ├── store_backend.py     # StoreBackend ABC + StoreBackendFactory
     ├── local_backend.py     # LocalBackend — LanceDB + BM25 implementation
-    ├── remote_backend.py    # RemoteBackend — remote storage stub (extensible)
+    ├── remote_backend.py    # RemoteBackend — HTTP client to a remote fusion-rag node's /store/* surface
     ├── vector_store.py      # VectorStore — StoreBackend wrapper, hybrid search
     ├── fusion_store_backend.py  # FusionStoreBackend — fusion-store HNSW (PyO3) + in-process BM25
     └── metadata_store.py    # MetadataStore — SQLite document/chunk metadata
@@ -133,7 +134,11 @@ fusion_rag/
 | `FUSION_RAG_SYSTEM_PROMPT` | (built-in) | Custom system prompt for RAG generation |
 | `FUSION_RAG_FALLBACK_URL` | (empty) | Cloud embedding fallback URL (used when local embed fails) |
 | `FUSION_RAG_FALLBACK_API_KEY` | (empty) | Cloud fallback API key |
-| `FUSION_RAG_STORE_BACKEND` | local | Vector store backend: `local` (LanceDB) or `fusion-store` (HNSW via in-tree fusion-store PyO3 binding; install with `pip install -e ../fusion-store`, not on PyPI) |
+| `FUSION_RAG_STORE_BACKEND` | local | Vector store backend: `local` (LanceDB), `fusion-store` (HNSW via in-tree fusion-store PyO3 binding; install with `pip install -e ../fusion-store`, not on PyPI), or `remote` (HTTP client to another fusion-rag node's `/kb/bases/{kb_id}/store/*` surface — see `FUSION_RAG_REMOTE_*`) |
+| `FUSION_RAG_REMOTE_ENDPOINT` | (empty) | Base URL of the remote node for the `remote` backend (e.g. `http://node-b:11436`). Required when `FUSION_RAG_STORE_BACKEND=remote`. |
+| `FUSION_RAG_REMOTE_API_KEY` | (empty) | API key sent as `X-API-Key` to the remote node. Empty = no auth. |
+| `FUSION_RAG_REMOTE_KB_ID` | (derived) | KB id on the remote node. Defaults to this node's kb_id (leaf of `vector_path`). |
+| `FUSION_RAG_REMOTE_TIMEOUT` | 30 | Per-request timeout (seconds) for the `remote` backend. |
 | `FUSION_TRAJECTORY_DIR` | ~/.fusion/trajectories/rag | D1 retrieval trajectory output dir |
 | `FUSION_RAG_LOG_LEVEL` | INFO | Server log level |
 | `FUSION_RAG_SCAN_MAX_FILES` | 1000 | Max files a single scan_directory ingests (D4) |
