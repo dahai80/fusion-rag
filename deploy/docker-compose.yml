@@ -22,7 +22,7 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    image: fusion-rag:0.8.0rc1
+    image: fusion-rag:0.8.0rc4
     container_name: fusion-rag
     ports:
       - "11436:11436"
