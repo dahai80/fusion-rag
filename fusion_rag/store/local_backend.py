@@ -234,8 +234,11 @@ class LocalBackend(StoreBackend):
         result = self.table.delete(f"doc_path = {safe}")
         if isinstance(result, int):
             count = result
-        elif hasattr(result, "__int__"):
+        elif hasattr(result, "__int__") and not hasattr(result, "num_deleted_rows"):
             count = int(result)
+        elif hasattr(result, "num_deleted_rows"):
+            # LanceDB >=0.10 returns DeleteResult(num_deleted_rows=N, version=V).
+            count = int(result.num_deleted_rows)
         elif hasattr(result, "rows_deleted"):
             count = result.rows_deleted
         else:

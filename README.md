@@ -305,7 +305,8 @@ Modules migrated to fusion-core: `contextualizer`, `query_rewriter`, `reranker`,
 | **Git Loader** | `connectors/git_loader.py` | Git repo clone + index |
 | **Store Backend** | `store/store_backend.py` | Abstract storage backend |
 | **Local Backend** | `store/local_backend.py` | LanceDB + BM25 implementation |
-| **Remote Backend** | `store/remote_backend.py` | Remote storage stub |
+| **Remote Backend** | `store/remote_backend.py` | HTTP client to a remote fusion-rag node's `/store/*` vector surface |
+| **Store Server** | `api/routes_store.py` | `/kb/bases/{kb_id}/store/*` M2M vector store endpoints (RemoteBackend server half) |
 | **Auth** | `api/auth.py` | API key authentication |
 | **MCP Server** | `api/mcp_server.py` | Model Context Protocol for Claude/Cursor |
 | **Embedding** | `embed/client.py` | MLX Embedding + cloud fallback |
@@ -333,7 +334,11 @@ Modules migrated to fusion-core: `contextualizer`, `query_rewriter`, `reranker`,
 | `FUSION_RAG_SYSTEM_PROMPT` | (built-in) | Custom system prompt for RAG answer generation |
 | `FUSION_RAG_FALLBACK_URL` | (empty) | Cloud embedding fallback URL |
 | `FUSION_RAG_FALLBACK_API_KEY` | (empty) | Cloud fallback API key |
-| `FUSION_RAG_STORE_BACKEND` | local | Vector store backend: `local` (LanceDB) or `fusion-store` (HNSW via the in-tree fusion-store PyO3 binding). `fusion-store` requires `pip install -e ../fusion-store` (maturin); not on PyPI |
+| `FUSION_RAG_STORE_BACKEND` | local | Vector store backend: `local` (LanceDB), `fusion-store` (HNSW via the in-tree fusion-store PyO3 binding; `pip install -e ../fusion-store`, not on PyPI), or `remote` (HTTP client to another fusion-rag node — see `FUSION_RAG_REMOTE_*`) |
+| `FUSION_RAG_REMOTE_ENDPOINT` | (empty) | Remote node base URL for the `remote` backend (e.g. `http://node-b:11436`). Required when backend is `remote`. |
+| `FUSION_RAG_REMOTE_API_KEY` | (empty) | `X-API-Key` sent to the remote node (empty = no auth). |
+| `FUSION_RAG_REMOTE_KB_ID` | (derived) | KB id on the remote node; defaults to this node's kb_id. |
+| `FUSION_RAG_REMOTE_TIMEOUT` | 30 | Per-request timeout (seconds) for the `remote` backend. |
 | `FUSION_TRAJECTORY_DIR` | ~/.fusion/trajectories/rag | RAG retrieval trajectory output dir (D1 轨迹飞轮) |
 | `FUSION_RAG_SCAN_MAX_FILES` | 1000 | Max files a single `scan_directory` ingests (D4) |
 | `FUSION_RAG_EMBED_CACHE_TTL` | 604800 | Embedding cache entry TTL in seconds (D4, default 7d) |
@@ -466,6 +471,10 @@ ruff check fusion_rag/
 - **Audit P2/P3 fixes (Task #8)** — architecture + performance hardening from the adversarial audit (`audit/fusion-rag-audit-0827.md`): `LocalBackend.close()` now actually releases the BM25 SQLite handle (was only nulling refs); `FusionStoreBackend.close()` raises on checkpoint failure instead of silently losing data; `EmbeddingCache` inherits `SqliteBase` (no more connection-per-call storm) with a batched `WHERE IN` lookup; `MetadataStore` splits read/write lock paths for concurrent reads; `BenchRunner`/`SearchTemplateManager`/`AuditLogger` adopt the `SqliteBase` write lock (no more cross-thread commit/rollback pollution); 5 admin managers pooled per-KB on `app.state` and closed at shutdown; `PermissionManager` uses `open_sqlite` (WAL + busy_timeout); `StoreBackendFactory` raises on unknown backend type instead of silently falling back to local; `RemoteBackend.count/clear` raise instead of masking a misconfigured empty KB.
 - **P3 perf** — `delete_by_doc` uses a `doc_path→int_ids` KV index (was O(n) full vector scan per delete); BM25 `_df` maintained incrementally (was full Counter rebuild per op); `LocalBackend.search` skips rows missing `_distance` with a warning (was treating missing as best match); `get_document_by_metadata` uses `json_extract` (was O(n) full-table scan); `AuditLogger` prunes on construction + streams exports via keyset pagination; `version_manager` caches record counts (60s TTL) instead of a full COUNT per snapshot.
 - **Deadlock fix** — `SqliteBase._db_lock` switched `Lock → RLock` to fix a re-entrant deadlock in `EmbeddingCache` (locks-then-calls-`_get_conn`, which also locks during lazy connection create). 243 tests green, ruff clean.
+
+## What's New — Remote Backend (full-stack)
+
+- **Remote vector store backend (#remote-store)** — `RemoteBackend` (`store/remote_backend.py`) is now a real httpx client that delegates vector add/search/keyword/delete/count/clear to a remote fusion-rag node over HTTP, instead of the old `NotImplementedError` stub. The matching server half is a new `/kb/bases/{kb_id}/store/*` surface (`api/routes_store.py`, auth via `X-API-Key`), so one fusion-rag instance can act as the vector store for another. Opt in with `FUSION_RAG_STORE_BACKEND=remote` + `FUSION_RAG_REMOTE_ENDPOINT=http://node-b:11436`; default stays `local` (zero behavior change). Metadata stays local (split-store model: the remote owns vectors/BM25, the caller owns document metadata/audit/trajectory). The `/store/*` path is exempt from the gateway-origin gate (tenant.py) since it is authenticated M2M, not a gateway-routed user request. 10 new tests (round-trip via in-process ASGI transport + config + server auth). Also fixes a pre-existing `LocalBackend.delete_by_doc` count bug (LanceDB `DeleteResult.num_deleted_rows` was never read, so deletes always reported 0).
 
 ## What's New in v0.7.0
 

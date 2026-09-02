@@ -101,19 +101,26 @@ async def tenant_middleware(request: Request, call_next):
     # Gateway-origin enforcement only applies to the KB surface (/kb/*). The
     # health/readiness/metrics/MCP/auth routes are intentionally exempt so the
     # service stays observable + manageable when the gateway is down.
-    if require_gateway_enabled() and path.startswith("/kb/"):
-        route = request.headers.get(ROUTE_HEADER, "")
-        if route != GATEWAY_ROUTE_VALUE:
-            logger.warning(
-                "reject non-gateway /kb%s request: missing/invalid %s (got %r) — 403",
-                path,
-                ROUTE_HEADER,
-                route[:32],
-            )
-            return JSONResponse(
-                status_code=403,
-                content={"detail": "Gateway-origin required for KB access"},
-            )
+    if (
+        require_gateway_enabled()
+        and path.startswith("/kb/")
+        and "/store/" not in path
+        and request.headers.get(ROUTE_HEADER, "") != GATEWAY_ROUTE_VALUE
+    ):
+        # The /store/* surface is M2M: another fusion-rag node acting as
+        # RemoteBackend authenticates via X-API-Key and carries no gateway
+        # headers. Exempt it from the gateway-origin gate so a correctly
+        # authenticated node call is not 403'd; the router still enforces
+        # verify_api_key on every /store endpoint.
+        logger.warning(
+            "reject non-gateway /kb%s request: missing/invalid %s — 403",
+            path,
+            ROUTE_HEADER,
+        )
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "Gateway-origin required for KB access"},
+        )
     return await call_next(request)
 
 
