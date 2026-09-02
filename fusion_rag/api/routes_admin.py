@@ -32,8 +32,12 @@ def _get_base(kb_id: str):
         validate_identifier(kb_id, field="kb_id")
     except ValueError:
         raise HTTPException(400, f"Invalid kb_id: {kb_id}")
+    # Issue #61: scope by the request's authoritative tenant when isolation is on.
+    from .tenant import tenant_scope
+
+    tenant, require_match = tenant_scope()
     try:
-        return _get_kb_manager().get(kb_id)
+        return _get_kb_manager().get(kb_id, tenant=tenant, require_tenant_match=require_match)
     except KeyError:
         raise HTTPException(404, f"Knowledge base '{kb_id}' not found")
 

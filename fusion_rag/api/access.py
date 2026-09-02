@@ -43,8 +43,16 @@ def _resolve_base(kb_id: str):
         validate_identifier(kb_id, field="kb_id")
     except ValueError:
         raise HTTPException(400, f"Invalid kb_id: {kb_id}")
+    # Issue #61: scope by the request's authoritative tenant when isolation is
+    # on. The ACL dependency (require_kb_action) runs BEFORE the handler's
+    # _get_base on most routes — without tenant scoping here a tenant-A caller
+    # would pass the ACL gate on tenant-B's KB. The 404 (not 403) on a
+    # cross-tenant mismatch avoids leaking the KB's existence.
+    from .tenant import tenant_scope
+
+    tenant, require_match = tenant_scope()
     try:
-        return get_kb_manager().get(kb_id)
+        return get_kb_manager().get(kb_id, tenant=tenant, require_tenant_match=require_match)
     except KeyError:
         raise HTTPException(404, f"Knowledge base '{kb_id}' not found")
 

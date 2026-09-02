@@ -42,8 +42,13 @@ def _get_base(kb_id: str):
         validate_identifier(kb_id, field="kb_id")
     except ValueError:
         raise HTTPException(400, f"Invalid kb_id: {kb_id}")
+    # Issue #61: scope by the request's authoritative tenant when isolation is
+    # on — a tenant-A caller addressing tenant-B's kb_id gets 404, not the KB.
+    from .tenant import tenant_scope
+
+    tenant, require_match = tenant_scope()
     try:
-        return _get_kb_manager().get(kb_id)
+        return _get_kb_manager().get(kb_id, tenant=tenant, require_tenant_match=require_match)
     except KeyError:
         raise HTTPException(404, f"Knowledge base '{kb_id}' not found")
 
@@ -202,7 +207,12 @@ async def status() -> dict[str, Any]:
     # if the app state isn't bound yet (startup race / direct call) degrade
     # gracefully to "not ready" rather than 503-ing the probe.
     try:
-        kb_count = _get_kb_manager().count
+        # Issue #61: report the tenant-scoped KB count when isolation is on, so
+        # a tenant's /status reflects only its own KBs, not the whole fleet.
+        from .tenant import tenant_scope
+
+        _tenant, _require = tenant_scope()
+        kb_count = len(_get_kb_manager().list(tenant=_tenant, require_tenant_match=_require))
     except HTTPException:
         kb_count = 0
     try:
