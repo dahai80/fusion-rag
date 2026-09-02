@@ -192,6 +192,14 @@ class KnowledgeBaseManager:
         self._bases: dict[str, KnowledgeBase] = {}
         self._load_all()
 
+    @property
+    def storage_dir(self) -> str:
+        # O-P2-3: public read accessor for the stores root — /ready's writability
+        # probe + server.py read it. Prior code reached for the private
+        # _storage_dir at the call site, but the probe used the missing public
+        # name and crashed the readiness check (503 on a healthy store).
+        return str(self._storage_dir)
+
     def _load_all(self) -> None:
         """Load all knowledge bases from disk."""
         for kb_dir in self._storage_dir.iterdir():

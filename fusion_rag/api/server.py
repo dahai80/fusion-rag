@@ -186,7 +186,10 @@ def create_app(
         checks: dict[str, str] = {}
         ready = True
         try:
-            embed_client.health()
+            # health() is async — await it, else the coroutine is never
+            # awaited and the check silently reports "ok" even when MLX is
+            # down (defeating the readiness probe).
+            await embed_client.health()
             checks["embedding"] = "ok"
         except Exception as e:
             ready = False
