@@ -1,6 +1,6 @@
 [project]
 name = "fusion-rag"
-version = "0.8.0rc4"
+version = "0.8.0"
 description = "Fusion-RAG — Apple Silicon native offline vector knowledge base backend"
 license = "Apache-2.0"
 requires-python = ">=3.12"
@@ -33,6 +33,11 @@ test = [
 # Enables FUSION_RAG_STORE_BACKEND=fusion-store. numpy ships with lancedb/pyarrow.
 fusion_store = [
     "numpy>=1.26.0",
+]
+# Optional: Qdrant vector backend (per-tenant collection isolation, issue #66).
+# Install via: pip install 'fusion-rag[qdrant]'. Enables FUSION_RAG_STORE_BACKEND=qdrant.
+qdrant = [
+    "qdrant-client>=1.10.0",
 ]
 
 [tool.pytest.ini_options]

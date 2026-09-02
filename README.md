@@ -306,6 +306,7 @@ Modules migrated to fusion-core: `contextualizer`, `query_rewriter`, `reranker`,
 | **Store Backend** | `store/store_backend.py` | Abstract storage backend |
 | **Local Backend** | `store/local_backend.py` | LanceDB + BM25 implementation |
 | **Remote Backend** | `store/remote_backend.py` | HTTP client to a remote fusion-rag node's `/store/*` vector surface |
+| **Qdrant Backend** | `store/qdrant_backend.py` | Qdrant vector DB with per-tenant collection isolation (#66) |
 | **Store Server** | `api/routes_store.py` | `/kb/bases/{kb_id}/store/*` M2M vector store endpoints (RemoteBackend server half) |
 | **Auth** | `api/auth.py` | API key authentication |
 | **MCP Server** | `api/mcp_server.py` | Model Context Protocol for Claude/Cursor |
@@ -334,11 +335,14 @@ Modules migrated to fusion-core: `contextualizer`, `query_rewriter`, `reranker`,
 | `FUSION_RAG_SYSTEM_PROMPT` | (built-in) | Custom system prompt for RAG answer generation |
 | `FUSION_RAG_FALLBACK_URL` | (empty) | Cloud embedding fallback URL |
 | `FUSION_RAG_FALLBACK_API_KEY` | (empty) | Cloud fallback API key |
-| `FUSION_RAG_STORE_BACKEND` | local | Vector store backend: `local` (LanceDB), `fusion-store` (HNSW via the in-tree fusion-store PyO3 binding; `pip install -e ../fusion-store`, not on PyPI), or `remote` (HTTP client to another fusion-rag node — see `FUSION_RAG_REMOTE_*`) |
+| `FUSION_RAG_STORE_BACKEND` | local | Vector store backend: `local` (LanceDB), `fusion-store` (HNSW via the in-tree fusion-store PyO3 binding; `pip install -e ../fusion-store`, not on PyPI), `qdrant` (Qdrant vector DB with per-tenant collection isolation; `pip install 'fusion-rag[qdrant]'`, see `QDRANT_*`), or `remote` (HTTP client to another fusion-rag node — see `FUSION_RAG_REMOTE_*`) |
 | `FUSION_RAG_REMOTE_ENDPOINT` | (empty) | Remote node base URL for the `remote` backend (e.g. `http://node-b:11436`). Required when backend is `remote`. |
 | `FUSION_RAG_REMOTE_API_KEY` | (empty) | `X-API-Key` sent to the remote node (empty = no auth). |
 | `FUSION_RAG_REMOTE_KB_ID` | (derived) | KB id on the remote node; defaults to this node's kb_id. |
 | `FUSION_RAG_REMOTE_TIMEOUT` | 30 | Per-request timeout (seconds) for the `remote` backend. |
+| `QDRANT_URL` | :memory: | Qdrant endpoint for the `qdrant` backend. `:memory:` = in-process local mode (no server, for dev/test); otherwise the remote Qdrant URL (e.g. `http://qdrant:6333`). |
+| `QDRANT_API_KEY` | (empty) | API key for the remote Qdrant server (ignored in `:memory:` mode). |
+| `QDRANT_COLLECTION_PREFIX` | tenant_id_ | Prefix for per-tenant collection names. A request under tenant `T` lands in `{prefix}{T}`; no tenant (single-tenant dev) uses the shared `fusion_rag_kb_{kb_id}` collection. |
 | `FUSION_TRAJECTORY_DIR` | ~/.fusion/trajectories/rag | RAG retrieval trajectory output dir (D1 轨迹飞轮) |
 | `FUSION_RAG_SCAN_MAX_FILES` | 1000 | Max files a single `scan_directory` ingests (D4) |
 | `FUSION_RAG_EMBED_CACHE_TTL` | 604800 | Embedding cache entry TTL in seconds (D4, default 7d) |
@@ -477,6 +481,7 @@ ruff check fusion_rag/
 ## What's New — Remote Backend (full-stack)
 
 - **Remote vector store backend (#remote-store)** — `RemoteBackend` (`store/remote_backend.py`) is now a real httpx client that delegates vector add/search/keyword/delete/count/clear to a remote fusion-rag node over HTTP, instead of the old `NotImplementedError` stub. The matching server half is a new `/kb/bases/{kb_id}/store/*` surface (`api/routes_store.py`, auth via `X-API-Key`), so one fusion-rag instance can act as the vector store for another. Opt in with `FUSION_RAG_STORE_BACKEND=remote` + `FUSION_RAG_REMOTE_ENDPOINT=http://node-b:11436`; default stays `local` (zero behavior change). Metadata stays local (split-store model: the remote owns vectors/BM25, the caller owns document metadata/audit/trajectory). The `/store/*` path is exempt from the gateway-origin gate (tenant.py) since it is authenticated M2M, not a gateway-routed user request. 10 new tests (round-trip via in-process ASGI transport + config + server auth). Also fixes a pre-existing `LocalBackend.delete_by_doc` count bug (LanceDB `DeleteResult.num_deleted_rows` was never read, so deletes always reported 0).
+- **Qdrant vector backend + per-tenant collection isolation (#66)** — optional `QdrantBackend` (`store/qdrant_backend.py`) sinks vector storage to Qdrant and picks the collection PER REQUEST from the authoritative tenant (`X-Fusion-Tenant`): a tenant-A upsert lands in `tenant_id_A`, a tenant-B search queries `tenant_id_B` — cross-tenant vectors are physically invisible (collection-per-tenant is the data-layer isolation tier; the KB-level `tenant` field from #61 is the logical tier). When no tenant is in effect (single-tenant dev, isolation off), a shared `fusion_rag_kb_{kb_id}` collection is used so the default path still works. `chunk_id` (str) maps to a Qdrant point id (int) via a deterministic blake2b hash, so re-ingest overwrites cleanly. Keyword search stays in-process (BM25), exactly like the other backends — Qdrant is a vector primitive. Opt in with `FUSION_RAG_STORE_BACKEND=qdrant` + `QDRANT_URL` (`:memory:` = in-process local mode, no server needed; otherwise the remote Qdrant URL); `pip install 'fusion-rag[qdrant]'`. Default stays `local` (LanceDB), so no migration. 12 tests (round-trip recall, BM25, delete, cross-tenant isolation acceptance, default-collection, dim-mismatch) run with `:memory:` — no Qdrant server needed in CI.
 
 ## What's New in v0.7.0
 
