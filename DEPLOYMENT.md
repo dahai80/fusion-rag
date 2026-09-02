@@ -123,7 +123,31 @@ Measured on Apple Silicon, monorepo venv (Python 3.14), `scripts/benchmark.py`. 
 - BM25 search is well within target (~15× headroom).
 - Cache hit rate is at threshold — production with steady-state repeat queries will exceed it; cold-cache ingest will dip below.
 - RRF fusion is negligible overhead.
-- **Not measured here**: end-to-end HTTP RPS, p99 latency under concurrent load, memory steady-state. These require a live fusion-mlx + load generator and are environment-dependent. Run `scripts/benchmark.py` on your target hardware for a local baseline; add a load test (e.g. `wrk`/`locust` against `/kb/bases/{id}/search`) for throughput numbers before declaring an SLA.
+
+### 7.1 Target-environment load test (0.8.0rc4)
+
+End-to-end HTTP throughput + latency under concurrent load, measured against a live fusion-rag (0.8.0rc4) + fusion-mlx (BGE-M3 embeddings, 1024-dim) on Apple Silicon, monorepo venv (Python 3.14). 60-doc KB, embedding cache primed by a warmup phase. Tool: `scripts/load_test.py` (httpx async, no external deps). Report artifact: `scripts/load_test_report.json`.
+
+| Phase | Concurrency | Duration | Requests | RPS | p50 | p90 | p99 | max | Errors |
+|-------|-------------|----------|----------|-----|-----|-----|-----|-----|--------|
+| Hybrid search (embed + BM25 + RRF) | 8 | 30s | 9047 | 301.6 | 23.6 ms | 37.5 ms | 69.0 ms | 155 ms | 0 |
+| Keyword search (BM25 only) | 8 | 30s | 7250 | 241.7 | 27.8 ms | 49.1 ms | 104.9 ms | 486 ms | 0 |
+
+**Reproduce**:
+```bash
+# 1. fusion-mlx serving BGE-M3 (e.g. port 11434, api key set)
+# 2. start fusion-rag pointed at it:
+FUSION_MLX_URL=http://127.0.0.1:11434/v1 FUSION_MLX_API_KEY=<key> \
+FUSION_RAG_EMBED=BAAI/bge-m3 ./start.sh start
+# 3. run the load test (seeds a KB, primes cache, fires concurrent search):
+python scripts/load_test.py --docs 60 --concurrency 8 --duration 30
+```
+
+**Reading the numbers**:
+- **0 errors across 16K+ requests** — no failures, no timeouts under sustained 8-way concurrency.
+- **Hybrid p99 = 69 ms**, well inside a sub-200ms SLA. The 155 ms max is a single embedding-cache-miss tail (first occurrence of a query); steady-state is cache-hot.
+- **Hybrid RPS (301) > keyword RPS (241)** looks inverted but is real: after warmup the query set's embeddings are cached, so hybrid is embed-cache-hit + BM25 + cheap RRF, while keyword pays jieba tokenization every call with no cache. The keyword p99 (105 ms) and 486 ms max reflect jieba first-load + GC jitter.
+- **Not yet measured**: `/ask` (LLM generation, model-bound — add `--ask` for a chat-latency phase), memory steady-state under long runs, and higher concurrency (16/32). Run with higher `--concurrency` on your target hardware before committing to a p99 SLA above 8-way.
 
 ---
 
@@ -151,8 +175,9 @@ Read-only view: `GET /kb/config`.
 |-----|--------------------|
 | Single-process constraint documented | ✅ §1.1 |
 | Cold-start window documented | ✅ §2 |
-| Performance baseline | ✅ §7 (PRD metrics; throughput pending env-specific load test) |
+| Performance baseline (PRD engine metrics) | ✅ §7 |
+| Env-specific throughput/p99 load test | ✅ §7.1 (0.8.0rc4, 8-way, 0 errors, hybrid p99 69ms) |
+| Higher concurrency + /ask + memory steady-state | ⏳ Run `--concurrency 16/32 --ask` on target hardware |
 | Version: rc → stable | ⏳ 0.8.0rc4 — still release candidate |
-| Env-specific throughput/p99/memory | ⏳ Run load test on target hardware before SLA |
 
-**To reach stable 0.8.0**: (1) run an env-specific load test, (2) confirm no rc-blocking findings in a pilot deploy, (3) bump `0.8.0rc4` → `0.8.0` + tag `v0.8.0`.
+**To reach stable 0.8.0**: (1) confirm no rc-blocking findings in a pilot deploy, (2) optionally run a higher-concurrency load test, (3) bump `0.8.0rc4` → `0.8.0` + tag `v0.8.0`.

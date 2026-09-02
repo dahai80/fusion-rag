@@ -22,6 +22,10 @@ async def _fake_embed_batch(self, texts):
     return [[0.01] * 1024 for _ in texts]
 
 
+async def _fake_health(self):
+    return True
+
+
 def _make_client(tmp_path, require_gateway=False, monkeypatch=None):
     from fusion_rag.api import auth as auth_mod
     from fusion_rag.embed.client import EmbeddingClient
@@ -34,14 +38,20 @@ def _make_client(tmp_path, require_gateway=False, monkeypatch=None):
     auth_mod._auth_backend = auth_mod.ApiKeyBackend(admin_key="admin-key", db_path=str(tmp_path / "auth.db"))
     storage_dir = tempfile.mkdtemp()
     app = create_app(kb_storage_dir=storage_dir)
+    # /ready now awaits EmbeddingClient.health() (fixed: was never awaited,
+    # silently reported embedding ok). Mock it so /ready doesn't hit a live
+    # fusion-mlx from the test process.
     patcher = patch.object(EmbeddingClient, "embed_batch", _fake_embed_batch)
     patcher.start()
+    health_patcher = patch.object(EmbeddingClient, "health", _fake_health)
+    health_patcher.start()
     tc_cm = TestClient(app)
     # Enter as context manager so the lifespan startup runs and app.state is
     # bound (init_app_state populates kb_manager/embed_client on app.state).
     tc_cm.__enter__()
     tc_cm.kb_storage_dir = storage_dir
     tc_cm._patcher = patcher
+    tc_cm._health_patcher = health_patcher
     return tc_cm
 
 
@@ -51,6 +61,8 @@ def _teardown(tc):
     with contextlib.suppress(Exception):
         tc.__exit__(None, None, None)
     tc._patcher.stop()
+    with contextlib.suppress(Exception):
+        tc._health_patcher.stop()
     from fusion_rag.api import auth as auth_mod
 
     auth_mod._auth_backend = None

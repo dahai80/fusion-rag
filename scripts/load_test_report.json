@@ -1,0 +1,42 @@
+{
+  "base_url": "http://127.0.0.1:11436",
+  "kb_id": "loadtest-kb",
+  "docs": 60,
+  "concurrency": 8,
+  "duration_s": 30.0,
+  "timestamp": 1788318885,
+  "phases": [
+    {
+      "phase": "hybrid_search",
+      "mode": "hybrid",
+      "concurrency": 8,
+      "duration_s": 30.0,
+      "requests": 9047,
+      "rps": 301.6,
+      "errors": 0,
+      "latency_ms": {
+        "min": 11.59,
+        "p50": 23.59,
+        "p90": 37.47,
+        "p99": 68.98,
+        "max": 155.06
+      }
+    },
+    {
+      "phase": "keyword_search",
+      "mode": "keyword",
+      "concurrency": 8,
+      "duration_s": 30.0,
+      "requests": 7250,
+      "rps": 241.7,
+      "errors": 0,
+      "latency_ms": {
+        "min": 9.81,
+        "p50": 27.78,
+        "p90": 49.08,
+        "p99": 104.92,
+        "max": 486.0
+      }
+    }
+  ]
+}

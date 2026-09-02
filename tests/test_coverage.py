@@ -16,9 +16,21 @@ from fusion_rag.embed.client import EmbeddingClient
 
 @pytest.fixture
 def client():
-    """Create a test client with mocked KB manager and embed client."""
+    """Create a test client with mocked KB manager and embed client.
+
+    The embed client is real (built by create_app) but its network-bound
+    methods are patched so /status + /ready never reach a live fusion-mlx —
+    otherwise test_status hangs on EmbeddingClient.health() when MLX is
+    reachable on a non-default port or absent. The docstring previously
+    claimed "mocked embed client" but nothing was mocked; this makes it true.
+    """
     app = create_app(kb_storage_dir=tempfile.mkdtemp())
-    with TestClient(app) as tc:
+    with (
+        TestClient(app) as tc,
+        patch.object(EmbeddingClient, "health", new_callable=AsyncMock, return_value=True),
+        patch.object(EmbeddingClient, "embed_batch", new_callable=AsyncMock,
+                     return_value=[[0.01] * 1024]),
+    ):
         yield tc
 
 
