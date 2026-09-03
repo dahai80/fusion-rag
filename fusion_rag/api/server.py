@@ -122,6 +122,14 @@ def create_app(
                 await close_all()
             except Exception as e:
                 logger.warning("lifespan: fusion_core close_all failed: %s", e)
+            # Issue #68: drop the identity client cache. The pooled httpx client
+            # is closed by close_all() above; this just clears the verify cache.
+            try:
+                from .identity import close_identity_client
+
+                await close_identity_client(app)
+            except Exception as e:
+                logger.warning("lifespan: identity client close failed: %s", e)
 
     app = FastAPI(
         title="Fusion-RAG",
@@ -129,6 +137,18 @@ def create_app(
         version=_pkg_version(),
         lifespan=lifespan,
     )
+
+    # Issue #68: fusion-identity integration. When FUSION_RAG_REQUIRE_IDENTITY=1,
+    # build the identity client up front and stash it on app.state so the tenant
+    # middleware can call /verify authoritatively. OFF by default (None).
+    from .identity import IdentityClient, identity_enabled, identity_url
+
+    if identity_enabled():
+        app.state.identity_client = IdentityClient()
+        logger.info("identity integration ON: verifying JWTs via %s", identity_url())
+    else:
+        app.state.identity_client = None
+        logger.debug("identity integration OFF (FUSION_RAG_REQUIRE_IDENTITY unset)")
 
     # 硬伤1: bind each request's app.state to a contextvar so the no-arg
     # accessors (get_kb_manager / get_embed_client / ...) resolve the current
