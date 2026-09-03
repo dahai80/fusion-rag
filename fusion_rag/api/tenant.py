@@ -35,7 +35,22 @@ from contextvars import ContextVar
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from .identity import identity_enabled
+
 logger = logging.getLogger(__name__)
+
+
+def _extract_bearer(raw: str | None) -> str | None:
+    """Pull a bare JWT out of an `Authorization: Bearer <token>` header."""
+    if not raw:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    low = raw.lower()
+    if low.startswith("bearer "):
+        return raw[7:].strip() or None
+    return raw or None
 
 # Authoritative tenant for the current request. None = no tenant isolation
 # (single-tenant local dev, or the gateway header was absent and isolation is
@@ -84,18 +99,100 @@ def _normalize_tenant(raw: str | None) -> str | None:
     return raw
 
 
-async def tenant_middleware(request: Request, call_next):
-    """Bind the authoritative tenant + enforce gateway-origin on /kb/*.
+def _is_exempt(path: str) -> bool:
+    """Paths that must never be gated by tenant resolution.
 
-    Registered as HTTP middleware. Reads X-Fusion-Tenant (authoritative) and
-    X-Fusion-Route (origin signal). When FUSION_RAG_REQUIRE_GATEWAY is on, a
-    /kb/* request without X-Fusion-Route: gateway-decision is rejected 403 —
-    direct-port access cannot bypass the gateway. /health, /ready, /metrics,
-    /mcp and /v1 auth routes are exempt (liveness/readiness/scrape/MCP must
-    not be gated behind the gateway, or a down gateway makes the service
-    appear down to its own orchestrator).
+    /health, /ready (liveness/readiness), /metrics (scrape), /mcp (MCP), and the
+    /v1 + /auth login/token surfaces (they mint the tokens, cannot require one),
+    plus the dynamic /store/* M2M surface (node-to-node via X-API-Key, no user
+    JWT). A down gateway/identity must not make the service appear down to its
+    own orchestrator.
+    """
+    if path in ("/health", "/ready", "/metrics", "/mcp"):
+        return True
+    if path.startswith("/v1") or path.startswith("/auth"):
+        return True
+    return "/store/" in path
+
+
+async def tenant_middleware(request: Request, call_next):
+    """Bind the authoritative tenant + enforce gateway/identity origin on /kb/*.
+
+    Two tenant-resolution modes:
+
+    1. Identity mode (FUSION_RAG_REQUIRE_IDENTITY=1, issue #68): the tenant is
+       resolved AUTHORITATIVELY from a fusion-identity JWT. The caller's
+       `Authorization: Bearer <jwt>` is verified via the identity service
+       (revocation + tenant-status enforced there); the JWT `tid` is the
+       authoritative tenant. X-Fusion-Tenant is DEMOTED to defense-in-depth:
+       if present it MUST equal the JWT `tid` (mismatch => 401, logged as a
+       header-forgery attempt). A request with no/invalid/revoked JWT is 401.
+       This retires the blind-trust path — the header can no longer override
+       the JWT. The resolved tenant feeds the SAME `_request_tenant` contextvar
+       so #61/#66 scoping is unchanged.
+
+    2. Gateway mode (FUSION_RAG_REQUIRE_GATEWAY=1, issue #61, default path): the
+       tenant is the gateway-stamped X-Fusion-Tenant (the gateway derived it
+       from the api_key's key->team binding). /kb/* without X-Fusion-Route:
+       gateway-decision is rejected 403. This is now the defense-in-depth tier
+       beneath identity; when identity is ON it is skipped (identity is the
+       primary authority).
+
+    Both modes OFF (default) => single-tenant local-first dev, zero change.
+
+    Exempt paths (no resolution): /health, /ready, /metrics, /mcp, /v1, /auth,
+    and the dynamic /store/* M2M surface.
     """
     path = request.url.path
+
+    # --- Identity mode (#68): authoritative JWT resolution -----------------
+    if identity_enabled() and path.startswith("/kb/") and not _is_exempt(path):
+        client = getattr(request.app.state, "identity_client", None)
+        if client is None:
+            # Integration on but no client wired — operator misconfig. Fail-closed.
+            logger.error("identity mode on but identity_client not wired on app.state — 401")
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Identity resolution unavailable (service misconfigured)"},
+            )
+        jwt = _extract_bearer(request.headers.get("Authorization"))
+        if not jwt:
+            logger.info("identity mode: /kb%s request without Bearer JWT — 401", path)
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Bearer JWT required for KB access"},
+            )
+        claims = await client.verify(jwt)
+        if claims is None:
+            logger.info("identity mode: /kb%s JWT rejected/revoked or identity unreachable — 401", path)
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Invalid or revoked token"},
+            )
+        jwt_tenant = _normalize_tenant(claims.get("tid"))
+        if jwt_tenant is None:
+            logger.warning("identity mode: JWT resolved but tid missing/invalid — 401")
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Token has no valid tenant"},
+            )
+        # Defense-in-depth: X-Fusion-Tenant, if present, must agree with the JWT.
+        header_tenant = _normalize_tenant(request.headers.get(TENANT_HEADER))
+        if header_tenant is not None and header_tenant != jwt_tenant:
+            logger.warning(
+                "identity mode: X-Fusion-Tenant=%s != JWT tid=%s — forgery attempt, 401",
+                header_tenant,
+                jwt_tenant,
+            )
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Tenant header does not match token"},
+            )
+        _request_tenant.set(jwt_tenant)
+        logger.debug("identity mode: resolved tenant=%s for /kb%s", jwt_tenant, path)
+        return await call_next(request)
+
+    # --- Gateway mode (#61, unchanged when identity off) -------------------
     tenant = _normalize_tenant(request.headers.get(TENANT_HEADER))
     _request_tenant.set(tenant)
     # Gateway-origin enforcement only applies to the KB surface (/kb/*). The
@@ -138,14 +235,17 @@ def get_request_tenant() -> str | None:
 def tenant_scope() -> tuple[str | None, bool]:
     """Return (tenant, require_tenant_match) for KB list/get scoping.
 
-    Scoping engages only when FUSION_RAG_REQUIRE_GATEWAY is on (isolation mode)
-    AND the request carried an authoritative X-Fusion-Tenant. Otherwise
-    (None, False) — no filtering, zero behavior change for single-tenant dev.
-    In isolation mode every /kb/* request that passed the gateway-origin gate
-    has a tenant; a direct-port caller was already 403'd by the middleware, so
-    reaching here with a tenant means the gateway derived it authoritatively.
+    Scoping engages when EITHER isolation mode is on:
+    - Identity mode (#68, FUSION_RAG_REQUIRE_IDENTITY=1): the tenant was resolved
+      from the JWT `tid` by the middleware; every /kb/* request that reached a
+      route handler has a valid JWT-resolved tenant (else it was 401'd upstream).
+    - Gateway mode (#61, FUSION_RAG_REQUIRE_GATEWAY=1): the tenant is the
+      gateway-stamped X-Fusion-Tenant; a direct-port caller was 403'd upstream.
+
+    Otherwise (both off, default) (None, False) — no filtering, zero change for
+    single-tenant dev.
     """
-    if not require_gateway_enabled():
+    if not (identity_enabled() or require_gateway_enabled()):
         return None, False
     tenant = get_request_tenant()
     if tenant is None:
