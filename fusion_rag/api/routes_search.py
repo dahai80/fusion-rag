@@ -131,7 +131,7 @@ async def search(
     _start = time.time()
 
     if rewrite_mode:
-        rewriter = QueryRewriter(enabled=True)
+        rewriter = QueryRewriter(mlx_url=embed.base_url, enabled=True, api_key=embed.api_key)
         try:
             rewritten = await rewriter.rewrite(query, mode=rewrite_mode)
         except LLMUnavailable as e:
@@ -298,7 +298,7 @@ async def ask(
     rewrite_mode = data.get("rewrite_mode")
     history = data.get("history")
     if rewrite_mode or history:
-        rewriter = QueryRewriter(enabled=True)
+        rewriter = QueryRewriter(mlx_url=embed.base_url, enabled=True, api_key=embed.api_key)
         mode = rewrite_mode or ("condense" if history else "hyde")
         try:
             rewritten = await rewriter.rewrite(question, history=history, mode=mode)

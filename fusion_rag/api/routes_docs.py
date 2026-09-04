@@ -332,7 +332,9 @@ async def _index_document(kb_id: str, file_path: str, contextualize: bool = True
     if not chunks:
         return {"error": "no chunks produced"}
 
-    contextualizer = Contextualizer(enabled=contextualize, api_key=embed.api_key)
+    contextualizer = Contextualizer(
+        mlx_url=embed.base_url, enabled=contextualize, api_key=embed.api_key
+    )
     chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
     # L1: contextualizer raises LLMUnavailable only when EVERY chunk fails. On
     # total LLM failure, contextualize=True silently degraded retrieval before.
@@ -516,7 +518,9 @@ async def ingest_content(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     contextualize = data.get("contextualize", True)
     _check_embed_model(kb_id)
     embed = _get_embed_client()
-    contextualizer = Contextualizer(enabled=contextualize, api_key=embed.api_key)
+    contextualizer = Contextualizer(
+        mlx_url=embed.base_url, enabled=contextualize, api_key=embed.api_key
+    )
     chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
     # F-P2-1: ingest_content was the ONE ingest path that did NOT wrap
     # contextualize in try/except LLMUnavailable — a total LLM failure here
@@ -653,7 +657,9 @@ async def replace_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dic
     contextualize = data.get("contextualize", True)
     _check_embed_model(kb_id)
     embed = _get_embed_client()
-    contextualizer = Contextualizer(enabled=contextualize, api_key=embed.api_key)
+    contextualizer = Contextualizer(
+        mlx_url=embed.base_url, enabled=contextualize, api_key=embed.api_key
+    )
     chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
     try:
         chunk_dicts = await contextualizer.contextualize(chunk_dicts, result.content)
@@ -779,7 +785,9 @@ async def scan_directory(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     vec_store = _get_vector_store(kb_id)
     meta_store = _get_meta_store(kb_id)
     contextualize = data.get("contextualize", True)
-    contextualizer = Contextualizer(enabled=contextualize, api_key=embed.api_key)
+    contextualizer = Contextualizer(
+        mlx_url=embed.base_url, enabled=contextualize, api_key=embed.api_key
+    )
 
     total_chunks = 0
     total_chars = 0

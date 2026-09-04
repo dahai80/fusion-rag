@@ -9,7 +9,7 @@ Local vector knowledge base service for the Fusion-MLX ecosystem — 100% offlin
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/Tests-243-success.svg)](tests/)
-[![Version](https://img.shields.io/badge/Version-0.8.2-blue.svg)]()
+[![Version](https://img.shields.io/badge/Version-0.8.3-blue.svg)]()
 
 [Quick Start](#quick-start) · [API Reference](#api-reference) · [Architecture](#architecture) · [Documentation](docs/)
 
@@ -476,6 +476,10 @@ ruff check fusion_rag/
 ```
 
 ---
+
+## What's New in v0.8.3
+
+- **LLM backend URL + auth propagation (issue #72)** — every LLM-calling engine (`Contextualizer`, `QueryRewriter`, `Reranker`) now honors the same `FUSION_MLX_URL` / `FUSION_MLX_API_KEY` as the `EmbeddingClient` instead of hardcoding the gateway URL `http://127.0.0.1:11432/v1` and sending no auth header. A non-default backend (e.g. fusion-mlx directly at `:11434` with a different key) no longer 401s on every chat-completions / context-generation call. The route layer passes `embed.base_url` + `embed.api_key` into each engine it constructs; `start.sh` now activates the monorepo `.venv` before launching (was bare `python3`, failing with `ModuleNotFoundError: No module named 'fusion_core'` outside an activated venv). 4 new regression tests lock the URL + `Authorization` header wiring.
 
 ## What's New in v0.8.2
 

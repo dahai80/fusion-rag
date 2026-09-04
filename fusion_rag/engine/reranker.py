@@ -29,10 +29,22 @@ class Reranker:
     Uses batch LLM scoring — single API call for all documents.
     """
 
-    def __init__(self, mlx_url: str = "http://127.0.0.1:11432/v1", model: str = "qwen3.5-9b", batch_size: int = 20):
+    def __init__(
+        self,
+        mlx_url: str = "http://127.0.0.1:11432/v1",
+        model: str = "qwen3.5-9b",
+        batch_size: int = 20,
+        api_key: str = "",
+    ):
         self.mlx_url = mlx_url.rstrip("/")
         self.model = model
         self.batch_size = batch_size
+        self.api_key = api_key
+
+    def _auth_headers(self) -> dict[str, str]:
+        if self.api_key:
+            return {"Authorization": f"Bearer {self.api_key}"}
+        return {}
 
     async def _get_client(self) -> httpx.AsyncClient:
         # A8: pool is the single source of truth (dedup + is_closed check).
@@ -99,6 +111,7 @@ class Reranker:
                         "max_tokens": 200,
                         "temperature": 0.0,
                     },
+                    headers=self._auth_headers(),
                 ),
                 retries=2,
                 total_deadline=15.0,

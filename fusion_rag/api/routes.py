@@ -118,16 +118,19 @@ async def _do_rerank(
     cfg = get_runtime_config()
     backend = (backend or cfg.rerank_backend or "llm").strip().lower()
     model = model or cfg.rerank_model
-    mlx_base = _get_embed_client().base_url.replace("/v1", "")
+    embed = _get_embed_client()
+    mlx_base = embed.base_url.replace("/v1", "")
     # Issue #70: cross_encoder backend uses fusion-mlx POST /v1/rerank (real
     # cross-encoder, e.g. bge-reranker-v2-m3). Falls back to the legacy
     # LLM-prompt Reranker on LLMUnavailable, then to original order — so a
     # missing/unreachable rerank model degrades, never crashes.
+    # Issue #72: pass embed.api_key so rerank honors the same auth as the
+    # embedding/LLM backend — a non-default gateway URL+key no longer 401s.
     if backend == "cross_encoder":
         from ..engine.cross_encoder_reranker import CrossEncoderReranker
 
         try:
-            reranker = CrossEncoderReranker(mlx_base_url=mlx_base, model=model)
+            reranker = CrossEncoderReranker(mlx_base_url=mlx_base, model=model, api_key=embed.api_key)
             return await reranker.rerank(query, results, top_k=top_k)
         except LLMUnavailable as e:
             logger.warning(
@@ -137,7 +140,7 @@ async def _do_rerank(
             )
             # Fall through to the LLM-prompt reranker as a second-tier fallback.
     try:
-        reranker = Reranker(mlx_url=mlx_base)
+        reranker = Reranker(mlx_url=mlx_base, api_key=embed.api_key)
         return await reranker.rerank(query, results, top_k=top_k)
     except LLMUnavailable as e:
         # L1: rerank is an enhancement. On LLM failure fall back to original

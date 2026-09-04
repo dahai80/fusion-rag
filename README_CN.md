@@ -183,6 +183,14 @@ Fusion-RAG 通过 `/kb/*` 提供 REST API。
 
 ---
 
+## 更新日志
+
+### v0.8.3
+
+- **LLM 后端 URL + 鉴权透传（issue #72）** — 所有调用 LLM 的引擎（`Contextualizer`、`QueryRewriter`、`Reranker`）现在与 `EmbeddingClient` 使用相同的 `FUSION_MLX_URL` / `FUSION_MLX_API_KEY`，不再硬编码网关地址 `http://127.0.0.1:11432/v1` 且不带鉴权头。非默认后端（如直连 fusion-mlx `:11434`、使用不同 key）不再在每次 chat-completions / 上下文生成调用上 401。路由层把 `embed.base_url` + `embed.api_key` 传入它构造的每个引擎；`start.sh` 现在启动前激活 monorepo `.venv`（原来用裸 `python3`，未激活 venv 时报 `ModuleNotFoundError: No module named 'fusion_core'`）。新增 4 个回归测试锁定 URL + `Authorization` 头的接线。
+
+---
+
 ## 配置
 
 ### 环境变量
