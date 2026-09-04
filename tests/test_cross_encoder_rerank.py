@@ -165,6 +165,7 @@ class TestDoRerankBackend:
 
         class FakeEmbed:
             base_url = "http://127.0.0.1:11432/v1"
+            api_key = ""
 
         monkeypatch.setattr(routes_mod, "_get_embed_client", lambda: FakeEmbed())
         called = {}
@@ -192,6 +193,7 @@ class TestDoRerankBackend:
 
         class FakeEmbed:
             base_url = "http://127.0.0.1:11432/v1"
+            api_key = ""
 
         monkeypatch.setattr(routes_mod, "_get_embed_client", lambda: FakeEmbed())
 

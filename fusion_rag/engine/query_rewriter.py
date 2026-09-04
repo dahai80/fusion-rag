@@ -43,10 +43,22 @@ CONDENSE_PROMPT = (
 class QueryRewriter:
     """Rewrites queries using LLM for better retrieval."""
 
-    def __init__(self, mlx_url: str = "http://127.0.0.1:11432/v1", model: str = "qwen3.5-9b", enabled: bool = True):
+    def __init__(
+        self,
+        mlx_url: str = "http://127.0.0.1:11432/v1",
+        model: str = "qwen3.5-9b",
+        enabled: bool = True,
+        api_key: str = "",
+    ):
         self.mlx_url = mlx_url.rstrip("/")
         self.model = model
         self.enabled = enabled
+        self.api_key = api_key
+
+    def _auth_headers(self) -> dict[str, str]:
+        if self.api_key:
+            return {"Authorization": f"Bearer {self.api_key}"}
+        return {}
 
     async def _get_client(self) -> httpx.AsyncClient:
         # A8: get_async_client is the single source of truth — it dedups by
@@ -95,6 +107,7 @@ class QueryRewriter:
                     "max_tokens": 300,
                     "temperature": 0.3,
                 },
+                headers=self._auth_headers(),
             ),
             retries=2,
         )
@@ -118,6 +131,7 @@ class QueryRewriter:
                     "max_tokens": 200,
                     "temperature": 0.5,
                 },
+                headers=self._auth_headers(),
             ),
             retries=2,
         )
@@ -146,6 +160,7 @@ class QueryRewriter:
                     "max_tokens": 200,
                     "temperature": 0.0,
                 },
+                headers=self._auth_headers(),
             ),
             retries=2,
         )

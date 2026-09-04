@@ -7,6 +7,26 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Issue #72: activate the monorepo venv before launching — bare python3 outside
+# an activated venv fails with ModuleNotFoundError: No module named 'fusion_core'.
+# The monorepo venv lives at ../.venv (~/fusion/.venv); fall back to finding it
+# up the tree. If no venv is found, warn but keep going (operator may have their
+# own env).
+_VENV=""
+for _candidate in "$SCRIPT_DIR/../.venv" "$HOME/fusion/.venv"; do
+    if [ -f "$_candidate/bin/activate" ]; then
+        _VENV="$_candidate"
+        break
+    fi
+done
+if [ -n "$_VENV" ]; then
+    # shellcheck disable=SC1091
+    source "$_VENV/bin/activate"
+    echo "Activated venv: $_VENV"
+else
+    echo "WARNING: no monorepo .venv found — relying on current PATH python3 (may miss fusion_core)" >&2
+fi
+
 # Config
 PORT=${FUSION_RAG_PORT:-11436}
 HOST=${FUSION_RAG_HOST:-"127.0.0.1"}
