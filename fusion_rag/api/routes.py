@@ -103,11 +103,40 @@ def _apply_search_filters(
     return filtered
 
 
-async def _do_rerank(query: str, results: list[dict], top_k: int) -> list[dict]:
+async def _do_rerank(
+    query: str,
+    results: list[dict],
+    top_k: int,
+    *,
+    backend: str = "",
+    model: str = "",
+) -> list[dict]:
     if not results:
         return results
+    from ..engine.runtime_config import get_runtime_config
+
+    cfg = get_runtime_config()
+    backend = (backend or cfg.rerank_backend or "llm").strip().lower()
+    model = model or cfg.rerank_model
+    mlx_base = _get_embed_client().base_url.replace("/v1", "")
+    # Issue #70: cross_encoder backend uses fusion-mlx POST /v1/rerank (real
+    # cross-encoder, e.g. bge-reranker-v2-m3). Falls back to the legacy
+    # LLM-prompt Reranker on LLMUnavailable, then to original order — so a
+    # missing/unreachable rerank model degrades, never crashes.
+    if backend == "cross_encoder":
+        from ..engine.cross_encoder_reranker import CrossEncoderReranker
+
+        try:
+            reranker = CrossEncoderReranker(mlx_base_url=mlx_base, model=model)
+            return await reranker.rerank(query, results, top_k=top_k)
+        except LLMUnavailable as e:
+            logger.warning(
+                "cross-encoder rerank unavailable (model=%s), falling back to llm rerank: %s",
+                model or "(default)",
+                e,
+            )
+            # Fall through to the LLM-prompt reranker as a second-tier fallback.
     try:
-        mlx_base = _get_embed_client().base_url.replace("/v1", "")
         reranker = Reranker(mlx_url=mlx_base)
         return await reranker.rerank(query, results, top_k=top_k)
     except LLMUnavailable as e:

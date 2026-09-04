@@ -107,8 +107,17 @@ Fusion-RAG 通过 `/kb/*` 提供 REST API。
 
 | 方法 | 端点 | 说明 |
 |------|------|------|
-| POST | `/kb/bases/{id}/search` | 语义向量检索 |
-| POST | `/kb/bases/{id}/ask` | RAG 问答（含来源引用） |
+| POST | `/kb/bases/{id}/search` | 语义向量检索（支持混合检索、重排、模板） |
+| POST | `/kb/bases/{id}/ask` | RAG 问答（含来源引用、混合检索、重排） |
+
+#### 搜索参数（#70 重排相关）
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `rerank` | false | 启用重排（设置了 `FUSION_RAG_RERANK_MODEL` 时默认开启） |
+| `rerank_backend` | 取自环境变量 | 重排阶段：`cross_encoder`（fusion-mlx `/v1/rerank`，真实交叉编码器如 `bge-reranker-v2-m3`）或 `llm`（传统提示词打分） |
+| `rerank_model` | 取自环境变量 | 交叉编码器模型名（覆盖 `FUSION_RAG_RERANK_MODEL`） |
+| `rerank_top_n` | 20 | 送入重排的候选池大小，重排后再截断到 `top_k`（提升召回） |
 
 ### 系统
 
@@ -186,6 +195,9 @@ Fusion-RAG 通过 `/kb/*` 提供 REST API。
 | `FUSION_RAG_EMBED` | BGE-M3 | Embedding 模型 |
 | `FUSION_RAG_API_KEY` | (空) | API key 鉴权（空=关闭） |
 | `FUSION_RAG_AUTH_BACKEND` | apikey | 鉴权后端：`apikey` 或 `none` |
+| `FUSION_RAG_RERANK_BACKEND` | llm | 重排阶段：`llm`（传统 LLM 提示词打分 `Reranker`）或 `cross_encoder`（真实交叉编码器，经 fusion-mlx `POST /v1/rerank`，如 `bge-reranker-v2-m3`）。issue #70 |
+| `FUSION_RAG_RERANK_MODEL` | (空) | `cross_encoder` 后端的模型名。设置后 `/search`、`/ask` 默认 `rerank=true`（有模型即默认开启）；留空则除非调用方显式传 `rerank=true` 否则关闭 |
+| `FUSION_RAG_RERANK_TOP_N` | 20 | 送入重排的候选池大小，重排后再截断到 `top_k`（在不改变返回数量的前提下提升召回，issue #70） |
 | `FUSION_RAG_INGEST_ROOTS` | (空) | 文件入库/扫描/监听的允许根目录（冒号分隔）。空=不限制（本地优先）；设置后限制读取范围，阻断路径遍历/LFI |
 
 ### 使用 start.sh

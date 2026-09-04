@@ -88,7 +88,14 @@ async def search(
     threshold = data.get("threshold", kb.config.similarity_threshold)
     folder_prefix = data.get("folder_prefix")
     use_hybrid = data.get("hybrid", False)
-    use_rerank = data.get("rerank", False)
+    # Issue #70: rerank default-ON when a rerank model is configured (env
+    # FUSION_RAG_RERANK_MODEL), else off — preserves the prior default for
+    # callers that don't opt in (backward compat, acceptance 4).
+    _cfg = get_runtime_config()
+    use_rerank = data.get("rerank", bool(_cfg.rerank_model))
+    rerank_top_n = data.get("rerank_top_n", _cfg.rerank_top_n)
+    rerank_model = data.get("rerank_model", _cfg.rerank_model)
+    rerank_backend = data.get("rerank_backend", _cfg.rerank_backend)
     hybrid_alpha = data.get("hybrid_alpha", 0.7)
     hybrid_method = data.get("hybrid_method", "rrf")
     metadata_filter = data.get("filter")
@@ -192,7 +199,9 @@ async def search(
             if doc_type_filter:
                 results = [r for r in results if r.get("doc_type", "") in doc_type_filter]
             if use_rerank:
-                results = await _do_rerank(query, results, top_k)
+                results = await _do_rerank(
+                    query, results, top_k, backend=rerank_backend, model=rerank_model
+                )
             await _audit_and_trajectory_async(kb_id, query, "search", results, (time.time() - _start) * 1000)
             return results
         query = rewritten
@@ -200,6 +209,12 @@ async def search(
     query_vector = await embed.embed(query)
     if not query_vector or all(v == 0.0 for v in query_vector):
         raise HTTPException(500, "Embedding failed")
+
+    # Issue #70: when reranking, fetch a wider candidate pool (rerank_top_n)
+    # so the cross-encoder re-scores more than the final top_k — recall lift
+    # without changing the returned count. The pool is truncated to top_k
+    # after rerank.
+    pool_k = max(rerank_top_n, top_k) if use_rerank else top_k
 
     if use_hybrid:
         hs = HybridSearch(vec_store, alpha=hybrid_alpha, method=hybrid_method)
@@ -209,7 +224,7 @@ async def search(
         results = await hs.search(
             query_vector,
             query,
-            top_k=top_k,
+            top_k=pool_k,
             threshold=threshold,
             filters=filters if filters else None,
         )
@@ -221,18 +236,22 @@ async def search(
         # doc_type_filter in the over-fetch trigger — it is also a post-fetch
         # client-side filter, so widening fetch_k keeps top_k intact after it.
         fetch_mult = get_runtime_config().search_fetch_k_multiplier
-        fetch_k = top_k * fetch_mult if (folder_prefix or metadata_filter or doc_type_filter) else top_k
+        fetch_k = pool_k
+        if folder_prefix or metadata_filter or doc_type_filter:
+            fetch_k = max(fetch_k, top_k * fetch_mult)
         # P8/硬伤8: sync LanceDB search + per-row json.loads filter block the
         # event loop if run inline in an async handler.
         results = await run_in_threadpool(vec_store.search, query_vector, top_k=fetch_k, threshold=threshold)
         results = await run_in_threadpool(_apply_search_filters, results, folder_prefix, metadata_filter)
-        results = results[:top_k]
+        results = results[:pool_k]
 
     if doc_type_filter:
         results = [r for r in results if r.get("doc_type", "") in doc_type_filter]
 
     if use_rerank:
-        results = await _do_rerank(query, results, top_k)
+        results = await _do_rerank(
+            query, results, top_k, backend=rerank_backend, model=rerank_model
+        )
 
     await _audit_and_trajectory_async(kb_id, query, "search", results, (time.time() - _start) * 1000)
     return results
@@ -264,7 +283,11 @@ async def ask(
     temperature = data.get("temperature", 0.3)
     system_prompt = data.get("system_prompt", "")
     use_hybrid = data.get("hybrid", False)
-    use_rerank = data.get("rerank", False)
+    _cfg = get_runtime_config()
+    use_rerank = data.get("rerank", bool(_cfg.rerank_model))
+    rerank_top_n = data.get("rerank_top_n", _cfg.rerank_top_n)
+    rerank_model = data.get("rerank_model", _cfg.rerank_model)
+    rerank_backend = data.get("rerank_backend", _cfg.rerank_backend)
     folder_prefix = data.get("folder_prefix")
     metadata_filter = data.get("filter")
 
@@ -290,6 +313,9 @@ async def ask(
     if not query_vector or all(v == 0.0 for v in query_vector):
         raise HTTPException(500, "Embedding failed")
 
+    # Issue #70: rerank candidate pool (see /search).
+    pool_k = max(rerank_top_n, top_k) if use_rerank else top_k
+
     if use_hybrid:
         hs = HybridSearch(vec_store)
         filters = {}
@@ -298,26 +324,30 @@ async def ask(
         chunks = await hs.search(
             query_vector,
             question,
-            top_k=top_k,
+            top_k=pool_k,
             threshold=kb.config.similarity_threshold,
             filters=filters if filters else None,
         )
     else:
         fetch_mult = get_runtime_config().search_fetch_k_multiplier
-        fetch_k = top_k * fetch_mult if (folder_prefix or metadata_filter) else top_k
+        fetch_k = pool_k
+        if folder_prefix or metadata_filter:
+            fetch_k = max(fetch_k, top_k * fetch_mult)
         # P8/硬伤8: sync LanceDB search + filter block the event loop.
         chunks = await run_in_threadpool(
             vec_store.search, query_vector, top_k=fetch_k, threshold=kb.config.similarity_threshold
         )
         chunks = await run_in_threadpool(_apply_search_filters, chunks, folder_prefix, metadata_filter)
-        chunks = chunks[:top_k]
+        chunks = chunks[:pool_k]
 
     if not chunks:
         await _audit_and_trajectory_async(kb_id, question, "ask", [], (time.time() - _start) * 1000)
         return {"answer": "No relevant documents found.", "sources": []}
 
     if use_rerank:
-        chunks = await _do_rerank(question, chunks, top_k)
+        chunks = await _do_rerank(
+            question, chunks, top_k, backend=rerank_backend, model=rerank_model
+        )
 
     context = "\n\n".join(f"[{c['doc_name']}] {c['text'][:2000]}" for c in chunks)
 
