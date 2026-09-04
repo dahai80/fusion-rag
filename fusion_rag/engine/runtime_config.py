@@ -43,6 +43,14 @@ class RuntimeConfig:
     search_fetch_k_multiplier: int = 4
     max_content_chars: int = 2_000_000
     max_batch_files: int = 200
+    # Issue #70: rerank operator knobs. rerank_model empty => rerank off unless
+    # the caller explicitly passes rerank=true. rerank_backend selects the
+    # scoring stage: "llm" (legacy prompt-scoring) or "cross_encoder"
+    # (fusion-mlx /v1/rerank). rerank_top_n = candidate pool size fed to the
+    # reranker before truncating to top_k (recall lift without changing top_k).
+    rerank_model: str = ""
+    rerank_backend: str = "llm"
+    rerank_top_n: int = 20
 
     @classmethod
     def from_env(cls) -> RuntimeConfig:
@@ -63,6 +71,9 @@ class RuntimeConfig:
                 "FUSION_RAG_MAX_CONTENT_CHARS", 2_000_000, minimum=1
             ),
             max_batch_files=_env_int("FUSION_RAG_MAX_BATCH_FILES", 200, minimum=1),
+            rerank_model=os.environ.get("FUSION_RAG_RERANK_MODEL", "").strip(),
+            rerank_backend=os.environ.get("FUSION_RAG_RERANK_BACKEND", "llm").strip().lower(),
+            rerank_top_n=_env_int("FUSION_RAG_RERANK_TOP_N", 20, minimum=1),
         )
 
     def to_dict(self) -> dict:

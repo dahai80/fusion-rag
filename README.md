@@ -9,7 +9,7 @@ Local vector knowledge base service for the Fusion-MLX ecosystem — 100% offlin
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/Tests-243-success.svg)](tests/)
-[![Version](https://img.shields.io/badge/Version-0.7.2-blue.svg)]()
+[![Version](https://img.shields.io/badge/Version-0.8.2-blue.svg)]()
 
 [Quick Start](#quick-start) · [API Reference](#api-reference) · [Architecture](#architecture) · [Documentation](docs/)
 
@@ -144,7 +144,10 @@ Fusion-RAG provides a REST API at `/kb/*` for knowledge base operations.
 | `hybrid` | false | Enable BM25+Vector hybrid search |
 | `hybrid_alpha` | 0.7 | Vector weight (alpha fusion) |
 | `hybrid_method` | "rrf" | Fusion method: "alpha" or "rrf" |
-| `rerank` | false | Enable LLM reranking of results |
+| `rerank` | false | Enable reranking (default ON when `FUSION_RAG_RERANK_MODEL` is set) |
+| `rerank_backend` | from env | Rerank stage: `cross_encoder` (fusion-mlx `/v1/rerank`, real bge-reranker-v2-m3) or `llm` (legacy prompt-scoring) |
+| `rerank_model` | from env | Cross-encoder model name (overrides `FUSION_RAG_RERANK_MODEL`) |
+| `rerank_top_n` | 20 | Candidate pool size fed to the reranker before truncating to `top_k` (recall lift) |
 | `folder_prefix` | (none) | Filter results by folder path prefix |
 | `template` | (none) | Search template name (general/code/design) |
 | `rewrite_mode` | (none) | Query rewrite: hyde, expand, condense |
@@ -158,7 +161,10 @@ Fusion-RAG provides a REST API at `/kb/*` for knowledge base operations.
 | `max_tokens` | 4096 | Max output tokens |
 | `temperature` | 0.3 | Sampling temperature |
 | `hybrid` | false | Enable hybrid search |
-| `rerank` | false | Enable LLM reranking |
+| `rerank` | false | Enable reranking (default ON when `FUSION_RAG_RERANK_MODEL` is set) |
+| `rerank_backend` | from env | `cross_encoder` (fusion-mlx `/v1/rerank`) or `llm` (legacy) |
+| `rerank_model` | from env | Cross-encoder model name |
+| `rerank_top_n` | 20 | Candidate pool size before truncating to `top_k` |
 | `folder_prefix` | (none) | Filter by folder path |
 
 ### Version Snapshots
@@ -350,6 +356,9 @@ Modules migrated to fusion-core: `contextualizer`, `query_rewriter`, `reranker`,
 | `FUSION_RAG_TOKEN_BUDGET` | 8192 | Multi-turn RAG token budget per turn (D4) |
 | `FUSION_RAG_MAX_HISTORY_TURNS` | 10 | Max conversation turns kept in RAG history (D4) |
 | `FUSION_RAG_FETCH_K_MULTIPLIER` | 4 | Over-fetch factor for filtered search (D4) |
+| `FUSION_RAG_RERANK_BACKEND` | llm | Rerank stage: `llm` (legacy LLM prompt-scoring `Reranker`) or `cross_encoder` (real cross-encoder via fusion-mlx `POST /v1/rerank`, e.g. `bge-reranker-v2-m3`). Issue #70. |
+| `FUSION_RAG_RERANK_MODEL` | (empty) | Cross-encoder model name for the `cross_encoder` backend (e.g. `bge-reranker-v2-m3`). When set, `/search` and `/ask` default `rerank=true` (rerank ON when a model is available). Empty = rerank off unless the caller passes `rerank=true`. Issue #70. |
+| `FUSION_RAG_RERANK_TOP_N` | 20 | Candidate pool size fed to the reranker before truncating to `top_k` — recall lift without changing the returned count (issue #70). |
 | `FUSION_RAG_WATCH_CAP` | 16 | Max concurrent directory watches per process (R3) |
 | `FUSION_RAG_TRAJECTORY_MAX_MB` | 100 | Max trajectory file size in MB before rotation (R6) |
 | `FUSION_RAG_TRAJECTORY_KEEP` | 5 | Rotated trajectory files to keep (R6) |
@@ -467,6 +476,10 @@ ruff check fusion_rag/
 ```
 
 ---
+
+## What's New in v0.8.2
+
+- **Cross-encoder rerank (issue #70)** — real cross-encoder reranking via fusion-mlx's Cohere/Jina-compatible `POST /v1/rerank` endpoint, replacing the legacy LLM prompt-scoring `Reranker` as the precision stage. New `CrossEncoderReranker` (`engine/cross_encoder_reranker.py`) is a plain async HTTP client (no MLX import — respects the project's "no direct MLX imports" + "only modify own project" rules) to fusion-mlx's rerank route, e.g. `bge-reranker-v2-m3`. Select it with `FUSION_RAG_RERANK_BACKEND=cross_encoder` + `FUSION_RAG_RERANK_MODEL=bge-reranker-v2-m3`; when `FUSION_RAG_RERANK_MODEL` is set, `/search` and `/ask` default `rerank=true` (rerank ON when a model is available — acceptance 1). `rerank_top_n` (default 20) fetches a wider candidate pool that the cross-encoder re-scores before truncating to `top_k`, lifting recall without changing the returned count. Fallback chain: cross-encoder → legacy LLM-prompt `Reranker` → original retrieval order (logged, never crashes — backward compat, acceptance 4). Hybrid retrieval (BM25 + vector + RRF fusion) was already present (`hybrid=true`, acceptance 2). A recall benchmark (`scripts/recall_benchmark.py`) runs offline (mocked embed + mocked cross-encoder) and guards the no-regression contract (rerank ≥ hybrid ≥ vector); for the absolute recall-lift magnitude, run it against live fusion-mlx with BGE-M3 + bge-reranker-v2-m3 loaded (acceptance 3). 10 new tests (unit: reorder/score-stamp/empty/truncation/404/network; integration: backend selection, fallback chain, default-off regression guard, default-on when model set, explicit `rerank=true`).
 
 ## What's New in v0.7.2
 
