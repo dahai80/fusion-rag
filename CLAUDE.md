@@ -55,6 +55,7 @@ fusion_rag/
 │   ├── routes_project.py  # Project-KB mapping endpoints (/kb/projects/*)
 │   ├── routes_auth.py     # Auth token/login endpoints
 │   ├── routes_store.py    # /kb/bases/{kb_id}/store/* — M2M vector store surface (RemoteBackend server half)
+│   ├── routes_bnup.py     # Issue #74: /api/v1/bnup/* — BNUP textbook corpus ingest + retrieve + KG + misconceptions + stats
 │   ├── auth.py            # API key authentication (AuthConfig + verify_api_key)
 │   ├── app_state.py       # Per-app state on app.state (contextvar-bound) + resource pools
 │   ├── logging_setup.py   # O-P1-2/O-P2-2: RotatingFileHandler + JSON formatter + request-id
@@ -86,12 +87,17 @@ fusion_rag/
 │   ├── bench.py             # Search latency benchmark runner + SQLite results
 │   ├── runtime_config.py    # RuntimeConfig — env-driven operator knobs (scan cap, cache TTL, token budget) + reset for tests
 │   ├── metrics.py           # R5 RED metrics registry + middleware → /metrics (Prometheus text format)
+│   ├── llm_errors.py        # LLMUnavailable — raised on total LLM failure so routes map to 503, not a fabricated 200 (L1)
+│   ├── sqlite_base.py       # 硬伤6 unified SQLite base — WAL + thread-safe shared connection (fixes async "database is locked")
 │   └── streaming.py         # SSEStreamer, MetadataExtractor
-├── parse/
-│   ├── __init__.py          # DatabaseConnector (SQLite/PostgreSQL) + WebLoader
-│   └── git_loader.py        # Git repo clone + .gitignore-aware file indexing
+├── connectors/
+│   ├── __init__.py          # DatabaseConnector (SQLite/PostgreSQL) + WebLoader — route external input through _validators
+│   └── git_loader.py        # GitLoader — repo clone + .gitignore-aware file indexing (validates repo_url)
 ├── permissions/
 │   └── acl.py               # Role-based ACL with path-prefix inheritance
+├── _validators.py           # 硬伤3 trust-boundary layer — kb_id/SQL-id regex, path-confine-to-root (+symlink reject), URL SSRF guard, git ext:: RCE guard. Every external-input caller MUST route through here.
+├── bnup/
+│   └── corpus.py            # Issue #74: BnupCorpus — parse beishi-math JSON → lesson docs (KG metadata tags) + knowledge_graph + stats export. Pure logic, no I/O.
 ├── embed/
 │   ├── client.py            # EmbeddingClient — fusion-mlx /v1/embeddings (own retry, cloud fallback)
 │   └── local.py             # Local embedding fallback
@@ -117,6 +123,7 @@ fusion_rag/
 - **fusion_core in-tree dependency**: LLM HTTP calls (reranker, contextualizer, query_rewriter, rag_chain, graph_rag, evaluator, streaming, routes._generate_answer) use `fusion_core.http_client.get_async_client` (shared connection pool, LRU-keyed by loop+base_url) + `with_retry` (auto-retry on 429/5xx + transient errors). Auth headers passed per-request, not baked into pooled client. `fusion_core` lives at `../fusion-core` (in-tree), already in the monorepo venv; CI installs it via `pip install git+https://github.com/dahai80/fusion-core.git`. Non-LLM httpx (`embed/client.py`, `connectors`) and SSE streaming (`streaming.SSEStreamer`) keep raw httpx (own retry / `httpx.stream`).
 - **LLM backend URL + auth propagation (#72)**: every LLM-calling engine constructed by the route layer (`Contextualizer`, `QueryRewriter`, `Reranker`, `CrossEncoderReranker`) receives `mlx_url=embed.base_url` + `api_key=embed.api_key` from the shared `EmbeddingClient`. They MUST NOT fall back to a hardcoded gateway URL or omit the auth header — a non-default `FUSION_MLX_URL` + key (e.g. fusion-mlx directly at `:11434`) would otherwise 401 on every chat-completions / context-generation call. Each engine stores `api_key` and sends `Authorization: Bearer <key>` per request (empty key = no header). `start.sh` activates the monorepo `.venv` (`~/fusion/.venv`) before launching — bare `python3` fails with `ModuleNotFoundError: No module named 'fusion_core'` outside an activated venv.
 - **LanceDB lazy import**: `lancedb` and `pyarrow` imported via `_lancedb()` / `_pa()` helpers in `vector_store.py`
+- **Trust-boundary validation (硬伤3)**: `fusion_rag/_validators.py` is the single input-confinement layer — `validate_identifier` (kb_id/rule id regex), `validate_sql_identifier` (SQL injection guard, identifiers can't be bound as params), `validate_path_under_root` (LFI/path-traversal + symlink-escape reject, resolves then asserts `is_relative_to` root — but see TOCTOU note: callers reading untrusted paths must also `open(O_NOFOLLOW)` to make check-then-use atomic), `validate_url` (http(s)-only + private/loopback SSRF guard), `validate_git_url` (rejects `ext::` RCE transport + newline/NUL). Routes, `connectors/`, and `git_loader` MUST route external input through these before touching fs/SQL/network/git. No business logic here — pure validate-and-raise.
 - **Per-KB isolation**: Each KB gets its own `vectors/` (LanceDB) + `metadata.db` (SQLite) under `~/.fusion-rag/stores/{kb_id}/`
 - **Server wiring**: `server.py` creates `KnowledgeBaseManager` + `EmbeddingClient`, injects into `routes.py` via `set_kb_context()`. `routes.py` is the hub router (`/kb` prefix) that mounts 5 sub-routers (kb/docs/search/admin/project); it also holds `/status`, `/stats`, and shared helpers (`_get_base`, `_do_rerank`, `_generate_answer`). MCP router mounted at `/mcp`, auth router at top level. Auth via `Depends(verify_api_key)` on write endpoints. `/metrics` (Prometheus, no auth) + `/health` mounted at top level.
 - **Single-process only**: directory watches (`routes_docs._watch_loop`) and the watch registry live in process memory — no cross-process coordination. Scale horizontally behind a stateless load balancer, NOT by running multiple fusion-rag processes against the same `FUSION_RAG_STORES_DIR`. A multi-process deployment would double-watch and corrupt the registry (R3/H3).

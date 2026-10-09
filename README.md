@@ -228,6 +228,35 @@ Fusion-RAG provides a REST API at `/kb/*` for knowledge base operations.
 | GET | `/health` | Health check |
 | GET | `/metrics` | Prometheus metrics (RED: request count, latency histogram, error count by endpoint + kb_id) |
 
+### BNUP Textbook Corpus (Issue #74)
+
+BNUP (北师大版) K-12 math textbook corpus ingestion + retrieval, serving synthetic training-data generation for fusion-trainer. The corpus JSON (`beishi-math-g1-6.json`, grades → units → lessons → `knowledge_point_ids`) is POSTed by the operator; fusion-rag tags each lesson with `edition=bnup`, `grade`, `semester`, `unit`, `knowledge_point_ids`, `visual_type` and indexes it into a dedicated KB for hybrid retrieval.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/bnup/ingest` | Ingest the BNUP corpus JSON body into the default KB (`bnup-default`, or `?kb_id=`). Idempotent — re-ingest overwrites. `verify_api_key` gated. |
+| GET | `/api/v1/bnup/retrieve` | Retrieve lessons by `?knowledge_point=` and/or `?grade=` (`&limit=`, default 10). Hybrid vector + BM25 search filtered by KG metadata. |
+| GET | `/api/v1/bnup/knowledge_graph` | Export the KG hierarchy (grades → units → lessons → knowledge_point_ids) + a flat `knowledge_points` index for the trainer. |
+| GET | `/api/v1/bnup/misconceptions` | Retrieve common-error data by `?knowledge_point=` for DPO negative samples. Forward-compatible — returns empty until upstream [fusion-k12-teacher #21](https://github.com/dahai80/fusion-k12-teacher/issues/21) populates `common_misconceptions`; re-ingest then serves real data. |
+| GET | `/api/v1/bnup/stats` | Corpus coverage per grade / semester / knowledge_point. |
+
+Example:
+
+```bash
+# Ingest the corpus (operator POSTs the JSON from fusion-k12-teacher)
+curl -X POST http://127.0.0.1:11436/api/v1/bnup/ingest \
+  -H "Content-Type: application/json" \
+  -d @beishi-math-g1-6.json
+
+# Retrieve lessons for a knowledge point
+curl "http://127.0.0.1:11436/api/v1/bnup/retrieve?knowledge_point=math-g1-na-01&limit=5"
+
+# Export the knowledge graph
+curl "http://127.0.0.1:11436/api/v1/bnup/knowledge_graph"
+```
+
+PDF/DOCX teacher manuals (菁优网/高思题集) can be ingested into the same BNUP KB via the standard `/kb/bases/bnup-default/docs/*` endpoints with `metadata={"edition":"bnup", ...}` tags.
+
 ---
 
 ## Architecture

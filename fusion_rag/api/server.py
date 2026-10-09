@@ -19,6 +19,7 @@ from .auth import verify_api_key
 from .mcp_server import router as mcp_router
 from .routes import router as kb_router
 from .routes_auth import router as auth_router
+from .routes_bnup import router as bnup_router
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +185,7 @@ def create_app(
     app.include_router(kb_router)
     app.include_router(mcp_router)
     app.include_router(auth_router)
+    app.include_router(bnup_router)
 
     @app.get("/health")
     async def health():
@@ -310,6 +312,7 @@ if __name__ == "__main__":
     if not mlx_api_key:
         try:
             import json as _json
+
             _settings_path = os.path.expanduser("~/.fusion-mlx/settings.json")
             if os.path.exists(_settings_path):
                 with open(_settings_path) as _f:

@@ -1,0 +1,80 @@
+{
+  "edition": "beishi",
+  "publisher": "北京师范大学出版社",
+  "name": "北师大版小学数学",
+  "subject": "math",
+  "grade_range": "1-6",
+  "grades": {
+    "1": {
+      "units": [
+        {
+          "unit": 1,
+          "title": "生活中的数",
+          "lessons": [
+            {"lesson": 1, "title": "可爱的校园", "topic": "数一数", "knowledge_point_ids": ["math-g1-na-01"]},
+            {"lesson": 2, "title": "快乐的家园", "topic": "1-10的认识", "knowledge_point_ids": ["math-g1-na-01"]},
+            {"lesson": 3, "title": "玩具", "topic": "1-5的认识与书写", "knowledge_point_ids": ["math-g1-na-02"]}
+          ]
+        },
+        {
+          "unit": 2,
+          "title": "比较",
+          "lessons": [
+            {"lesson": 1, "title": "动物乐园", "topic": "多少的比较", "knowledge_point_ids": ["math-g1-na-03"]},
+            {"lesson": 2, "title": "高矮", "topic": "高矮比较", "knowledge_point_ids": ["math-g1-na-03"]}
+          ]
+        },
+        {
+          "unit": 3,
+          "title": "加减法一",
+          "lessons": [
+            {"lesson": 1, "title": "有几枝铅笔", "topic": "加法初步认识", "knowledge_point_ids": ["math-g1-na-04"]},
+            {"lesson": 2, "title": "有几辆车", "topic": "减法初步认识", "knowledge_point_ids": ["math-g1-na-04"]}
+          ]
+        },
+        {
+          "unit": 4,
+          "title": "分类",
+          "lessons": [
+            {"lesson": 1, "title": "整理房间", "topic": "分类方法", "knowledge_point_ids": ["math-g1-sp-01"]}
+          ]
+        }
+      ]
+    },
+    "2": {
+      "units": [
+        {
+          "unit": 1,
+          "title": "数一数与乘法",
+          "lessons": [
+            {"lesson": 1, "title": "数一数", "topic": "乘法初步认识", "knowledge_point_ids": ["math-g2-na-01"]},
+            {"lesson": 2, "title": "儿童乐园", "topic": "乘法算式", "knowledge_point_ids": ["math-g2-na-01"]}
+          ]
+        },
+        {
+          "unit": 2,
+          "title": "乘法口诀一",
+          "lessons": [
+            {"lesson": 1, "title": "数松果", "topic": "5的乘法口诀", "knowledge_point_ids": ["math-g2-na-02"]},
+            {"lesson": 2, "title": "做家务", "topic": "2的乘法口诀", "knowledge_point_ids": ["math-g2-na-02"]}
+          ]
+        },
+        {
+          "unit": 3,
+          "title": "观察物体",
+          "lessons": [
+            {"lesson": 1, "title": "看一看一", "topic": "前后左右观察", "knowledge_point_ids": ["math-g2-gm-01"]}
+          ]
+        },
+        {
+          "unit": 4,
+          "title": "分一分与除法",
+          "lessons": [
+            {"lesson": 1, "title": "分桃子", "topic": "平均分", "knowledge_point_ids": ["math-g2-na-03"]},
+            {"lesson": 2, "title": "分苹果", "topic": "除法初步认识", "knowledge_point_ids": ["math-g2-na-03"]}
+          ]
+        }
+      ]
+    }
+  }
+}
