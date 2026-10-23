@@ -136,7 +136,8 @@ async def ingest(
                 "doc_name": d["doc_name"],
                 "doc_type": d["doc_type"],
                 "chunk_index": 0,
-                "metadata": d["metadata"],
+                # Issue #77: doc_id inside chunk metadata for evidence anchors.
+                "metadata": {**d["metadata"], "doc_id": d["doc_id"]},
                 "context": "",
             }
         )
@@ -172,7 +173,7 @@ async def ingest(
                         "chunk_index": 0,
                         "text": d["content"],
                         "tokens": 0,
-                        "metadata": d["metadata"],
+                        "metadata": {**d["metadata"], "doc_id": doc_id},
                     }
                 ],
             )
@@ -196,7 +197,7 @@ async def retrieve(
     limit: int = 10,
     kb_id: str = DEFAULT_KB_ID,
 ) -> list[dict[str, Any]]:
-    from .routes import _apply_search_filters, _get_embed_client, _get_vector_store
+    from .routes import _apply_search_filters, _get_embed_client, _get_vector_store, _normalize_evidence
 
     if limit < 1 or limit > 100:
         raise HTTPException(400, "limit must be 1..100")
@@ -207,7 +208,7 @@ async def retrieve(
     kp_index = payload["knowledge_graph"].get("knowledge_points", {})
     if knowledge_point and knowledge_point in kp_index:
         info = kp_index[knowledge_point]
-        query = f"{info.get('title','')} {info.get('topic','')}".strip() or knowledge_point
+        query = f"{info.get('title', '')} {info.get('topic', '')}".strip() or knowledge_point
     elif grade is not None:
         query = f"{grade}年级 数学"
     else:
@@ -246,12 +247,12 @@ async def retrieve(
                         "doc_name": doc.get("file_name", ""),
                         "text": "",
                         "score": 0.0,
-                        "metadata": dm,
+                        "metadata": {**dm, "doc_id": doc.get("id", "")},
                     }
                 )
                 if len(results) >= limit:
                     break
-    return results[:limit]
+    return _normalize_evidence(results[:limit])
 
 
 @router.get("/knowledge_graph")

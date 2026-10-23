@@ -66,9 +66,7 @@ async def _audit_and_trajectory_async(
     # P8/硬伤8: audit/trajectory do sync sqlite writes; running them inline in
     # the async handler blocks the event loop for the write duration. Push the
     # fire-and-forget logging off the loop thread.
-    await run_in_threadpool(
-        _audit_and_trajectory, kb_id, query, caller, results, latency_ms, metadata
-    )
+    await run_in_threadpool(_audit_and_trajectory, kb_id, query, caller, results, latency_ms, metadata)
 
 
 @router.post("/bases/{kb_id}/search")
@@ -77,7 +75,14 @@ async def search(
     data: dict[str, Any],
     subject: str | None = Depends(require_kb_action("search")),
 ) -> list[dict[str, Any]]:
-    from .routes import _apply_search_filters, _do_rerank, _get_base, _get_embed_client, _get_vector_store
+    from .routes import (
+        _apply_search_filters,
+        _do_rerank,
+        _get_base,
+        _get_embed_client,
+        _get_vector_store,
+        _normalize_evidence,
+    )
 
     kb = _get_base(kb_id)
     query = data.get("query", "")
@@ -199,9 +204,9 @@ async def search(
             if doc_type_filter:
                 results = [r for r in results if r.get("doc_type", "") in doc_type_filter]
             if use_rerank:
-                results = await _do_rerank(
-                    query, results, top_k, backend=rerank_backend, model=rerank_model
-                )
+                results = await _do_rerank(query, results, top_k, backend=rerank_backend, model=rerank_model)
+            # Issue #77: stamp chunk_id / doc_id / page evidence anchors.
+            results = _normalize_evidence(results)
             await _audit_and_trajectory_async(kb_id, query, "search", results, (time.time() - _start) * 1000)
             return results
         query = rewritten
@@ -249,10 +254,10 @@ async def search(
         results = [r for r in results if r.get("doc_type", "") in doc_type_filter]
 
     if use_rerank:
-        results = await _do_rerank(
-            query, results, top_k, backend=rerank_backend, model=rerank_model
-        )
+        results = await _do_rerank(query, results, top_k, backend=rerank_backend, model=rerank_model)
 
+    # Issue #77: stamp chunk_id / doc_id / page evidence anchors.
+    results = _normalize_evidence(results)
     await _audit_and_trajectory_async(kb_id, query, "search", results, (time.time() - _start) * 1000)
     return results
 
@@ -270,6 +275,7 @@ async def ask(
         _get_base,
         _get_embed_client,
         _get_vector_store,
+        _normalize_evidence,
     )
 
     kb = _get_base(kb_id)
@@ -345,9 +351,11 @@ async def ask(
         return {"answer": "No relevant documents found.", "sources": []}
 
     if use_rerank:
-        chunks = await _do_rerank(
-            question, chunks, top_k, backend=rerank_backend, model=rerank_model
-        )
+        chunks = await _do_rerank(question, chunks, top_k, backend=rerank_backend, model=rerank_model)
+
+    # Issue #77: stamp chunk_id / doc_id / page so /ask sources carry the
+    # same evidence anchors as /search results.
+    chunks = _normalize_evidence(chunks)
 
     context = "\n\n".join(f"[{c['doc_name']}] {c['text'][:2000]}" for c in chunks)
 
