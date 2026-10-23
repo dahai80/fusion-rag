@@ -6,10 +6,13 @@ All processing is local — no network calls.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class DocumentType(str, Enum):
@@ -87,6 +90,10 @@ class ParseResult:
     pages: int = 0
     chars: int = 0
     error: str = ""
+    # Issue #77: (start, end, page_no) char-offset spans mapping content
+    # positions back to PDF pages — lets the chunker stamp per-chunk page
+    # metadata for evidence anchoring. Empty for non-PDF sources.
+    page_spans: list[tuple[int, int, int]] = field(default_factory=list)
 
 
 class DocumentParser:
@@ -125,9 +132,10 @@ class DocumentParser:
 
         try:
             if doc_type == DocumentType.PDF:
-                content, pages = self._parse_pdf(path)
+                content, pages, page_spans = self._parse_pdf(path)
                 result.content = content
                 result.pages = pages
+                result.page_spans = page_spans
             elif doc_type == DocumentType.DOCX:
                 result.content = self._parse_docx(path)
             elif doc_type == DocumentType.MARKDOWN or doc_type == DocumentType.TXT:
@@ -150,17 +158,26 @@ class DocumentParser:
 
         return result
 
-    def _parse_pdf(self, path: Path) -> tuple[str, int]:
-        """Extract text from PDF using PyMuPDF."""
+    def _parse_pdf(self, path: Path) -> tuple[str, int, list[tuple[int, int, int]]]:
+        """Extract text from PDF using PyMuPDF, tracking per-page char spans."""
         import fitz  # PyMuPDF
 
         doc = fitz.open(str(path))
         pages = len(doc)
-        texts = []
-        for page in doc:
-            texts.append(page.get_text())
+        content = ""
+        spans = []
+        for i, page in enumerate(doc):
+            text = page.get_text()
+            if not text:
+                continue
+            if content:
+                content += "\n\n"
+            start = len(content)
+            content += text
+            spans.append((start, len(content), i + 1))
         doc.close()
-        return "\n\n".join(texts), pages
+        logger.info("parsed PDF %s: %d pages, %d non-empty spans", path.name, pages, len(spans))
+        return content, pages, spans
 
     def _parse_docx(self, path: Path) -> str:
         """Extract text from DOCX."""

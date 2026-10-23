@@ -187,6 +187,20 @@ async def _write_doc_to_stores(
 
     Returns (True, None, False) on success; (False, err, rb) on failure.
     """
+    # Issue #77: evidence metadata contract — each chunk carries doc_id +
+    # chunk_index (+ page when the chunker tracked it) inside its metadata so
+    # search rows round-trip stable evidence anchors (envipermit binds
+    # extracted values to doc_id/page/chunk_id). Base is the caller's
+    # per-chunk metadata (inline ingest) or the doc metadata (file ingest).
+    base_meta = chunk_metadata if chunk_metadata is not None else metadata
+    chunk_metas = []
+    for i, chunk in enumerate(chunks):
+        cm = {**(base_meta or {}), "doc_id": doc_id, "chunk_index": i}
+        page = getattr(chunk, "page", 0)
+        if page:
+            cm["page"] = page
+        chunk_metas.append(cm)
+
     records = []
     for i, (chunk, vector, cd) in enumerate(zip(chunks, vectors, chunk_dicts)):
         chunk_id = f"{doc_id}_{i}"
@@ -199,7 +213,7 @@ async def _write_doc_to_stores(
                 "doc_name": doc_name,
                 "doc_type": doc_type,
                 "chunk_index": i,
-                "metadata": metadata,
+                "metadata": chunk_metas[i],
                 "context": cd.get("context", ""),
             }
         )
@@ -240,7 +254,6 @@ async def _write_doc_to_stores(
         # (executemany, single transaction) instead of N add_chunk round-trips
         # each acquiring the shared-conn lock + committing. On a 500-chunk doc
         # this drops 500 lock/commit cycles to 1.
-        per_chunk_meta = chunk_metadata if chunk_metadata is not None else metadata
         chunk_rows = [
             {
                 "chunk_id": f"{doc_id}_{i}",
@@ -249,7 +262,7 @@ async def _write_doc_to_stores(
                 "chunk_index": i,
                 "text": chunk.text,
                 "tokens": chunk.tokens,
-                "metadata": per_chunk_meta,
+                "metadata": chunk_metas[i],
             }
             for i, chunk in enumerate(chunks)
         ]
@@ -332,9 +345,7 @@ async def _index_document(kb_id: str, file_path: str, contextualize: bool = True
     if not chunks:
         return {"error": "no chunks produced"}
 
-    contextualizer = Contextualizer(
-        mlx_url=embed.base_url, enabled=contextualize, api_key=embed.api_key
-    )
+    contextualizer = Contextualizer(mlx_url=embed.base_url, enabled=contextualize, api_key=embed.api_key)
     chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
     # L1: contextualizer raises LLMUnavailable only when EVERY chunk fails. On
     # total LLM failure, contextualize=True silently degraded retrieval before.
@@ -453,11 +464,13 @@ async def batch_upload_documents(kb_id: str, data: dict[str, Any]) -> dict[str, 
         try:
             result = await _index_document(kb_id, fp, contextualize=contextualize)
             if "error" in result:
-                errors.append({
-                    "file": fp,
-                    "error": result["error"],
-                    "rollback_failed": result.get("rollback_failed", False),
-                })
+                errors.append(
+                    {
+                        "file": fp,
+                        "error": result["error"],
+                        "rollback_failed": result.get("rollback_failed", False),
+                    }
+                )
                 continue
             indexed.append({"doc_id": result["doc_id"], "file": fp, "chunks": result["chunks"]})
             total_chunks += result["chunks"]
@@ -518,9 +531,7 @@ async def ingest_content(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     contextualize = data.get("contextualize", True)
     _check_embed_model(kb_id)
     embed = _get_embed_client()
-    contextualizer = Contextualizer(
-        mlx_url=embed.base_url, enabled=contextualize, api_key=embed.api_key
-    )
+    contextualizer = Contextualizer(mlx_url=embed.base_url, enabled=contextualize, api_key=embed.api_key)
     chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
     # F-P2-1: ingest_content was the ONE ingest path that did NOT wrap
     # contextualize in try/except LLMUnavailable — a total LLM failure here
@@ -657,9 +668,7 @@ async def replace_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dic
     contextualize = data.get("contextualize", True)
     _check_embed_model(kb_id)
     embed = _get_embed_client()
-    contextualizer = Contextualizer(
-        mlx_url=embed.base_url, enabled=contextualize, api_key=embed.api_key
-    )
+    contextualizer = Contextualizer(mlx_url=embed.base_url, enabled=contextualize, api_key=embed.api_key)
     chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
     try:
         chunk_dicts = await contextualizer.contextualize(chunk_dicts, result.content)
@@ -777,17 +786,13 @@ async def scan_directory(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     # D4: scan file cap was hardcoded 1000; RuntimeConfig makes it env-tunable.
     from ..engine.runtime_config import get_runtime_config
 
-    results = await _doc_parser.parse_directory(
-        dir_path, recursive=True, max_files=get_runtime_config().scan_max_files
-    )
+    results = await _doc_parser.parse_directory(dir_path, recursive=True, max_files=get_runtime_config().scan_max_files)
     _check_embed_model(kb_id)
     embed = _get_embed_client()
     vec_store = _get_vector_store(kb_id)
     meta_store = _get_meta_store(kb_id)
     contextualize = data.get("contextualize", True)
-    contextualizer = Contextualizer(
-        mlx_url=embed.base_url, enabled=contextualize, api_key=embed.api_key
-    )
+    contextualizer = Contextualizer(mlx_url=embed.base_url, enabled=contextualize, api_key=embed.api_key)
 
     total_chunks = 0
     total_chars = 0
@@ -840,11 +845,13 @@ async def scan_directory(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
             chars=result.chars,
         )
         if not ok:
-            errors.append({
-                "file": result.file_name,
-                "error": err,
-                "rollback_failed": rollback_failed,
-            })
+            errors.append(
+                {
+                    "file": result.file_name,
+                    "error": err,
+                    "rollback_failed": rollback_failed,
+                }
+            )
             continue
         total_chunks += len(chunks)
         total_chars += result.chars

@@ -103,6 +103,31 @@ def _apply_search_filters(
     return filtered
 
 
+def _normalize_evidence(results: list[dict]) -> list[dict]:
+    # Issue #77: every retrieved chunk carries chunk_id / doc_id / page at the
+    # top level so consumers (envipermit) can bind extracted values to stable
+    # evidence anchors. doc_id falls back to the chunk-id prefix ("{doc_id}_{i}"
+    # format) for rows ingested before the field was stamped into chunk
+    # metadata; page is 0 when the source has no page info.
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        meta = r.get("metadata") or {}
+        if isinstance(meta, str):
+            import json as _json
+
+            try:
+                meta = _json.loads(meta)
+            except Exception:
+                meta = {}
+        chunk_id = r.get("id", "")
+        doc_id = meta.get("doc_id") or (chunk_id.rsplit("_", 1)[0] if "_" in chunk_id else chunk_id)
+        r["chunk_id"] = chunk_id
+        r["doc_id"] = doc_id
+        r["page"] = meta.get("page", 0)
+    return results
+
+
 async def _do_rerank(
     query: str,
     results: list[dict],
@@ -225,6 +250,10 @@ async def _generate_answer(
                     "doc_path": c.get("doc_path", ""),
                     "score": c.get("score", 0),
                     "snippet": c.get("text", "")[:200],
+                    # Issue #77: evidence anchors on /ask sources too.
+                    "doc_id": c.get("doc_id", ""),
+                    "chunk_id": c.get("chunk_id", ""),
+                    "page": c.get("page", 0),
                 }
             )
     return {"answer": answer_text, "sources": sources}

@@ -27,6 +27,9 @@ class Chunk:
     doc_type: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
     tokens: int = 0
+    # Issue #77: 1-based source page for evidence anchoring (PDF page spans).
+    # 0 = no page info (non-PDF source or untracked strategy).
+    page: int = 0
 
 
 class Chunker:
@@ -36,9 +39,7 @@ class Chunker:
         # F10: overlap >= chunk_size makes the fixed-stride step <= 0, so the
         # while loop never advances → infinite loop / memory blowup. Reject early.
         if chunk_overlap >= chunk_size:
-            raise ValueError(
-                f"chunk_overlap ({chunk_overlap}) must be < chunk_size ({chunk_size})"
-            )
+            raise ValueError(f"chunk_overlap ({chunk_overlap}) must be < chunk_size ({chunk_size})")
         self.strategy = strategy
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
@@ -68,6 +69,17 @@ class Chunker:
         dtype = result.doc_type.value if hasattr(result.doc_type, "value") else str(result.doc_type)
         return dtype == "code_python" and self.strategy != "code"
 
+    def _page_at(self, result: ParseResult, offset: int) -> int:
+        # Issue #77: map a content char offset back to its source page via the
+        # parser's page_spans. Spans are ordered; -1 (unknown offset) or a
+        # miss (gap between spans) means no page info.
+        if offset < 0 or not result.page_spans:
+            return 0
+        for start, end, page_no in result.page_spans:
+            if start <= offset < end:
+                return page_no
+        return 0
+
     def _chunk_semantic(self, result: ParseResult) -> list[Chunk]:
         """Split by semantic boundaries (paragraphs, sections)."""
         text = result.content
@@ -75,30 +87,41 @@ class Chunker:
         sections = re.split(r"(?=\n#|\n##|\n###|\n####|\n#####|\n######|^#)", text, flags=re.MULTILINE)
         chunks = []
         current = []
+        # Issue #77: parallel offset list — re.split parts concatenate back to
+        # the original text exactly, so a running cursor gives each section's
+        # char offset for page mapping.
+        current_offsets = []
         current_len = 0
+        pos = 0
 
-        for section in sections:
-            section = section.strip()
+        for raw in sections:
+            section = raw.strip()
+            section_offset = pos + (len(raw) - len(raw.lstrip()))
+            pos += len(raw)
             if not section:
                 continue
             sec_len = len(section)
             if current_len + sec_len > self.chunk_size and current:
-                chunks.append(self._make_chunk("\n\n".join(current), result, len(chunks)))
+                chunks.append(self._make_chunk("\n\n".join(current), result, len(chunks), offset=current_offsets[0]))
                 # Keep overlap
                 overlap = []
+                overlap_offsets = []
                 overlap_len = 0
-                for c in reversed(current):
+                for c, co in zip(reversed(current), reversed(current_offsets)):
                     if overlap_len + len(c) > self.chunk_overlap:
                         break
                     overlap.insert(0, c)
+                    overlap_offsets.insert(0, co)
                     overlap_len += len(c)
                 current = overlap
+                current_offsets = overlap_offsets
                 current_len = overlap_len
             current.append(section)
+            current_offsets.append(section_offset)
             current_len += sec_len
 
         if current:
-            chunks.append(self._make_chunk("\n\n".join(current), result, len(chunks)))
+            chunks.append(self._make_chunk("\n\n".join(current), result, len(chunks), offset=current_offsets[0]))
 
         return chunks if chunks else [self._make_chunk(text, result, 0)]
 
@@ -112,7 +135,7 @@ class Chunker:
         while start < len(text):
             end = min(start + self.chunk_size, len(text))
             chunk_text = text[start:end]
-            chunks.append(self._make_chunk(chunk_text, result, len(chunks)))
+            chunks.append(self._make_chunk(chunk_text, result, len(chunks), offset=start))
             start += step
             if start >= len(text):
                 break
@@ -190,7 +213,7 @@ class Chunker:
         # Fallback: fixed-size chunking
         return self._chunk_fixed(result)
 
-    def _make_chunk(self, text: str, result: ParseResult, index: int) -> Chunk:
+    def _make_chunk(self, text: str, result: ParseResult, index: int, offset: int = -1) -> Chunk:
         """Create a Chunk from text and metadata."""
         return Chunk(
             text=text.strip(),
@@ -200,4 +223,5 @@ class Chunker:
             doc_type=result.doc_type.value,
             metadata=result.metadata,
             tokens=len(text) // 4,  # Rough token estimate
+            page=self._page_at(result, offset),
         )

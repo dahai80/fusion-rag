@@ -257,6 +257,36 @@ curl "http://127.0.0.1:11436/api/v1/bnup/knowledge_graph"
 
 PDF/DOCX teacher manuals (菁优网/高思题集) can be ingested into the same BNUP KB via the standard `/kb/bases/bnup-default/docs/*` endpoints with `metadata={"edition":"bnup", ...}` tags.
 
+### Evidence Metadata Contract (Issue #77)
+
+Every retrieved chunk carries stable evidence anchors so consumers (e.g. [EnviPermit](https://github.com/dahai80/envipermit)) can bind extracted values back to their source location:
+
+| Field | Where | Description |
+|-------|-------|-------------|
+| `chunk_id` | top level of each `/search` result + `/ask` source | Stable chunk identifier (`{doc_id}_{index}`), same as `id`. |
+| `doc_id` | top level + chunk `metadata` | Document identifier returned at ingest time. Falls back to the chunk-id prefix for data ingested before v0.8.5. |
+| `page` | top level + chunk `metadata` | 1-based source page for PDF chunks (per-page char spans tracked through parse → chunk). `0` = no page info. Non-PDF sources: pass `page` in the ingest `metadata` (see OCR below). |
+| `chunk_index` | chunk `metadata` | 0-based chunk position within its document. |
+
+PDF files ingested via `POST /kb/bases/{kb_id}/documents` get per-chunk `page` automatically — the parser records per-page char spans and the chunker maps each chunk's start offset back to its page.
+
+**OCR pre-extracted text**: ingest one page per call via `POST /kb/bases/{kb_id}/documents/ingest` with the caller's own page number in the metadata:
+
+```bash
+curl -X POST http://127.0.0.1:11436/kb/bases/{kb_id}/documents/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"content": "<OCR-extracted text for page 3>",
+       "doc_name": "permit_2024_p3.txt",
+       "metadata": {"source": "ocr", "page": 3},
+       "contextualize": false}'
+```
+
+The full `metadata` dict is stamped on the document AND every chunk, so `metadata.source=ocr` and `metadata.page=3` round-trip through `/search` and are filterable via the `filter` parameter.
+
+**Excel / tables**: there is no native table-chunk type. Convert spreadsheets to text pre-ingest (e.g. via fusion-office) and ingest the synthetic text chunks through `documents/ingest` with caller-defined metadata (`source=excel`, sheet name, etc.).
+
+**Per-project KB pattern** (~100 concurrent projects, EnviPermit-style): one KB per project via `POST /kb/bases` (`kb_id=project_<id>`), ingest project documents, search with `POST /kb/bases/project_<id>/search`. For multi-tenant isolation enable `FUSION_RAG_REQUIRE_GATEWAY=1` (KB-level tenant scoping) or `FUSION_RAG_REQUIRE_IDENTITY=1` (JWT-verified tenant via fusion-identity); with `FUSION_RAG_STORE_BACKEND=qdrant`, tenants get separate vector collections. fusion-rag is single-process per stores dir (H3) — scale horizontally behind a stateless load balancer, never by running multiple processes against one `FUSION_RAG_STORES_DIR`.
+
 ---
 
 ## Architecture
