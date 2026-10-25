@@ -4,7 +4,7 @@
 
 **Apple Silicon Native Offline Vector Knowledge Base Backend**
 
-Local vector knowledge base service for the Fusion-MLX ecosystem — 100% offline, no data leaves your device.
+Local vector knowledge base service for the Fusion-MLX ecosystem — offline by default, no data leaves your device unless you explicitly opt into the cloud embedding fallback (`FUSION_RAG_FALLBACK_URL`, empty by default).
 
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
@@ -27,7 +27,7 @@ Local vector knowledge base service for the Fusion-MLX ecosystem — 100% offlin
 | **BM25 + Vector hybrid** | ✅ Okapi BM25 + RRF | ❌ | ❌ | ❌ |
 | **Contextual Retrieval** | ✅ Anthropic-style | ❌ | ❌ | ✅ |
 | **MCP Server** | ✅ Claude/Cursor native | ❌ | ❌ | ❌ |
-| **GraphRAG** | ✅ Entity-relation graph | ❌ | ❌ | ❌ |
+| **GraphRAG** | ✅ Entity-relation graph (`/graph/*` routes, experimental) | ❌ | ❌ | ❌ |
 | **Code AST chunking** | ✅ Python AST-aware | ❌ | ❌ | ❌ |
 | **Version snapshots** | ✅ Hard-link snapshots | ❌ | ❌ | ❌ |
 | **Incremental sync** | ✅ MD5 + mtime detection | ❌ | ❌ | ❌ |
@@ -287,6 +287,33 @@ The full `metadata` dict is stamped on the document AND every chunk, so `metadat
 
 **Per-project KB pattern** (~100 concurrent projects, EnviPermit-style): one KB per project via `POST /kb/bases` (`kb_id=project_<id>`), ingest project documents, search with `POST /kb/bases/project_<id>/search`. For multi-tenant isolation enable `FUSION_RAG_REQUIRE_GATEWAY=1` (KB-level tenant scoping) or `FUSION_RAG_REQUIRE_IDENTITY=1` (JWT-verified tenant via fusion-identity); with `FUSION_RAG_STORE_BACKEND=qdrant`, tenants get separate vector collections. fusion-rag is single-process per stores dir (H3) — scale horizontally behind a stateless load balancer, never by running multiple processes against one `FUSION_RAG_STORES_DIR`.
 
+### GraphRAG (Issue #79)
+
+Entity-relation graph retrieval, wired to HTTP (experimental). A build extracts entities + relations from a KB's chunks via the fusion-mlx LLM (one call per chunk, semaphore-bounded, capped) and stores them in a per-KB SQLite graph (`graph.db` under the KB's store dir); graph search expands entity matches over relation hops and resolves hit chunk ids back to text.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/kb/bases/{kb_id}/graph/build` | Extract entities/relations from the KB's chunks (LLM-backed). `max_chunks` (default 200, hard cap 1000) bounds the LLM spend. `verify_kb_action("write")` gated. |
+| GET | `/kb/bases/{kb_id}/graph/stats` | Entity + relation counts for the KB. |
+| POST | `/kb/bases/{kb_id}/graph/search` | Query → entity matches → relation-hop expansion → chunks. `max_hops` (default 2, cap 4). Returns evidence-anchored rows (`chunk_id`/`doc_id`/`page`). |
+
+```bash
+curl -X POST http://127.0.0.1:11436/kb/bases/{kb_id}/graph/build -H "Content-Type: application/json" -d '{"max_chunks": 200}'
+curl -X POST http://127.0.0.1:11436/kb/bases/{kb_id}/graph/search -H "Content-Type: application/json" -d '{"query": "fusion"}'
+```
+
+### Recall Benchmark (Issue #79)
+
+`scripts/recall_benchmark.py` measures retrieval quality on a deterministic ≥500-chunk corpus (markdown + Python mix through the real chunker) with 55 ground-truth queries — recall@5/@10 + MRR@10, and the ablation BM25-only vs vector-only vs RRF fusion:
+
+```bash
+python scripts/recall_benchmark.py --mode mock   # wiring / no-regression evidence (labeled mode=mock)
+FUSION_MLX_URL=http://127.0.0.1:11434/v1 FUSION_MLX_API_KEY=<key> \
+  python scripts/recall_benchmark.py --mode real --output docs/benchmarks/recall-$(date +%F).json
+```
+
+Mock mode uses deterministic hashed-bag embeddings and is wiring-regression evidence only — never quality evidence. Real mode hits the live fusion-mlx embeddings endpoint with the cache disabled. CI (`tests/test_recall_benchmark.py`) asserts the pipeline runs and RRF fusion never drops recall@10 below the best single mode. Recorded results live in `docs/benchmarks/` — see [docs/benchmarks/README.md](docs/benchmarks/README.md) for the ablation decision.
+
 ---
 
 ## Architecture
@@ -369,7 +396,7 @@ Modules migrated to fusion-core: `contextualizer`, `query_rewriter`, `reranker`,
 | **Permissions** | `permissions/acl.py` | Role-based ACL with path inheritance |
 | **Git Loader** | `connectors/git_loader.py` | Git repo clone + index |
 | **Store Backend** | `store/store_backend.py` | Abstract storage backend |
-| **Local Backend** | `store/local_backend.py` | LanceDB + BM25 implementation |
+| **Local Backend** | `store/local_backend.py` | LanceDB + BM25 implementation. Vector search is a brute-force scan (no ANN index) — exact results, fine up to ~100k chunks per KB; for larger corpora use the `fusion-store` (HNSW) or `qdrant` backends. |
 | **Remote Backend** | `store/remote_backend.py` | HTTP client to a remote fusion-rag node's `/store/*` vector surface |
 | **Qdrant Backend** | `store/qdrant_backend.py` | Qdrant vector DB with per-tenant collection isolation (#66) |
 | **Store Server** | `api/routes_store.py` | `/kb/bases/{kb_id}/store/*` M2M vector store endpoints (RemoteBackend server half) |

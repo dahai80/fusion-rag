@@ -10,7 +10,9 @@ claude-rag-insight.md
 prd-ar-plan.md
 rag-oss-analysis.md
 logs/
-docs/
+# Non-code docs stay local; recall-benchmark evidence is a release artifact
+docs/*
+!docs/benchmarks/
 .codegraph/
 
 .fusion-rag.pid
