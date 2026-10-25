@@ -56,6 +56,7 @@ fusion_rag/
 │   ├── routes_auth.py     # Auth token/login endpoints
 │   ├── routes_store.py    # /kb/bases/{kb_id}/store/* — M2M vector store surface (RemoteBackend server half)
 │   ├── routes_bnup.py     # Issue #74: /api/v1/bnup/* — BNUP textbook corpus ingest + retrieve + KG + misconceptions + stats
+│   ├── routes_graph.py    # Issue #79: /kb/bases/{id}/graph/* — GraphRAG build/stats/search (LLM entity extraction, per-KB graph.db)
 │   ├── auth.py            # API key authentication (AuthConfig + verify_api_key)
 │   ├── app_state.py       # Per-app state on app.state (contextvar-bound) + resource pools
 │   ├── logging_setup.py   # O-P1-2/O-P2-2: RotatingFileHandler + JSON formatter + request-id
@@ -75,7 +76,7 @@ fusion_rag/
 │   ├── cross_encoder_reranker.py # CrossEncoderReranker — fusion-mlx /v1/rerank (real bge-reranker-v2-m3), #70
 │   ├── query_rewriter.py    # QueryRewriter — HyDE, query expansion, condensation
 │   ├── rag_chain.py         # MultiTurnRAG (token-budget history) + DocumentChain (stuff/refine/map_reduce)
-│   ├── graph_rag.py         # GraphRAG — entity extraction + relationship-aware retrieval (internal library, NOT HTTP-wired)
+│   ├── graph_rag.py         # GraphRAG — entity extraction + relationship-aware retrieval, wired to /kb/bases/{id}/graph/* (issue #79)
 │   ├── evaluator.py         # RAGEvaluator — faithfulness/relevance/context_recall scoring (internal library, NOT HTTP-wired)
 │   ├── embedding_cache.py   # EmbeddingCache — SQLite-backed vector cache with TTL
 │   ├── retrievers.py        # MMRRetriever, ContextCompressionRetriever, FusionRetriever (internal library, NOT HTTP-wired)
@@ -85,6 +86,7 @@ fusion_rag/
 │   ├── audit_logger.py      # Search audit trail with JSON/CSV export
 │   ├── trajectory_writer.py # D1 retrieval trajectory sink (JSONL → ~/.fusion/trajectories/rag/)
 │   ├── bench.py             # Search latency benchmark runner + SQLite results
+│   ├── recall_bench.py      # Issue #79: recall@k/MRR benchmark — deterministic ≥500-chunk corpus, BM25 vs vector vs RRF ablation, mock (wiring) + real (BGE-M3, quality) modes
 │   ├── runtime_config.py    # RuntimeConfig — env-driven operator knobs (scan cap, cache TTL, token budget) + reset for tests
 │   ├── metrics.py           # R5 RED metrics registry + middleware → /metrics (Prometheus text format)
 │   ├── llm_errors.py        # LLMUnavailable — raised on total LLM failure so routes map to 503, not a fabricated 200 (L1)

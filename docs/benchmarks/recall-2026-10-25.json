@@ -1,0 +1,32 @@
+{
+  "bm25_only": {
+    "mode": "bm25_only",
+    "recall@5": 0.7939,
+    "recall@10": 0.9212,
+    "mrr@10": 1.0
+  },
+  "vector_only": {
+    "mode": "vector_only",
+    "recall@5": 0.7848,
+    "recall@10": 0.9182,
+    "mrr@10": 1.0
+  },
+  "rrf_fusion": {
+    "mode": "rrf_fusion",
+    "recall@5": 0.7909,
+    "recall@10": 0.9212,
+    "mrr@10": 1.0
+  },
+  "ablation": {
+    "best_single_mode_recall@10": 0.9212,
+    "rrf_vs_best_single": 0.0,
+    "rrf_geq_max_single": true
+  },
+  "corpus": {
+    "chunks": 505,
+    "docs": 90,
+    "queries": 55
+  },
+  "embed_mode": "real",
+  "seed": 20261025
+}

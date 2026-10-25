@@ -148,25 +148,31 @@ class GraphRAG:
 
         conn = self._get_conn()
         try:
+            # Issue #79: count only rows that actually landed — INSERT OR IGNORE
+            # silently skips duplicates (rowcount 0), and the prior per-attempt
+            # counter reported attempts, so the build result never matched
+            # get_entity_count / get_relation_count on a re-build.
             for ex in extractions:
                 chunk_id = ex["chunk_id"]
                 result = ex["result"]
                 for ent in result.get("entities", []):
                     try:
-                        conn.execute(
+                        cur = conn.execute(
                             "INSERT OR IGNORE INTO entities (name, type, chunk_id, kb_id) VALUES (?, ?, ?, ?)",
                             (ent.get("name", ""), ent.get("type", "CONCEPT"), chunk_id, kb_id),
                         )
-                        total_entities += 1
+                        if cur.rowcount > 0:
+                            total_entities += 1
                     except Exception as e:
                         logger.warning("Failed to insert entity: %s", e)
                 for rel in result.get("relations", []):
                     try:
-                        conn.execute(
+                        cur = conn.execute(
                             "INSERT OR IGNORE INTO relations (source, target, label, kb_id) VALUES (?, ?, ?, ?)",
                             (rel.get("source", ""), rel.get("target", ""), rel.get("label", "related_to"), kb_id),
                         )
-                        total_relations += 1
+                        if cur.rowcount > 0:
+                            total_relations += 1
                     except Exception as e:
                         logger.warning("Failed to insert relation: %s", e)
             conn.commit()
