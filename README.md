@@ -38,7 +38,7 @@ Local vector knowledge base service for the Fusion-MLX ecosystem — offline by 
 | **Git repo indexing** | ✅ Clone + .gitignore aware | ❌ | ❌ | ❌ |
 | **Bench API** | ✅ Latency benchmarks | ❌ | ❌ | ❌ |
 | **Distributed storage** | ✅ StoreBackend abstraction | ❌ | ❌ | ❌ |
-| **Local offline** | ✅ 100% | ⚠️ Partial | ❌ | ❌ |
+| **Local offline** | ✅ Offline by default | ⚠️ Partial | ❌ | ❌ |
 | **Zero API cost** | ✅ | ❌ | ❌ | ❌ |
 
 **One sentence:** Fusion-RAG is a unified local vector knowledge base backend for the Fusion-MLX ecosystem — all Embedding goes through fusion-mlx HTTP API, no direct MLX imports.
