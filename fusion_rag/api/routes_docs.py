@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import logging
 import os
+import tempfile
 import uuid
 from typing import Any
 
@@ -553,6 +555,48 @@ async def batch_upload_documents(kb_id: str, data: dict[str, Any]) -> dict[str, 
     }
 
 
+# Issue #90: inline `content` for these types is base64-encoded BINARY data,
+# not parseable text. Route them through the real file pipeline.
+BINARY_CONTENT_TYPES = {"pdf", "docx", "epub"}
+
+
+async def _ingest_binary_inline(
+    kb_id: str, content: str, content_type: str, doc_name: str, data: dict[str, Any]
+) -> dict[str, Any]:
+    # Issue #90: decode base64 -> temp file -> _index_document, so the payload
+    # goes through DocumentParser (PDF text extraction, EPUB chapters, and the
+    # #84 scanned-PDF OCR path when the pages carry no text).
+    try:
+        payload = base64.b64decode(content, validate=True)
+    except Exception as e:
+        raise HTTPException(
+            400,
+            f"content_type '{content_type}' requires base64-encoded binary data in 'content': {e}",
+        )
+    if not payload:
+        raise HTTPException(400, "content decodes to empty bytes")
+    fd, tmp_path = tempfile.mkstemp(suffix=f".{content_type}", prefix="fusion_rag_inline_")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+        result = await _index_document(kb_id, tmp_path, contextualize=data.get("contextualize", True))
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            logger.warning("failed to clean up inline ingest temp file: %s", tmp_path)
+    if "error" in result:
+        raise HTTPException(result.get("status_code", 400), result["error"])
+    # Surface the caller's doc_name alongside the pipeline's doc_id so the
+    # response stays informative (the doc is stored under the temp path).
+    result["doc_name"] = doc_name
+    logger.info(
+        "ingested inline binary %s (%s, %d bytes) into kb %s via temp file",
+        result.get("doc_id"), content_type, len(payload), kb_id,
+    )
+    return result
+
+
 @router.post("/bases/{kb_id}/documents/ingest", dependencies=[Depends(require_kb_action("write"))])
 async def ingest_content(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     kb = _get_base(kb_id)
@@ -575,6 +619,12 @@ async def ingest_content(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     content_type = data.get("content_type", "text")
     metadata = data.get("metadata", {})
     doc_name = data.get("doc_name", f"inline_{uuid.uuid4().hex[:8]}.{content_type}")
+    # Issue #90: binary document types (pdf/docx/epub) arrive as base64 in
+    # `content`. Indexing the base64 text itself silently pollutes retrieval
+    # with garbage chunks — decode to a temp file and run the FULL parse
+    # pipeline (DocumentParser, incl. the #84 scanned-PDF OCR path) instead.
+    if content_type in BINARY_CONTENT_TYPES:
+        return await _ingest_binary_inline(kb_id, content, content_type, doc_name, data)
     doc_path = f"inline://{doc_name}"
 
     # D5: reuse the single content-type map on document.py instead of a

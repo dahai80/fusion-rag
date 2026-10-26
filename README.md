@@ -117,7 +117,7 @@ Fusion-RAG provides a REST API at `/kb/*` for knowledge base operations.
 |--------|----------|-------------|
 | POST | `/kb/bases/{id}/documents` | Upload and index a document |
 | POST | `/kb/bases/{id}/documents/batch` | Batch upload multiple documents |
-| POST | `/kb/bases/{id}/documents/ingest` | Ingest inline content |
+| POST | `/kb/bases/{id}/documents/ingest` | Ingest inline content: text-ish types (`text`/`markdown`/`html`/`csv`) index directly; `pdf`/`docx`/`epub` treat `content` as base64-encoded binary and run the full parse pipeline (incl. the scanned-PDF OCR path) — invalid base64 returns 400 (issue #90) |
 | GET | `/kb/bases/{id}/documents` | List all documents in a KB |
 | PATCH | `/kb/bases/{id}/documents/{doc_id}` | Patch document lifecycle metadata (`status`: active/deprecated, `superseded_by`) — issue #86 |
 | DELETE | `/kb/bases/{id}/documents/{doc_id}` | Delete a document and its chunks |
@@ -608,6 +608,10 @@ ruff check fusion_rag/
 ```
 
 ---
+
+## What's New in v0.8.10
+
+- **Inline binary ingest fix (issue #90)** — `POST /kb/bases/{kb_id}/documents/ingest` with `content_type` `pdf`/`docx`/`epub` now treats `content` as base64-encoded binary: it is decoded to a temp file and run through the full `DocumentParser` pipeline (PDF text extraction, EPUB chapters, and the scanned-PDF OCR path from #84), instead of chunking and indexing the base64 text itself — which silently polluted retrieval with garbage chunks. Invalid base64 returns 400. The text-ish types (`text`/`markdown`/`html`/`csv`) keep the direct-text path unchanged. 5 new tests (PDF/EPUB parse round-trips, scanned-PDF OCR path, invalid base64, plain-text regression); full suite 439 passing.
 
 ## What's New in v0.8.9
 
