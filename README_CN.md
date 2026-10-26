@@ -221,6 +221,7 @@ Fusion-RAG 通过 `/kb/*` 提供 REST API。
 | `FUSION_RAG_OCR_URL` | (空) | OCR 服务（fusion-drawing-parser，如 `http://127.0.0.1:11491`）地址，用于扫描版 PDF 入库。留空时扫描件显式报错 "no OCR service configured"（issue #84） |
 | `FUSION_RAG_OCR_API_KEY` | (空) | 发送给 OCR 服务的 Bearer 令牌（issue #84） |
 | `FUSION_RAG_OCR_TIMEOUT` | 300 | 单个 OCR 任务的轮询总预算（秒，issue #84） |
+| `FUSION_RAG_OCR_TENANT_ID` | (空) | OCR 调用 `X-Tenant-Id` 兜底值：请求上下文无租户时使用（后台目录监听入库、单租户部署）。OCR 服务端中间件无条件要求该头（issue #88）；请求内调用会自动透传当前租户 |
 | `FUSION_RAG_LOW_OCR_CONFIDENCE` | 0.85 | OCR 片段置信度低于该值时，检索结果与 `/ask` 引用标记 `low_confidence: true`（issue #85） |
 
 ### 使用 start.sh
