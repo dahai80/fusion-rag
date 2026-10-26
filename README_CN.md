@@ -101,6 +101,7 @@ Fusion-RAG 通过 `/kb/*` 提供 REST API。
 | 方法 | 端点 | 说明 |
 |------|------|------|
 | POST | `/kb/bases/{id}/documents` | 上传并索引文档 |
+| POST | `/kb/bases/{id}/documents/ingest` | 内联内容入库：`text`/`markdown`/`html`/`csv` 直接入库；`pdf`/`docx`/`epub` 的 `content` 为 base64 二进制，走完整解析管线（含扫描件 OCR 路径），非法 base64 返回 400——issue #90 |
 | PATCH | `/kb/bases/{id}/documents/{doc_id}` | 修改文档生命周期元数据（`status`：active/deprecated、`superseded_by`）——issue #86 |
 | POST | `/kb/bases/{id}/scan` | 扫描目录批量索引 |
 
@@ -187,6 +188,10 @@ Fusion-RAG 通过 `/kb/*` 提供 REST API。
 ---
 
 ## 更新日志
+
+### v0.8.10
+
+- **内联二进制入库修复（issue #90）** — `POST /kb/bases/{id}/documents/ingest` 中 `content_type` 为 `pdf`/`docx`/`epub` 时，`content` 现在按 base64 编码的二进制数据处理：解码为临时文件并走完整 `DocumentParser` 解析管线（PDF 文本抽取、EPUB 章节、扫描件 OCR 路径 #84），而不是把 base64 文本本身分片入库污染检索。非法 base64 返回 400；`text`/`markdown`/`html`/`csv` 直接入库路径不变。新增 5 个测试（PDF/EPUB 解析往返、扫描件 OCR 路径、非法 base64、纯文本回归），全量 439 通过。
 
 ### v0.8.8
 
