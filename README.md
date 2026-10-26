@@ -119,6 +119,7 @@ Fusion-RAG provides a REST API at `/kb/*` for knowledge base operations.
 | POST | `/kb/bases/{id}/documents/batch` | Batch upload multiple documents |
 | POST | `/kb/bases/{id}/documents/ingest` | Ingest inline content |
 | GET | `/kb/bases/{id}/documents` | List all documents in a KB |
+| PATCH | `/kb/bases/{id}/documents/{doc_id}` | Patch document lifecycle metadata (`status`: active/deprecated, `superseded_by`) — issue #86 |
 | DELETE | `/kb/bases/{id}/documents/{doc_id}` | Delete a document and its chunks |
 | PUT | `/kb/bases/{id}/documents/{doc_id}` | Replace a document (re-index) |
 | GET | `/kb/bases/{id}/documents/{doc_id}/status` | Get document indexing status |
@@ -131,8 +132,9 @@ Fusion-RAG provides a REST API at `/kb/*` for knowledge base operations.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/kb/bases/{id}/search` | Semantic search (hybrid, rerank, templates) |
-| POST | `/kb/bases/{id}/ask` | RAG Q&A (model, hybrid, rerank, folder_prefix) |
+| POST | `/kb/bases/{id}/search` | Semantic search (hybrid, rerank, templates, status_filter) |
+| POST | `/kb/bases/{id}/ask` | RAG Q&A (model, hybrid, rerank, folder_prefix, status_filter, citations) |
+| POST | `/kb/bases/{id}/similar` | Near-duplicate / version-drift search by text or raw embedding (issue #83) |
 
 #### Search Parameters
 
@@ -151,6 +153,7 @@ Fusion-RAG provides a REST API at `/kb/*` for knowledge base operations.
 | `folder_prefix` | (none) | Filter results by folder path prefix |
 | `template` | (none) | Search template name (general/code/design) |
 | `rewrite_mode` | (none) | Query rewrite: hyde, expand, condense |
+| `status_filter` | "active" | Document status filter: `active` (default — drops deprecated docs), `deprecated`, `all` (issue #86) |
 
 #### Ask Parameters
 
@@ -166,6 +169,7 @@ Fusion-RAG provides a REST API at `/kb/*` for knowledge base operations.
 | `rerank_model` | from env | Cross-encoder model name |
 | `rerank_top_n` | 20 | Candidate pool size before truncating to `top_k` |
 | `folder_prefix` | (none) | Filter by folder path |
+| `status_filter` | "active" | Document status filter: `active`, `deprecated`, `all` (issue #86). Deprecated chunks kept via `all` are marked `[已作废版本]` in the LLM context; the response carries per-chunk `citations[]` + `has_low_confidence` (issue #85) |
 
 ### Version Snapshots
 
@@ -314,6 +318,41 @@ FUSION_MLX_URL=http://127.0.0.1:11434/v1 FUSION_MLX_API_KEY=<key> \
 
 Mock mode uses deterministic hashed-bag embeddings and is wiring-regression evidence only — never quality evidence. Real mode hits the live fusion-mlx embeddings endpoint with the cache disabled. CI (`tests/test_recall_benchmark.py`) asserts the pipeline runs and RRF fusion never drops recall@10 below the best single mode. Recorded results live in `docs/benchmarks/` — see [docs/benchmarks/README.md](docs/benchmarks/README.md) for the ablation decision.
 
+### Similar-Chunk Search (Issue #83)
+
+`POST /kb/bases/{kb_id}/similar` finds near-duplicate / version-drift chunks. Input is either `text` (embedded with the same service-wide model as ingest, so scores are directly comparable) or a raw `embedding` vector:
+
+```bash
+curl -X POST http://127.0.0.1:11436/kb/bases/{kb_id}/similar \
+  -H "Content-Type: application/json" \
+  -d '{"text": "排污许可证 编号 X123", "top_k": 10, "threshold": 0.85, "exclude_doc_id": "<doc_id>"}'
+```
+
+Parameters: `top_k` (1-100, default 10), `threshold` (default: the KB's `similarity_threshold`), `exclude_doc_id` (drop a doc's own chunks — dedup-within-corpus), `snippet_chars` (1-2000, default 200), `status_filter` (`active`/`deprecated`/`all`). Returns `matches[]` with `doc_id`/`doc_name`/`chunk_id`/`score`/`snippet`/`page`/`status` + `count` + `threshold`.
+
+### EPUB + Scanned-PDF OCR (Issues #84/#85)
+
+`DocumentParser` now reads EPUB (each XHTML chapter becomes a `# <name>` headed section via ebooklib). Scanned PDFs (pages present, zero extractable text) are no longer silently ingested as empty docs: they are handed to the [fusion-drawing-parser](../fusion-drawing-parser) OCR service over HTTP and fail visibly when none is configured:
+
+```bash
+export FUSION_RAG_OCR_URL=http://127.0.0.1:11491     # drawing-parser base URL
+export FUSION_RAG_OCR_API_KEY=<jwt>                  # Bearer token (may be empty)
+```
+
+OCR chunks bypass the chunker + contextualizer (they are already slice-sized) and carry per-chunk evidence metadata (issue #85): `ocr_confidence`, `low_confidence` (vs `FUSION_RAG_LOW_OCR_CONFIDENCE`, default 0.85), and `slice_ref` (`task_id`/`slice_id`/`url` linking back to the source slice image). Every `/search` result, `/ask` source, and `/ask` citation from an OCR doc carries these fields, so consumers can flag shaky OCR text and show the original image.
+
+### Document Active/Deprecated Status (Issue #86)
+
+`PATCH /kb/bases/{kb_id}/documents/{doc_id}` flips a document's lifecycle status without re-indexing:
+
+```bash
+curl -X PATCH http://127.0.0.1:11436/kb/bases/{kb_id}/documents/{doc_id} \
+  -H "Content-Type: application/json" \
+  -d '{"status": "deprecated", "superseded_by": "regulations_v2.pdf"}'
+```
+
+Status is resolved at search time from the documents table (the PATCH flips it there), so a deprecated doc vanishes from default `/search`, `/ask`, and `/similar` immediately. `status_filter=deprecated` retrieves only deprecated docs (audit/traceability); `status_filter=all` keeps everything — deprecated chunks then appear marked `[已作废版本]` in the LLM context so the model knows they are stale. `/ask` additionally returns per-chunk `citations[]` (every cited chunk, not deduped) and `has_low_confidence`.
+
 ---
 
 ## Architecture
@@ -377,7 +416,7 @@ Modules migrated to fusion-core: `contextualizer`, `query_rewriter`, `reranker`,
 | Module | File | Description |
 |--------|------|-------------|
 | **Knowledge Base** | `engine/knowledge_base.py` | KB CRUD, config, persistence |
-| **Document Parser** | `engine/document.py` | PDF, DOCX, MD, TXT, HTML, code |
+| **Document Parser** | `engine/document.py` | PDF, DOCX, EPUB, MD, TXT, HTML, code, scanned PDF via OCR service |
 | **Chunker** | `engine/chunker.py` | Semantic, fixed, code, AST chunking |
 | **AST Chunker** | `engine/ast_chunker.py` | Python AST-aware code chunking |
 | **BM25 Index** | `engine/bm25_index.py` | Okapi BM25 with jieba Chinese tokenization |
@@ -457,6 +496,10 @@ Modules migrated to fusion-core: `contextualizer`, `query_rewriter`, `reranker`,
 | `FUSION_RAG_REQUIRE_IDENTITY` | (empty) | Set `1` to enable authoritative tenant resolution via fusion-identity (#68): `/kb/*` requests require a valid `Authorization: Bearer <JWT>` verified by the identity service, and the tenant is taken from the JWT `tid` claim. `X-Fusion-Tenant` is demoted to defense-in-depth (must match the JWT `tid` if present). Default off. |
 | `FUSION_IDENTITY_URL` | http://127.0.0.1:11470 | fusion-identity base URL (HTTP service, port 11470). Used only when `FUSION_RAG_REQUIRE_IDENTITY=1`. |
 | `FUSION_IDENTITY_SERVICE_TOKEN` | (empty) | Service token sent as `Authorization: Bearer` to fusion-identity `/api/v1/auth/verify`. Required when `FUSION_RAG_REQUIRE_IDENTITY=1` (fail-closed if unset). |
+| `FUSION_RAG_OCR_URL` | (empty) | Base URL of the OCR service (fusion-drawing-parser, e.g. `http://127.0.0.1:11491`) for scanned-PDF ingestion. Empty = scanned PDFs fail visibly with "no OCR service configured" (issue #84). |
+| `FUSION_RAG_OCR_API_KEY` | (empty) | Bearer token sent to the OCR service (issue #84). |
+| `FUSION_RAG_OCR_TIMEOUT` | 300 | Total poll budget in seconds for one OCR task (issue #84). |
+| `FUSION_RAG_LOW_OCR_CONFIDENCE` | 0.85 | OCR chunk confidence below this flags `low_confidence: true` on search results and `/ask` citations (issue #85). |
 
 **Multi-tenant isolation (#61).** When `FUSION_RAG_REQUIRE_GATEWAY=1`, fusion-rag enforces the backend half of fusion-gateway's tenant scoping: every `/kb/*` request must transit the gateway (proven by the `X-Fusion-Route: gateway-decision` header) and carries an authoritative `X-Fusion-Tenant`. KBs are stamped with their tenant at creation and scoped on list/get — a tenant-A caller never sees tenant-B's KBs. The client-supplied `X-Space-Id` is a non-authoritative passthrough, ignored for scoping. `/health`, `/ready`, `/metrics`, `/mcp`, and auth routes stay open so the service remains observable when the gateway is down. Default off; no migration needed (existing KBs have `tenant=null`).
 
@@ -562,6 +605,14 @@ ruff check fusion_rag/
 ```
 
 ---
+
+## What's New in v0.8.8
+
+- **Similar-chunk search (issue #83)** — new `POST /kb/bases/{kb_id}/similar` endpoint for near-duplicate / version-drift detection: query by `text` (embedded with the same service-wide model as ingest, so scores are comparable) or a raw `embedding` vector; `top_k`, `threshold`, `exclude_doc_id` (dedup-within-corpus), `snippet_chars`, and `status_filter`. Returns `matches[]` with full evidence anchors (doc_id/chunk_id/page/status).
+- **EPUB + scanned-PDF OCR (issue #84)** — `DocumentParser` now reads EPUB (ebooklib, each XHTML chapter becomes a headed section). Scanned PDFs (pages present, zero extractable text) are handed to the fusion-drawing-parser OCR service (`FUSION_RAG_OCR_URL`, `FUSION_RAG_OCR_API_KEY`, `FUSION_RAG_OCR_TIMEOUT`) instead of being silently ingested as empty docs — and fail visibly when no OCR service is configured. OCR chunks bypass the chunker + contextualizer (already slice-sized) and carry per-chunk evidence metadata.
+- **OCR evidence metadata + citations (issue #85)** — every `/search` result and `/ask` citation from an OCR-sourced chunk carries `ocr_confidence`, `low_confidence` (vs `FUSION_RAG_LOW_OCR_CONFIDENCE`, default 0.85), and `slice_ref` (`task_id`/`slice_id`/`url` linking back to the source slice image). `/ask` additionally returns per-chunk `citations[]` (not deduped) and a top-level `has_low_confidence` flag.
+- **Document active/deprecated status (issue #86)** — `PATCH /kb/bases/{kb_id}/documents/{doc_id}` flips a doc's lifecycle `status` (`active`/`deprecated`, optional `superseded_by`) with no re-indexing. Status is resolved at search time from the documents table, so a deprecated doc vanishes from default `/search`, `/ask`, and `/similar` immediately; `status_filter` (`active`/`deprecated`/`all`) controls each query, and deprecated chunks kept via `all` are marked `[已作废版本]` in the LLM context.
+- 19 new tests (EPUB parse + OCR roundtrip + failure paths, /similar validation + exclusion + status, PATCH + status filtering + /ask citations), full suite 428 green, ruff clean.
 
 ## What's New in v0.8.3
 

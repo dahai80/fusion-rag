@@ -200,6 +200,58 @@ class MetadataStore:
                 (count, chars, now, doc_id),
             )
 
+    def update_document_metadata(self, doc_id: str, metadata: dict[str, Any]) -> None:
+        # Issue #86: merge-patch the document metadata JSON (existing keys the
+        # patch does not mention survive; patch keys overwrite).
+        now = time.time()
+        with self._cursor() as conn:
+            row = conn.execute("SELECT metadata FROM documents WHERE id = ?", (doc_id,)).fetchone()
+            if not row:
+                return
+            cur = json.loads(row["metadata"] or "{}")
+            cur.update(metadata)
+            conn.execute(
+                "UPDATE documents SET metadata = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(cur, ensure_ascii=False), now, doc_id),
+            )
+
+    def set_chunk_meta_field(self, doc_id: str, key: str, value: Any) -> int:
+        # Issue #86: mirror a metadata key onto every chunk row of a doc via
+        # SQLite json_set, so the search path reads it from chunk metadata with
+        # no extra lookup. Key is interpolated into a JSON path (not bind-able),
+        # so validate it as a SQL identifier first.
+        from .._validators import validate_sql_identifier
+
+        validate_sql_identifier(key, field="chunk_meta_key")
+        with self._cursor() as conn:
+            cur = conn.execute(
+                f"UPDATE chunks SET metadata = json_set(metadata, '$.{key}', ?) WHERE doc_id = ?",
+                (json.dumps(value, ensure_ascii=False), doc_id),
+            )
+            return cur.rowcount
+
+    def get_document_status_map(self, doc_ids: list[str]) -> dict[str, str]:
+        # Issue #86: batch doc_id -> status lookup for the search-time status
+        # filter (authoritative source: documents.metadata.status, default
+        # "active" for docs ingested before the field existed).
+        ids = [d for d in dict.fromkeys(doc_ids) if d]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        with self._read_cursor() as conn:
+            rows = conn.execute(
+                f"SELECT id, metadata FROM documents WHERE id IN ({placeholders})",
+                ids,
+            ).fetchall()
+        out = {}
+        for r in rows:
+            try:
+                meta = json.loads(r["metadata"] or "{}")
+            except Exception:
+                meta = {}
+            out[r["id"]] = meta.get("status", "active")
+        return out
+
     def add_chunk(
         self,
         chunk_id: str,
