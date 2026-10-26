@@ -337,6 +337,8 @@ Parameters: `top_k` (1-100, default 10), `threshold` (default: the KB's `similar
 ```bash
 export FUSION_RAG_OCR_URL=http://127.0.0.1:11491     # drawing-parser base URL
 export FUSION_RAG_OCR_API_KEY=<jwt>                  # Bearer token (may be empty)
+export FUSION_RAG_OCR_TENANT_ID=<tenant>             # X-Tenant-Id fallback (single-tenant /
+                                                      # background ingestion; issue #88)
 ```
 
 OCR chunks bypass the chunker + contextualizer (they are already slice-sized) and carry per-chunk evidence metadata (issue #85): `ocr_confidence`, `low_confidence` (vs `FUSION_RAG_LOW_OCR_CONFIDENCE`, default 0.85), and `slice_ref` (`task_id`/`slice_id`/`url` linking back to the source slice image). Every `/search` result, `/ask` source, and `/ask` citation from an OCR doc carries these fields, so consumers can flag shaky OCR text and show the original image.
@@ -499,6 +501,7 @@ Modules migrated to fusion-core: `contextualizer`, `query_rewriter`, `reranker`,
 | `FUSION_RAG_OCR_URL` | (empty) | Base URL of the OCR service (fusion-drawing-parser, e.g. `http://127.0.0.1:11491`) for scanned-PDF ingestion. Empty = scanned PDFs fail visibly with "no OCR service configured" (issue #84). |
 | `FUSION_RAG_OCR_API_KEY` | (empty) | Bearer token sent to the OCR service (issue #84). |
 | `FUSION_RAG_OCR_TIMEOUT` | 300 | Total poll budget in seconds for one OCR task (issue #84). |
+| `FUSION_RAG_OCR_TENANT_ID` | (empty) | `X-Tenant-Id` fallback for OCR calls when no request tenant is bound (background watch-loop ingestion, single-tenant deployments). The OCR service requires the header unconditionally (issue #88); during a request the calling tenant is passed through automatically. |
 | `FUSION_RAG_LOW_OCR_CONFIDENCE` | 0.85 | OCR chunk confidence below this flags `low_confidence: true` on search results and `/ask` citations (issue #85). |
 
 **Multi-tenant isolation (#61).** When `FUSION_RAG_REQUIRE_GATEWAY=1`, fusion-rag enforces the backend half of fusion-gateway's tenant scoping: every `/kb/*` request must transit the gateway (proven by the `X-Fusion-Route: gateway-decision` header) and carries an authoritative `X-Fusion-Tenant`. KBs are stamped with their tenant at creation and scoped on list/get — a tenant-A caller never sees tenant-B's KBs. The client-supplied `X-Space-Id` is a non-authoritative passthrough, ignored for scoping. `/health`, `/ready`, `/metrics`, `/mcp`, and auth routes stay open so the service remains observable when the gateway is down. Default off; no migration needed (existing KBs have `tenant=null`).
@@ -605,6 +608,10 @@ ruff check fusion_rag/
 ```
 
 ---
+
+## What's New in v0.8.9
+
+- **OCR tenant header passthrough (issue #88)** — `OcrHook` now sends `X-Tenant-Id` on every call to the drawing-parser OCR service (its tenant middleware 401s header-less calls, breaking scanned-PDF ingest in multi-tenant deployments). The tenant is resolved from the calling request's context (works with both `#61` gateway and `#68` identity modes); `FUSION_RAG_OCR_TENANT_ID` is the fallback for background watch-loop ingestion and single-tenant deployments. Invalid charset values are dropped and logged, never forwarded.
 
 ## What's New in v0.8.8
 

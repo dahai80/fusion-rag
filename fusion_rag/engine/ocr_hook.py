@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 
 from fusion_core.http_client import get_async_client
 
@@ -21,6 +22,29 @@ TERMINAL_DONE = "done"
 TERMINAL_FAILED = {"failed", "cancelled"}
 DEFAULT_TIMEOUT = 300.0
 POLL_INTERVAL = 1.0
+
+# Issue #88: drawing-parser (fusion_core.tenant middleware) requires X-Tenant-Id
+# on every call — missing header is a 401. Same conservative charset as the
+# fusion-rag tenant id: a bad value must not reach the downstream service.
+TENANT_ID_HEADER = "X-Tenant-Id"
+_TENANT_RE = re.compile(r"^[A-Za-z0-9_\-:.]{1,128}$")
+
+
+def _resolve_tenant_id() -> str | None:
+    # 1. The tenant of the request that triggered the ingest (set by
+    #    tenant_middleware, read from the contextvar) — the multi-tenant path.
+    # 2. FUSION_RAG_OCR_TENANT_ID env fallback — for background ingestion
+    #    (directory watch loop, no request context) and single-tenant
+    #    deployments where no gateway/identity resolution is on.
+    from fusion_rag.api.tenant import get_request_tenant
+
+    tenant = get_request_tenant()
+    if not tenant:
+        tenant = os.environ.get("FUSION_RAG_OCR_TENANT_ID", "").strip() or None
+    if tenant and not _TENANT_RE.match(tenant):
+        logger.warning("OCR tenant id rejected (invalid charset): %r", tenant[:32])
+        return None
+    return tenant
 
 
 class OcrUnavailable(Exception):
@@ -46,9 +70,15 @@ class OcrHook:
             self.timeout = DEFAULT_TIMEOUT
 
     def _headers(self) -> dict:
+        headers: dict = {}
         if self.api_key:
-            return {"Authorization": f"Bearer {self.api_key}"}
-        return {}
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        # Issue #88: pass the calling request's tenant through — drawing-parser
+        # rejects header-less calls with 401 in multi-tenant deployments.
+        tenant = _resolve_tenant_id()
+        if tenant:
+            headers[TENANT_ID_HEADER] = tenant
+        return headers
 
     def _client(self):
         return get_async_client(self.base_url, timeout=30.0)

@@ -187,3 +187,86 @@ class TestScannedPdf:
             )
             assert resp.status_code == 400
             assert "OCR error" in resp.json()["detail"]
+
+
+class TestOcrTenantHeader:
+    # Issue #88: drawing-parser requires X-Tenant-Id on every call (401 when
+    # missing). OcrHook must pass the request tenant through, with an env
+    # fallback for background/single-tenant ingestion.
+
+    def test_headers_carry_request_tenant(self, monkeypatch):
+        from fusion_rag.api import tenant as tenant_mod
+
+        monkeypatch.delenv("FUSION_RAG_OCR_TENANT_ID", raising=False)
+        tenant_mod._request_tenant.set("team-a")
+        try:
+            headers = OcrHook()._headers()
+        finally:
+            tenant_mod.reset_request_tenant()
+        assert headers["X-Tenant-Id"] == "team-a"
+
+    def test_headers_env_fallback_when_no_request_tenant(self, monkeypatch):
+        from fusion_rag.api import tenant as tenant_mod
+
+        monkeypatch.delenv("FUSION_RAG_OCR_TENANT_ID", raising=False)
+        tenant_mod.reset_request_tenant()
+        monkeypatch.setenv("FUSION_RAG_OCR_TENANT_ID", "solo-tenant")
+        assert OcrHook()._headers()["X-Tenant-Id"] == "solo-tenant"
+
+    def test_request_tenant_wins_over_env(self, monkeypatch):
+        from fusion_rag.api import tenant as tenant_mod
+
+        monkeypatch.setenv("FUSION_RAG_OCR_TENANT_ID", "env-tenant")
+        tenant_mod._request_tenant.set("req-tenant")
+        try:
+            assert OcrHook()._headers()["X-Tenant-Id"] == "req-tenant"
+        finally:
+            tenant_mod.reset_request_tenant()
+
+    def test_no_tenant_header_when_unresolvable(self, monkeypatch):
+        from fusion_rag.api import tenant as tenant_mod
+
+        monkeypatch.delenv("FUSION_RAG_OCR_TENANT_ID", raising=False)
+        tenant_mod.reset_request_tenant()
+        assert "X-Tenant-Id" not in OcrHook()._headers()
+
+    def test_invalid_charset_tenant_dropped(self, monkeypatch):
+        monkeypatch.setenv("FUSION_RAG_OCR_TENANT_ID", "bad/tenant\\..!")
+        assert "X-Tenant-Id" not in OcrHook()._headers()
+
+    def test_parse_file_sends_tenant_header(self, monkeypatch):
+        # End-to-end: the /v1/parse call itself carries X-Tenant-Id resolved
+        # from the request context (the middleware path).
+        monkeypatch.setenv("FUSION_RAG_OCR_URL", "http://127.0.0.1:11491")
+        from fusion_rag.api import tenant as tenant_mod
+
+        tenant_mod._request_tenant.set("team-b")
+        try:
+            seen: dict = {}
+
+            class _Resp:
+                status_code = 200
+                text = "{}"
+
+                def __init__(self, payload):
+                    self._payload = payload
+
+                def json(self):
+                    return self._payload
+
+            class _Client:
+                async def post(self, path, json=None, headers=None):
+                    seen["parse_headers"] = headers
+                    return _Resp({"task_id": "t_1"})
+
+                async def get(self, path, headers=None):
+                    if path.endswith("/result"):
+                        return _Resp({"text_chunks": []})
+                    return _Resp({"status": "done"})
+
+            with patch("fusion_rag.engine.ocr_hook.get_async_client", return_value=_Client()):
+                chunks = asyncio.run(OcrHook().parse_file("scanned.pdf"))
+            assert chunks == []
+            assert seen["parse_headers"]["X-Tenant-Id"] == "team-b"
+        finally:
+            tenant_mod.reset_request_tenant()
