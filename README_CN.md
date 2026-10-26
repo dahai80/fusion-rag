@@ -4,7 +4,7 @@
 
 **Apple Silicon 原生离线向量知识库底座**
 
-Fusion-MLX 生态的统一本地向量知识库服务——100% 离线，数据不出设备。
+Fusion-MLX 生态的统一本地向量知识库服务——默认离线，数据不出设备（云端 Embedding 回退 `FUSION_RAG_FALLBACK_URL` 需显式开启，默认关闭）。
 
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -24,7 +24,7 @@ Fusion-MLX 生态的统一本地向量知识库服务——100% 离线，数据�
 | **Apple Silicon 优化** | ✅ LanceDB + MLX | ❌ | ❌ |
 | **多知识库隔离** | ✅ | ✅ | ❌ |
 | **代码专属分片** | ✅ | ❌ | ❌ |
-| **本地离线** | ✅ 100% | ⚠️ 部分 | ❌ |
+| **本地离线** | ✅ 默认离线 | ⚠️ 部分 | ❌ |
 | **零 API 费用** | ✅ | ❌ | ❌ |
 
 **一句话：** Fusion-RAG 是 Fusion-MLX 生态的统一本地向量知识库底座——所有 Embedding 通过 fusion-mlx HTTP API 调用，不直接调用 MLX。
@@ -247,7 +247,7 @@ pytest tests/ --cov=fusion_rag --cov-report=term-missing
 | Apple Silicon 优化 | ❌ | ❌ | ✅ LanceDB + MLX |
 | 多知识库隔离 | ❌ | ❌ | ✅ |
 | 代码分片 | ❌ | ❌ | ✅ |
-| 本地离线 | ✅ | ✅ | ✅ 100% |
+| 本地离线 | ✅ | ✅ | ✅ 默认离线 |
 | 零 API 费用 | ✅ | ✅ | ✅ |
 
 ---
