@@ -49,8 +49,8 @@ fusion_rag/
 │   ├── server.py          # FastAPI app factory + uvicorn runner
 │   ├── routes.py          # /kb router: shared helpers, /status, /stats, sub-router mount hub
 │   ├── routes_kb.py       # KB CRUD endpoints (/kb/bases/*)
-│   ├── routes_docs.py     # Document ingest/list/delete/replace/scan/watch endpoints
-│   ├── routes_search.py   # /search + /ask endpoints (hybrid, rerank, templates, rewrite)
+│   ├── routes_docs.py     # Document ingest/list/delete/replace/patch status/scan/watch endpoints
+│   ├── routes_search.py   # /search + /ask + /similar endpoints (hybrid, rerank, templates, rewrite, status_filter)
 │   ├── routes_admin.py    # Versions, templates, permissions, audit, sync, bench endpoints
 │   ├── routes_project.py  # Project-KB mapping endpoints (/kb/projects/*)
 │   ├── routes_auth.py     # Auth token/login endpoints
@@ -72,6 +72,7 @@ fusion_rag/
 │   ├── preprocessor.py      # DocumentPreprocessor (clean/normalize/dedup) + RecursiveChunker
 │   ├── bm25_index.py        # BM25Index — Okapi BM25 with jieba Chinese tokenization, SQLite persistence
 │   ├── contextualizer.py    # Contextualizer — Anthropic Contextual Retrieval for chunk context
+│   ├── ocr_hook.py          # Issue #84/#85: OcrHook — async client to fusion-drawing-parser for scanned-PDF OCR
 │   ├── reranker.py          # Reranker (batch LLM scoring) + HybridSearch (alpha-weighted + RRF fusion)
 │   ├── cross_encoder_reranker.py # CrossEncoderReranker — fusion-mlx /v1/rerank (real bge-reranker-v2-m3), #70
 │   ├── query_rewriter.py    # QueryRewriter — HyDE, query expansion, condensation
@@ -136,6 +137,10 @@ fusion_rag/
 - **Multi-tenant isolation (#61)**: opt-in via `FUSION_RAG_REQUIRE_GATEWAY=1`. When on, `/kb/*` requests must carry `X-Fusion-Route: gateway-decision` (the gateway origin signal) or are rejected 403, and KB list/get are scoped to the `X-Fusion-Tenant` header (the authoritative, gateway-derived tenant). A `tenant` field on `KnowledgeBase` stamps ownership at create time; existing KBs have `tenant=None` and are invisible to tenant-scoped callers. The per-KB ACL (`access.py`) is the second defense (sub-tenant path rules); tenant scoping is the first (list/get hide other tenants' KBs). Default OFF — single-tenant local-first dev sees zero behavior change. `/health`, `/ready`, `/metrics`, `/mcp`, and auth routes are exempt from the gateway-origin gate so the service stays observable when the gateway is down.
 - **Per-tenant vector collection isolation (#66)**: when `FUSION_RAG_STORE_BACKEND=qdrant`, `QdrantBackend` picks the Qdrant collection PER REQUEST from `tenant.get_request_tenant()` (the `X-Fusion-Tenant` contextvar). Tenant set → `tenant_id_{tenant}`; tenant None → shared `fusion_rag_kb_{kb_id}`. This is the physical data-layer isolation tier (cross-tenant vectors invisible at the collection level); the #61 KB `tenant` field is the logical tier. The backend reads the tenant lazily per call — one pooled backend serves all tenants, collection chosen per request. `chunk_id` (str) → Qdrant point id (int) via deterministic blake2b, so re-ingest overwrites. Keyword search stays in-process BM25 (Qdrant is vector-only). Default `local` backend unaffected.
 - **Authoritative tenant resolution via fusion-identity (#68)**: opt-in via `FUSION_RAG_REQUIRE_IDENTITY=1`. When on, `/kb/*` requests require `Authorization: Bearer <JWT>`; `IdentityClient` (`api/identity.py`) verifies it via fusion-identity `POST /api/v1/auth/verify` (service-token-gated by `FUSION_IDENTITY_SERVICE_TOKEN`), and the JWT `tid` becomes the authoritative tenant, set into the SAME `_request_tenant` contextvar that #61/#66 scoping read — so KB scoping and per-tenant collection isolation work unchanged. `X-Fusion-Tenant` is demoted to defense-in-depth (must equal the JWT `tid` if present, else 401), retiring the blind-trust path. No/invalid/revoked JWT → 401; unreachable identity → fail-closed deny (NOT fallback to header). fusion-identity is an HTTP service dependency (port 11470, `FUSION_IDENTITY_URL`), NOT a Python import — fusion-rag talks to it over plain HTTP via `fusion_core.http_client`'s pooled client. Identity mode supersedes gateway mode on `/kb/*` when both are on (identity is the primary authority; the #61 gateway-origin gate is the defense-in-depth tier beneath it). Default OFF — single-tenant local-first dev sees zero behavior change. `/health`, `/ready`, `/metrics`, `/mcp`, `/v1`, `/auth`, and the dynamic `/store/*` M2M surface are exempt. A short-TTL in-process cache (15s, keyed by token hash) avoids hitting identity on every request in a burst; revoked tokens are never cached.
+- **Similar-chunk search (#83)**: `POST /kb/bases/{kb_id}/similar` (`routes_search.py`) finds near-duplicate / version-drift chunks. Input `text` (embedded with the shared service-wide `EmbeddingClient`, so scores are comparable with ingest-time vectors) or raw `embedding`. Params: `top_k` (1-100), `threshold` (default: KB `similarity_threshold`), `exclude_doc_id` (widens fetch_k by the multiplier so exclusion still fills top_k), `snippet_chars`, `status_filter`. Vector-only search (no BM25/RRF) — dedup is a semantic-similarity question.
+- **Scanned-PDF OCR + EPUB (#84)**: `DocumentParser` parses EPUB (ebooklib). PDFs with pages but zero extractable text are scanned docs: they go to the fusion-drawing-parser OCR service via `OcrHook` (`engine/ocr_hook.py`, env `FUSION_RAG_OCR_URL`/`_API_KEY`/`_TIMEOUT`) — no OCR service configured means a VISIBLE error (ingest 400), never a silently empty doc. OCR chunks bypass chunker + contextualizer (already slice-sized) via `_chunks_from_ocr` (`routes_docs.py`); drawing-parser pages are 0-based, fusion-rag pages are 1-based (chunk page = ocr page + 1).
+- **OCR evidence + citations (#85)**: OCR chunks carry flat `ocr_*` metadata keys (`ocr_confidence`, `ocr_task_id`, `ocr_slice_id`, `ocr_slice_url`, `ocr_bbox`, `ocr_kind`). `_normalize_evidence` (`routes.py`) surfaces `ocr_confidence` + `low_confidence` (vs `RuntimeConfig.low_ocr_confidence`, env `FUSION_RAG_LOW_OCR_CONFIDENCE`, default 0.85) + `slice_ref` on search rows. `/ask` additionally returns per-chunk `citations[]` (NOT deduped, unlike `sources[]`) + top-level `has_low_confidence` — consumers flag shaky OCR text and link the source slice image.
+- **Document active/deprecated status (#86)**: `PATCH /kb/bases/{kb_id}/documents/{doc_id}` (`routes_docs.py`) flips doc `status` (`active`/`deprecated`, optional `superseded_by`) in the documents table + mirrors onto SQLite chunk rows. CRITICAL: search results read chunk metadata from the LANCEDB records written at ingest — stale after a PATCH — so `_apply_status_filter` (`routes.py`) resolves the AUTHORITATIVE status from the documents table at query time (`MetadataStore.get_document_status_map`, one batched query per search) and overwrites the row's `status`. `/search`, `/ask`, `/similar` all accept `status_filter` (`active` default / `deprecated` / `all`); `/ask` marks deprecated context `[已作废版本]` so the model knows it's stale.
 
 ### Environment Variables
 
@@ -170,6 +175,10 @@ fusion_rag/
 | `FUSION_RAG_RERANK_BACKEND` | llm | Rerank stage: `llm` (legacy LLM prompt-scoring `Reranker`) or `cross_encoder` (real cross-encoder via fusion-mlx `POST /v1/rerank`, e.g. `bge-reranker-v2-m3`). Issue #70. |
 | `FUSION_RAG_RERANK_MODEL` | (empty) | Cross-encoder model name for the `cross_encoder` backend. When set, `/search`+`/ask` default `rerank=true` (rerank ON when a model is available). Empty = off unless caller passes `rerank=true`. Issue #70. |
 | `FUSION_RAG_RERANK_TOP_N` | 20 | Candidate pool size fed to the reranker before truncating to `top_k` (recall lift, issue #70). |
+| `FUSION_RAG_OCR_URL` | (empty) | OCR service base URL (fusion-drawing-parser) for scanned-PDF ingestion. Empty = scanned PDFs fail visibly with "no OCR service configured" (issue #84). OCR chunks bypass chunker+contextualizer, carry per-chunk evidence (ocr_confidence/slice_ref, issue #85). |
+| `FUSION_RAG_OCR_API_KEY` | (empty) | Bearer token for the OCR service (issue #84). |
+| `FUSION_RAG_OCR_TIMEOUT` | 300 | Total poll budget in seconds for one OCR task (issue #84). |
+| `FUSION_RAG_LOW_OCR_CONFIDENCE` | 0.85 | OCR chunk confidence below this flags `low_confidence: true` on search results and /ask citations (issue #85). |
 | `FUSION_RAG_WATCH_CAP` | 16 | Max concurrent directory watches per process (R3) |
 | `FUSION_RAG_TRAJECTORY_MAX_MB` | 100 | Max trajectory file MB before rotation (R6) |
 | `FUSION_RAG_TRAJECTORY_KEEP` | 5 | Rotated trajectory files kept (R6) |
@@ -196,7 +205,7 @@ Probes: `/health` = liveness (process up), `/ready` = readiness (deps reachable,
 
 ### Dependencies
 
-Runtime: fusion-core (in-tree), httpx, fastapi, uvicorn, pydantic, lancedb, pyarrow, PyMuPDF, python-docx, markdownify, aiofiles, jieba, rank_bm25
+Runtime: fusion-core (in-tree), httpx, fastapi, uvicorn, pydantic, lancedb, pyarrow, PyMuPDF, python-docx, ebooklib, markdownify, aiofiles, jieba, rank_bm25
 Test: pytest, pytest-asyncio, pytest-cov, pytest-mock
 
 Requires Python 3.12+ (CI matrix: 3.12, 3.13; local venv runs 3.14) and macOS Apple Silicon. fusion-mlx must be running for embedding/RAG endpoints.

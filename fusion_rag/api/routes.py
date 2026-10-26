@@ -109,6 +109,14 @@ def _normalize_evidence(results: list[dict]) -> list[dict]:
     # evidence anchors. doc_id falls back to the chunk-id prefix ("{doc_id}_{i}"
     # format) for rows ingested before the field was stamped into chunk
     # metadata; page is 0 when the source has no page info.
+    # Issue #85: OCR-sourced chunks also surface ocr_confidence + slice
+    # evidence (ocr_task_id/ocr_slice_id/ocr_slice_url) + low_confidence flag
+    # against RuntimeConfig.low_ocr_confidence. Issue #86: status is stamped at
+    # ingest; the authoritative live status is resolved from the documents
+    # table by _apply_status_filter (PATCH can flip it after ingest).
+    from ..engine.runtime_config import get_runtime_config
+
+    cfg = get_runtime_config()
     for r in results:
         if not isinstance(r, dict):
             continue
@@ -125,7 +133,45 @@ def _normalize_evidence(results: list[dict]) -> list[dict]:
         r["chunk_id"] = chunk_id
         r["doc_id"] = doc_id
         r["page"] = meta.get("page", 0)
+        r["status"] = meta.get("status", "active")
+        if "ocr_confidence" in meta:
+            conf = meta.get("ocr_confidence")
+            r["ocr_confidence"] = conf
+            r["low_confidence"] = conf is not None and conf < cfg.low_ocr_confidence
+        if meta.get("ocr_slice_id"):
+            r["slice_ref"] = {
+                "task_id": meta.get("ocr_task_id", ""),
+                "slice_id": meta.get("ocr_slice_id", ""),
+                "url": meta.get("ocr_slice_url", ""),
+            }
     return results
+
+
+async def _apply_status_filter(
+    kb_id: str, results: list[dict], status_filter: str
+) -> tuple[list[dict], dict[str, str]]:
+    """Issue #86: filter retrieved chunks by document status (active|deprecated).
+
+    status_filter: "active" (default — drops deprecated docs), "deprecated"
+    (only deprecated), "all" (no filter). Status is resolved from the
+    documents table (the PATCH endpoint flips it there), NOT from the
+    ingest-time chunk metadata — a doc deprecated after ingest must vanish
+    from default search without re-indexing. Returns (kept, status_map) so
+    /ask can mark deprecated context without a second lookup."""
+    from fastapi.concurrency import run_in_threadpool
+
+    doc_ids = [r.get("doc_id", "") for r in results if isinstance(r, dict)]
+    status_map = await run_in_threadpool(_get_meta_store(kb_id).get_document_status_map, doc_ids)
+    if status_filter == "deprecated":
+        kept = [r for r in results if status_map.get(r.get("doc_id", "")) == "deprecated"]
+    elif status_filter == "all":
+        kept = list(results)
+    else:
+        kept = [r for r in results if status_map.get(r.get("doc_id", ""), "active") == "active"]
+    for r in kept:
+        if isinstance(r, dict):
+            r["status"] = status_map.get(r.get("doc_id", ""), "active")
+    return kept, status_map
 
 
 async def _do_rerank(
@@ -256,7 +302,32 @@ async def _generate_answer(
                     "page": c.get("page", 0),
                 }
             )
-    return {"answer": answer_text, "sources": sources}
+    # Issue #85: per-chunk citations (NOT deduped — every cited chunk is an
+    # anchor) + has_low_confidence so a consumer can flag OCR-shaky answers.
+    from ..engine.runtime_config import get_runtime_config
+
+    cfg = get_runtime_config()
+    citations = []
+    has_low_confidence = False
+    for c in chunks:
+        conf = c.get("ocr_confidence")
+        if conf is not None and conf < cfg.low_ocr_confidence:
+            has_low_confidence = True
+        citation = {
+            "doc_id": c.get("doc_id", ""),
+            "doc_name": c.get("doc_name", "unknown"),
+            "chunk_id": c.get("chunk_id", ""),
+            "page": c.get("page", 0),
+            "score": c.get("score", 0),
+            "status": c.get("status", "active"),
+        }
+        if conf is not None:
+            citation["ocr_confidence"] = conf
+            citation["low_confidence"] = conf < cfg.low_ocr_confidence
+        if c.get("slice_ref"):
+            citation["slice_ref"] = c["slice_ref"]
+        citations.append(citation)
+    return {"answer": answer_text, "sources": sources, "citations": citations, "has_low_confidence": has_low_confidence}
 
 
 # ── System endpoints (stay here) ──

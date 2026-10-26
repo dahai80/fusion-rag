@@ -17,6 +17,17 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["search"])
 
+VALID_STATUS_FILTERS = {"active", "deprecated", "all"}
+
+
+def _read_status_filter(data: dict[str, Any]) -> str:
+    # Issue #86: "active" is the default — deprecated docs drop out of normal
+    # search/ask without re-indexing (PATCH flips the status in place).
+    sf = data.get("status_filter", "active")
+    if sf not in VALID_STATUS_FILTERS:
+        raise HTTPException(400, f"status_filter must be one of {sorted(VALID_STATUS_FILTERS)}, got: {sf!r}")
+    return sf
+
 
 def _audit_and_trajectory(
     kb_id: str,
@@ -77,6 +88,7 @@ async def search(
 ) -> list[dict[str, Any]]:
     from .routes import (
         _apply_search_filters,
+        _apply_status_filter,
         _do_rerank,
         _get_base,
         _get_embed_client,
@@ -88,6 +100,7 @@ async def search(
     query = data.get("query", "")
     if not query:
         raise HTTPException(400, "query is required")
+    status_filter = _read_status_filter(data)
 
     top_k = data.get("top_k", kb.config.max_results)
     threshold = data.get("threshold", kb.config.similarity_threshold)
@@ -203,10 +216,13 @@ async def search(
             # as folder_prefix/metadata_filter over-fetch.
             if doc_type_filter:
                 results = [r for r in results if r.get("doc_type", "") in doc_type_filter]
+            # Issue #77: stamp chunk_id / doc_id / page evidence anchors before
+            # the status filter — it resolves status by the stamped doc_id.
+            results = _normalize_evidence(results)
+            # Issue #86: doc-status filter (authoritative from documents table).
+            results, _ = await _apply_status_filter(kb_id, results, status_filter)
             if use_rerank:
                 results = await _do_rerank(query, results, top_k, backend=rerank_backend, model=rerank_model)
-            # Issue #77: stamp chunk_id / doc_id / page evidence anchors.
-            results = _normalize_evidence(results)
             await _audit_and_trajectory_async(kb_id, query, "search", results, (time.time() - _start) * 1000)
             return results
         query = rewritten
@@ -253,11 +269,15 @@ async def search(
     if doc_type_filter:
         results = [r for r in results if r.get("doc_type", "") in doc_type_filter]
 
+    # Issue #77: stamp chunk_id / doc_id / page evidence anchors before the
+    # status filter — it resolves status by the stamped doc_id.
+    results = _normalize_evidence(results)
+    # Issue #86: doc-status filter (authoritative from documents table).
+    results, _ = await _apply_status_filter(kb_id, results, status_filter)
+
     if use_rerank:
         results = await _do_rerank(query, results, top_k, backend=rerank_backend, model=rerank_model)
 
-    # Issue #77: stamp chunk_id / doc_id / page evidence anchors.
-    results = _normalize_evidence(results)
     await _audit_and_trajectory_async(kb_id, query, "search", results, (time.time() - _start) * 1000)
     return results
 
@@ -270,6 +290,7 @@ async def ask(
 ) -> dict[str, Any]:
     from .routes import (
         _apply_search_filters,
+        _apply_status_filter,
         _do_rerank,
         _generate_answer,
         _get_base,
@@ -282,6 +303,7 @@ async def ask(
     question = data.get("question", "")
     if not question:
         raise HTTPException(400, "question is required")
+    status_filter = _read_status_filter(data)
 
     top_k = data.get("top_k", kb.config.max_results)
     model = data.get("model", "qwen3.5-9b")
@@ -346,18 +368,27 @@ async def ask(
         chunks = await run_in_threadpool(_apply_search_filters, chunks, folder_prefix, metadata_filter)
         chunks = chunks[:pool_k]
 
+    # Issue #77: stamp chunk_id / doc_id / page so /ask sources carry the
+    # same evidence anchors as /search results. Stamped BEFORE the status
+    # filter — it resolves status by the stamped doc_id.
+    chunks = _normalize_evidence(chunks)
+    # Issue #86: doc-status filter (authoritative from documents table).
+    chunks, _status_map = await _apply_status_filter(kb_id, chunks, status_filter)
+
     if not chunks:
         await _audit_and_trajectory_async(kb_id, question, "ask", [], (time.time() - _start) * 1000)
-        return {"answer": "No relevant documents found.", "sources": []}
+        return {"answer": "No relevant documents found.", "sources": [], "citations": [], "has_low_confidence": False}
 
     if use_rerank:
         chunks = await _do_rerank(question, chunks, top_k, backend=rerank_backend, model=rerank_model)
 
-    # Issue #77: stamp chunk_id / doc_id / page so /ask sources carry the
-    # same evidence anchors as /search results.
-    chunks = _normalize_evidence(chunks)
-
-    context = "\n\n".join(f"[{c['doc_name']}] {c['text'][:2000]}" for c in chunks)
+    # Issue #86: deprecated chunks are still usable when explicitly requested
+    # (status_filter=deprecated/all) but the model must know they are stale —
+    # mark them in the context label so it does not cite them as current truth.
+    context = "\n\n".join(
+        f"[{'[已作废版本] ' if c.get('status') == 'deprecated' else ''}{c['doc_name']}] {c['text'][:2000]}"
+        for c in chunks
+    )
 
     try:
         answer = await _generate_answer(
@@ -382,3 +413,77 @@ async def ask(
         {"model": model, "has_answer": bool(answer.get("answer"))},
     )
     return answer
+
+
+@router.post("/bases/{kb_id}/similar")
+async def similar(
+    kb_id: str,
+    data: dict[str, Any],
+    subject: str | None = Depends(require_kb_action("search")),
+) -> dict[str, Any]:
+    """Issue #83: find near-duplicate chunks — semantic dedup / version drift.
+
+    Input: text (embedded with the SAME service-wide model as ingest, so
+    scores are directly comparable) or a raw embedding vector. Output:
+    matches above the cosine threshold with doc/chunk evidence anchors.
+    exclude_doc_id drops a doc's own chunks (dedup-within-corpus use case)."""
+    from .routes import _get_base, _get_embed_client, _get_vector_store, _normalize_evidence
+
+    kb = _get_base(kb_id)
+    text = data.get("text", "")
+    embedding = data.get("embedding")
+    if not text and not embedding:
+        raise HTTPException(400, "text or embedding is required")
+    if isinstance(embedding, list) and not all(isinstance(v, (int, float)) for v in embedding):
+        raise HTTPException(400, "embedding must be a list of numbers")
+
+    top_k = data.get("top_k", 10)
+    if not isinstance(top_k, int) or top_k < 1 or top_k > 100:
+        raise HTTPException(400, "top_k must be an int in [1, 100]")
+    threshold = data.get("threshold", kb.config.similarity_threshold)
+    if not isinstance(threshold, (int, float)) or not 0.0 <= threshold <= 1.0:
+        raise HTTPException(400, "threshold must be a number in [0.0, 1.0]")
+    exclude_doc_id = data.get("exclude_doc_id") or ""
+    snippet_chars = data.get("snippet_chars", 200)
+    if not isinstance(snippet_chars, int) or snippet_chars < 1 or snippet_chars > 2000:
+        raise HTTPException(400, "snippet_chars must be an int in [1, 2000]")
+    status_filter = _read_status_filter(data)
+
+    embed = _get_embed_client()
+    if embedding:
+        query_vector = embedding
+    else:
+        query_vector = await embed.embed(text)
+    if not query_vector or all(v == 0.0 for v in query_vector):
+        raise HTTPException(500, "Embedding failed")
+
+    vec_store = _get_vector_store(kb_id)
+    # Over-fetch when excluding so the post-filter result still fills top_k.
+    fetch_k = top_k * get_runtime_config().search_fetch_k_multiplier if exclude_doc_id else top_k
+    _start = time.time()
+    results = await run_in_threadpool(vec_store.search, query_vector, top_k=fetch_k, threshold=threshold)
+    results = _normalize_evidence(results)
+    from .routes import _apply_status_filter
+
+    results, _ = await _apply_status_filter(kb_id, results, status_filter)
+    if exclude_doc_id:
+        results = [r for r in results if r.get("doc_id", "") != exclude_doc_id]
+    results = results[:top_k]
+
+    matches = [
+        {
+            "doc_id": r.get("doc_id", ""),
+            "doc_name": r.get("doc_name", ""),
+            "chunk_id": r.get("chunk_id", ""),
+            "score": r.get("score", 0.0),
+            "snippet": r.get("text", "")[:snippet_chars],
+            "page": r.get("page", 0),
+            "status": r.get("status", "active"),
+            "metadata": r.get("metadata", {}),
+        }
+        for r in results
+    ]
+    await _audit_and_trajectory_async(
+        kb_id, text[:200] or "(embedding)", "similar", results, (time.time() - _start) * 1000
+    )
+    return {"matches": matches, "count": len(matches), "threshold": threshold}

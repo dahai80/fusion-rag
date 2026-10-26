@@ -169,6 +169,7 @@ async def _write_doc_to_stores(
     chunk_dicts: list,
     chars: int,
     chunk_metadata: dict | None = None,
+    chunk_extra_metas: list[dict] | None = None,
 ) -> tuple[bool, str | None, bool]:
     """P4-1 + 硬伤B: the ONE place that writes a doc's chunks to all stores.
 
@@ -192,13 +193,23 @@ async def _write_doc_to_stores(
     # search rows round-trip stable evidence anchors (envipermit binds
     # extracted values to doc_id/page/chunk_id). Base is the caller's
     # per-chunk metadata (inline ingest) or the doc metadata (file ingest).
+    # Issue #86: docs default to status="active" (PATCH can flip it later).
+    # Issue #85: chunk_extra_metas carries per-chunk OCR evidence
+    # (ocr_confidence/ocr_task_id/ocr_slice_id/ocr_slice_url/ocr_bbox) that
+    # overrides the doc-level base on its chunks.
+    metadata = dict(metadata or {})
+    metadata.setdefault("status", "active")
     base_meta = chunk_metadata if chunk_metadata is not None else metadata
+    if chunk_metadata is not None:
+        base_meta = {**base_meta, "status": metadata["status"]}
     chunk_metas = []
     for i, chunk in enumerate(chunks):
         cm = {**(base_meta or {}), "doc_id": doc_id, "chunk_index": i}
         page = getattr(chunk, "page", 0)
         if page:
             cm["page"] = page
+        if chunk_extra_metas and i < len(chunk_extra_metas):
+            cm.update(chunk_extra_metas[i])
         chunk_metas.append(cm)
 
     records = []
@@ -298,6 +309,49 @@ async def _write_doc_to_stores(
     return (True, None, False)
 
 
+def _chunks_from_ocr(result: ParseResult) -> tuple[list, list[dict]]:
+    """Issue #84/#85: turn drawing-parser text_chunks into ingest chunks.
+
+    OCR chunks are already slice-sized — they bypass the chunker. Each carries
+    per-chunk OCR evidence metadata (confidence, slice ref, bbox) so search
+    results and /ask citations can flag low-confidence text and link back to
+    the source slice image. drawing-parser pages are 0-based; fusion-rag
+    pages are 1-based (matches _parse_pdf's i+1 spans)."""
+    from ..engine.chunker import Chunk
+
+    ocr_base = os.environ.get("FUSION_RAG_OCR_URL", "").strip().rstrip("/")
+    chunks = []
+    extras = []
+    for oc in result.ocr_chunks:
+        text = (oc.get("text") or "").strip()
+        if not text:
+            continue
+        task_id = oc.get("task_id", "")
+        slice_id = oc.get("slice_id", "")
+        extras.append(
+            {
+                "ocr_confidence": oc.get("ocr_confidence"),
+                "ocr_task_id": task_id,
+                "ocr_slice_id": slice_id,
+                "ocr_slice_url": f"{ocr_base}/v1/tasks/{task_id}/slices/{slice_id}" if task_id and slice_id else "",
+                "ocr_bbox": oc.get("bbox"),
+                "ocr_kind": oc.get("kind"),
+            }
+        )
+        chunks.append(
+            Chunk(
+                text=text,
+                index=len(chunks),
+                doc_path=result.file_path,
+                doc_name=result.file_name,
+                doc_type=result.doc_type.value,
+                page=int(oc.get("page", 0)) + 1,
+            )
+        )
+    logger.info("OCR chunks built for %s: %d chunks", result.file_name, len(chunks))
+    return chunks, extras
+
+
 async def _index_document(kb_id: str, file_path: str, contextualize: bool = True) -> dict:
     kb = _get_base(kb_id)
     # D7: reject before any parse/embed work if the KB's configured embedding
@@ -340,23 +394,33 @@ async def _index_document(kb_id: str, file_path: str, contextualize: bool = True
     if result.error:
         return {"error": result.error}
 
-    chunker = Chunker(strategy=kb.config.chunk_strategy, chunk_size=kb.config.chunk_size)
-    chunks = await chunker.chunk(result)
-    if not chunks:
-        return {"error": "no chunks produced"}
+    chunk_extra_metas = None
+    if result.ocr_chunks:
+        # Issue #84: scanned PDF handled by the OCR service. Chunks are already
+        # slice-sized — bypass chunker + contextualizer (the slices carry their
+        # own spatial context), keep per-chunk OCR evidence metadata.
+        chunks, chunk_extra_metas = _chunks_from_ocr(result)
+        if not chunks:
+            return {"error": "OCR produced no text chunks"}
+        chunk_dicts = [{"id": f"tmp_{i}", "text": c.text, "context": ""} for i, c in enumerate(chunks)]
+    else:
+        chunker = Chunker(strategy=kb.config.chunk_strategy, chunk_size=kb.config.chunk_size)
+        chunks = await chunker.chunk(result)
+        if not chunks:
+            return {"error": "no chunks produced"}
 
-    contextualizer = Contextualizer(mlx_url=embed.base_url, enabled=contextualize, api_key=embed.api_key)
-    chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
-    # L1: contextualizer raises LLMUnavailable only when EVERY chunk fails. On
-    # total LLM failure, contextualize=True silently degraded retrieval before.
-    # Decision: log + proceed with empty context (ingest must not fail-closed
-    # on an enhancement); the route surfaces this via the contextualize flag.
-    try:
-        chunk_dicts = await contextualizer.contextualize(chunk_dicts, result.content)
-    except LLMUnavailable as e:
-        logger.warning("index_document: contextualization fully unavailable, ingesting without context: %s", e)
-        for cd in chunk_dicts:
-            cd.setdefault("context", "")
+        contextualizer = Contextualizer(mlx_url=embed.base_url, enabled=contextualize, api_key=embed.api_key)
+        chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
+        # L1: contextualizer raises LLMUnavailable only when EVERY chunk fails. On
+        # total LLM failure, contextualize=True silently degraded retrieval before.
+        # Decision: log + proceed with empty context (ingest must not fail-closed
+        # on an enhancement); the route surfaces this via the contextualize flag.
+        try:
+            chunk_dicts = await contextualizer.contextualize(chunk_dicts, result.content)
+        except LLMUnavailable as e:
+            logger.warning("index_document: contextualization fully unavailable, ingesting without context: %s", e)
+            for cd in chunk_dicts:
+                cd.setdefault("context", "")
 
     embed_texts = []
     for cd, c in zip(chunk_dicts, chunks):
@@ -397,6 +461,7 @@ async def _index_document(kb_id: str, file_path: str, contextualize: bool = True
         vectors=vectors,
         chunk_dicts=chunk_dicts,
         chars=result.chars,
+        chunk_extra_metas=chunk_extra_metas,
     )
     if not ok:
         # H2: rollback_failed means orphan vectors/meta may be durable. Signal
@@ -731,6 +796,53 @@ async def replace_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dic
         "old_chunks": old_chunk_count,
         "new_chunks": len(chunks),
         "chars": result.chars,
+    }
+
+
+VALID_DOC_STATUSES = {"active", "deprecated"}
+
+
+@router.patch("/bases/{kb_id}/documents/{doc_id}", dependencies=[_doc_write_dep])
+async def patch_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    """Issue #86: flip a document's lifecycle status without re-indexing.
+
+    status: "active" | "deprecated". Optional superseded_by: doc_id (or any
+    string reference) of the replacing document. Default search drops
+    deprecated docs (status_filter=active); status_filter=deprecated asks for
+    them explicitly. The status is written to the documents table (the
+    authoritative copy the search-time filter reads) and mirrored onto the
+    SQLite chunk rows for direct chunk consumers."""
+    _get_base(kb_id)
+    meta_store = _get_meta_store(kb_id)
+
+    doc = await run_in_threadpool(meta_store.get_document, doc_id)
+    if not doc:
+        raise HTTPException(404, f"Document '{doc_id}' not found")
+
+    status = data.get("status")
+    if status not in VALID_DOC_STATUSES:
+        raise HTTPException(400, f"status must be one of {sorted(VALID_DOC_STATUSES)}, got: {status!r}")
+    patch = {"status": status}
+    superseded_by = data.get("superseded_by")
+    if superseded_by is not None:
+        if not isinstance(superseded_by, str) or not superseded_by.strip():
+            raise HTTPException(400, "superseded_by must be a non-empty string")
+        patch["superseded_by"] = superseded_by.strip()
+
+    await run_in_threadpool(meta_store.update_document_metadata, doc_id, patch)
+    mirrored = await run_in_threadpool(meta_store.set_chunk_meta_field, doc_id, "status", status)
+    if "superseded_by" in patch:
+        await run_in_threadpool(meta_store.set_chunk_meta_field, doc_id, "superseded_by", patch["superseded_by"])
+
+    logger.info(
+        "patched doc %s in kb %s: status=%s superseded_by=%s (%d chunk rows mirrored)",
+        doc_id, kb_id, status, patch.get("superseded_by"), mirrored,
+    )
+    return {
+        "doc_id": doc_id,
+        "status": status,
+        "superseded_by": patch.get("superseded_by"),
+        "chunks_mirrored": mirrored,
     }
 
 

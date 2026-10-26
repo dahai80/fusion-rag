@@ -101,14 +101,16 @@ Fusion-RAG 通过 `/kb/*` 提供 REST API。
 | 方法 | 端点 | 说明 |
 |------|------|------|
 | POST | `/kb/bases/{id}/documents` | 上传并索引文档 |
+| PATCH | `/kb/bases/{id}/documents/{doc_id}` | 修改文档生命周期元数据（`status`：active/deprecated、`superseded_by`）——issue #86 |
 | POST | `/kb/bases/{id}/scan` | 扫描目录批量索引 |
 
 ### 搜索与问答
 
 | 方法 | 端点 | 说明 |
 |------|------|------|
-| POST | `/kb/bases/{id}/search` | 语义向量检索（支持混合检索、重排、模板） |
-| POST | `/kb/bases/{id}/ask` | RAG 问答（含来源引用、混合检索、重排） |
+| POST | `/kb/bases/{id}/search` | 语义向量检索（支持混合检索、重排、模板、status_filter） |
+| POST | `/kb/bases/{id}/ask` | RAG 问答（含来源引用、逐块 citations、混合检索、重排） |
+| POST | `/kb/bases/{id}/similar` | 近重复 / 版本漂移检索，支持文本或原始向量输入（issue #83） |
 
 #### 搜索参数（#70 重排相关）
 
@@ -118,6 +120,7 @@ Fusion-RAG 通过 `/kb/*` 提供 REST API。
 | `rerank_backend` | 取自环境变量 | 重排阶段：`cross_encoder`（fusion-mlx `/v1/rerank`，真实交叉编码器如 `bge-reranker-v2-m3`）或 `llm`（传统提示词打分） |
 | `rerank_model` | 取自环境变量 | 交叉编码器模型名（覆盖 `FUSION_RAG_RERANK_MODEL`） |
 | `rerank_top_n` | 20 | 送入重排的候选池大小，重排后再截断到 `top_k`（提升召回） |
+| `status_filter` | "active" | 文档状态过滤：`active`（默认，剔除已作废文档）、`deprecated`（仅已作废）、`all`（全部，已作废片段在 LLM 上下文中标记 `[已作废版本]`）——issue #86 |
 
 ### 系统
 
@@ -185,6 +188,14 @@ Fusion-RAG 通过 `/kb/*` 提供 REST API。
 
 ## 更新日志
 
+### v0.8.8
+
+- **近重复检索（issue #83）** — 新增 `POST /kb/bases/{kb_id}/similar` 端点，用于近重复 / 版本漂移检测：支持 `text`（用与入库相同的服务级模型向量化，分数直接可比）或原始 `embedding` 向量查询；参数 `top_k`、`threshold`、`exclude_doc_id`（库内去重场景）、`snippet_chars`、`status_filter`。返回 `matches[]`，带完整证据锚点（doc_id/chunk_id/page/status）。
+- **EPUB + 扫描件 OCR（issue #84）** — `DocumentParser` 新增 EPUB 解析（ebooklib，每个 XHTML 章节转为带标题的段落）。扫描版 PDF（有页无文本）不再被静默索引进空文档：改交给 fusion-drawing-parser OCR 服务（`FUSION_RAG_OCR_URL`、`FUSION_RAG_OCR_API_KEY`、`FUSION_RAG_OCR_TIMEOUT`），未配置 OCR 服务时显式报错。OCR 片段绕过分片器 + 上下文化（本身已是切片粒度），并携带逐块证据元数据。
+- **OCR 证据元数据 + 引用（issue #85）** — 来自 OCR 的每个 `/search` 结果和 `/ask` 引用都携带 `ocr_confidence`、`low_confidence`（阈值 `FUSION_RAG_LOW_OCR_CONFIDENCE`，默认 0.85）以及 `slice_ref`（`task_id`/`slice_id`/`url`，可回链源切片图像）。`/ask` 额外返回逐块 `citations[]`（不去重）和顶层 `has_low_confidence` 标记。
+- **文档 active/deprecated 状态（issue #86）** — `PATCH /kb/bases/{kb_id}/documents/{doc_id}` 无需重建索引即可翻转文档生命周期 `status`（`active`/`deprecated`，可选 `superseded_by`）。状态在检索时从 documents 表解析，文档作废后立即从默认 `/search`、`/ask`、`/similar` 中消失；`status_filter`（`active`/`deprecated`/`all`）按查询控制，`all` 保留的已作废片段在 LLM 上下文中标记 `[已作废版本]`。
+- 新增 19 个测试（EPUB 解析 + OCR 往返 + 失败路径、/similar 校验/排除/状态、PATCH + 状态过滤 + /ask 引用），全量 428 通过，ruff 干净。
+
 ### v0.8.3
 
 - **LLM 后端 URL + 鉴权透传（issue #72）** — 所有调用 LLM 的引擎（`Contextualizer`、`QueryRewriter`、`Reranker`）现在与 `EmbeddingClient` 使用相同的 `FUSION_MLX_URL` / `FUSION_MLX_API_KEY`，不再硬编码网关地址 `http://127.0.0.1:11432/v1` 且不带鉴权头。非默认后端（如直连 fusion-mlx `:11434`、使用不同 key）不再在每次 chat-completions / 上下文生成调用上 401。路由层把 `embed.base_url` + `embed.api_key` 传入它构造的每个引擎；`start.sh` 现在启动前激活 monorepo `.venv`（原来用裸 `python3`，未激活 venv 时报 `ModuleNotFoundError: No module named 'fusion_core'`）。新增 4 个回归测试锁定 URL + `Authorization` 头的接线。
@@ -207,6 +218,10 @@ Fusion-RAG 通过 `/kb/*` 提供 REST API。
 | `FUSION_RAG_RERANK_MODEL` | (空) | `cross_encoder` 后端的模型名。设置后 `/search`、`/ask` 默认 `rerank=true`（有模型即默认开启）；留空则除非调用方显式传 `rerank=true` 否则关闭 |
 | `FUSION_RAG_RERANK_TOP_N` | 20 | 送入重排的候选池大小，重排后再截断到 `top_k`（在不改变返回数量的前提下提升召回，issue #70） |
 | `FUSION_RAG_INGEST_ROOTS` | (空) | 文件入库/扫描/监听的允许根目录（冒号分隔）。空=不限制（本地优先）；设置后限制读取范围，阻断路径遍历/LFI |
+| `FUSION_RAG_OCR_URL` | (空) | OCR 服务（fusion-drawing-parser，如 `http://127.0.0.1:11491`）地址，用于扫描版 PDF 入库。留空时扫描件显式报错 "no OCR service configured"（issue #84） |
+| `FUSION_RAG_OCR_API_KEY` | (空) | 发送给 OCR 服务的 Bearer 令牌（issue #84） |
+| `FUSION_RAG_OCR_TIMEOUT` | 300 | 单个 OCR 任务的轮询总预算（秒，issue #84） |
+| `FUSION_RAG_LOW_OCR_CONFIDENCE` | 0.85 | OCR 片段置信度低于该值时，检索结果与 `/ask` 引用标记 `low_confidence: true`（issue #85） |
 
 ### 使用 start.sh
 

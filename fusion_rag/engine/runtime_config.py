@@ -31,6 +31,21 @@ def _env_int(name: str, default: int, minimum: int = 0) -> int:
     return val
 
 
+def _env_float(name: str, default: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        val = float(raw)
+    except ValueError:
+        logger.warning("invalid %s=%r, using default %s", name, raw, default)
+        return default
+    if val < minimum or val > maximum:
+        logger.warning("%s=%s outside [%s, %s], using default %s", name, val, minimum, maximum, default)
+        return default
+    return val
+
+
 @dataclass(frozen=True)
 class RuntimeConfig:
     # D4: every field is env-overridable. Defaults are the prior hardcoded
@@ -51,6 +66,10 @@ class RuntimeConfig:
     rerank_model: str = ""
     rerank_backend: str = "llm"
     rerank_top_n: int = 20
+    # Issue #85: OCR confidence threshold. Chunks whose ocr_confidence is below
+    # this are flagged low_confidence=True in search results and citations
+    # (has_low_confidence on /ask answers).
+    low_ocr_confidence: float = 0.85
 
     @classmethod
     def from_env(cls) -> RuntimeConfig:
@@ -74,6 +93,7 @@ class RuntimeConfig:
             rerank_model=os.environ.get("FUSION_RAG_RERANK_MODEL", "").strip(),
             rerank_backend=os.environ.get("FUSION_RAG_RERANK_BACKEND", "llm").strip().lower(),
             rerank_top_n=_env_int("FUSION_RAG_RERANK_TOP_N", 20, minimum=1),
+            low_ocr_confidence=_env_float("FUSION_RAG_LOW_OCR_CONFIDENCE", 0.85, minimum=0.0, maximum=1.0),
         )
 
     def to_dict(self) -> dict:
