@@ -329,24 +329,18 @@ def run_server(
 
 
 if __name__ == "__main__":
+    from fusion_core.config import client_key, resolve_api_key, service_port
+
     host = os.environ.get("FUSION_RAG_HOST", "127.0.0.1")
-    port = int(os.environ.get("FUSION_RAG_PORT", "11436"))
+    # Issue #96: single-point resolution via fusion_core (config-conventions §2)
+    # — FUSION_RAG_PORT (registered in port-registry.yaml), then the client-key
+    # alias chain FUSION_CLIENT_KEY → FUSION_MLX_API_KEY → MLX_API_KEY with the
+    # local-first ~/.fusion-mlx/settings.json fallback. All resolvers live in
+    # fusion-core; this repo keeps one-line call sites only.
+    port = service_port("rag", default=11436)
     mlx_url = os.environ.get("FUSION_MLX_URL", "http://127.0.0.1:11432/v1")
     embed_model = os.environ.get("FUSION_RAG_EMBED", "BGE-M3")
-    mlx_api_key = os.environ.get("FUSION_MLX_API_KEY", "")
-    if not mlx_api_key:
-        try:
-            import json as _json
-
-            _settings_path = os.path.expanduser("~/.fusion-mlx/settings.json")
-            if os.path.exists(_settings_path):
-                with open(_settings_path) as _f:
-                    _settings = _json.load(_f)
-                mlx_api_key = _settings.get("auth", {}).get("api_key", "")
-                if mlx_api_key:
-                    logger.info("Auto-detected MLX api_key from ~/.fusion-mlx/settings.json")
-        except Exception as _e:
-            logger.warning("Failed to auto-detect MLX api_key: %s", _e)
+    mlx_api_key = client_key() or resolve_api_key()
     log_level = os.environ.get("FUSION_RAG_LOG_LEVEL", "INFO")
     # O-P2-3: startup health gate. CLAUDE.md states "fusion-mlx must be running"
     # but nothing enforced it — a fusion-rag started before fusion-mlx served
@@ -370,7 +364,7 @@ if __name__ == "__main__":
                 e,
             )
             sys.exit(1)
-        # Issue #93: a stale FUSION_MLX_API_KEY breaks EVERY /ask generation
+        # Issue #93: a stale FUSION_CLIENT_KEY breaks EVERY /ask generation
         # but left /search working, so the degradation went unnoticed until a
         # failed acceptance run. Probe the LLM credential with a cheap /models
         # call and flag a rejection loudly at boot. Do NOT exit — retrieval
@@ -382,8 +376,9 @@ if __name__ == "__main__":
         if llm_auth == "rejected":
             logger.error(
                 "startup probe: LLM credential REJECTED by %s (key_hash_prefix=%s) — "
-                "/ask will fail with 'LLM credential rejected' until FUSION_MLX_API_KEY "
-                "is rotated. /search is unaffected. /health reports llm_auth=rejected.",
+                "/ask will fail with 'LLM credential rejected' until FUSION_CLIENT_KEY "
+                "(or legacy FUSION_MLX_API_KEY) is rotated. /search is unaffected. "
+                "/health reports llm_auth=rejected.",
                 mlx_url,
                 key_hash_prefix(mlx_api_key),
             )

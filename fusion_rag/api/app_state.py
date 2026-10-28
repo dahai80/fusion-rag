@@ -45,6 +45,7 @@ from typing import Any
 
 from fastapi import HTTPException, Request
 
+from .._data_dir import data_dir
 from ..embed.client import EmbeddingClient
 from ..engine.knowledge_base import KnowledgeBaseManager
 
@@ -73,9 +74,12 @@ def _watch_cap() -> int:
 def _watch_registry_path() -> Path:
     # R3: persisted under the stores root so a restart restores watches instead
     # of silently dropping them (operator thought monitoring was on; it wasn't).
+    # Issue #96: home-dir fallback resolved via fusion_core service_data_dir
+    # (FUSION_RAG_DATA_DIR override, then ~/.fusion-rag). FUSION_RAG_STORES_DIR
+    # keeps precedence — it names the stores root directly.
     base = os.environ.get("FUSION_RAG_STORES_DIR", "")
     if not base:
-        base = str(Path.home() / ".fusion-rag")
+        base = str(data_dir())
     return Path(base) / "watch_registry.json"
 
 

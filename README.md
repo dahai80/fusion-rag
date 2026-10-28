@@ -609,6 +609,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.12
+
+- **Single-point config resolution via fusion_core (issue #96)** — all hand-rolled key/env resolution is replaced by `fusion_core.config` (config Phase 2.2): the MLX API key resolves through `client_key()` (alias chain `FUSION_CLIENT_KEY` → `FUSION_MLX_API_KEY` → `MLX_API_KEY`; dev profile: empty + one-shot warning; `FUSION_PROFILE=prod` without a key: RuntimeError fail-fast), the server port through `service_port("rag")` (`FUSION_RAG_PORT`), and the data-dir root through `service_data_dir` (`FUSION_RAG_DATA_DIR` override, default stays `~/.fusion-rag`) — used by the KB stores root, watch registry, auth/graph/cache/eval SQLite paths. `server.py` chains `client_key() or resolve_api_key()` so the local-first `~/.fusion-mlx/settings.json` fallback keeps working; local `_mlx_api_key()`-style resolvers are deleted (call sites stay one-line). No env renames; `FUSION_RAG_API_KEY` (the service's own auth) is unchanged. 11 new tests; full suite 469 passing; `scripts/check-env.py` reports 0 errors for fusion-rag.
+
 ## What's New in v0.8.11
 
 - **Exact chunk-id deletion (issue #94)** — deleting one document no longer removes the physically-shared chunks of an identical-content doc. Two docs ingested with the same `doc_path` (e.g. the same inline `doc_name` twice) used to share one deletion key, so `DELETE` on either removed both docs' vectors and BM25 rows. All delete/replace/rollback paths now go through a new `delete_by_chunk_ids` store surface (implemented by the local, qdrant, fusion-store, and remote backends; the remote `/store/*` surface gained `POST /delete_by_chunk_ids`), with a logged `delete_by_doc` fallback only for old remote nodes. 5 new tests; full suite 458 passing.

@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .._data_dir import data_dir
+
 logger = logging.getLogger(__name__)
 
 
@@ -106,7 +108,9 @@ class KnowledgeBase:
         if not self.id:
             self.id = uuid.uuid4().hex[:16]
         if not self.storage_path:
-            base = Path(self.storage_dir or Path.home() / ".fusion-rag" / "stores") / self.id
+            # Issue #96: default stores root resolved via fusion_core
+            # service_data_dir (FUSION_RAG_DATA_DIR override, then ~/.fusion-rag).
+            base = Path(self.storage_dir or data_dir() / "stores") / self.id
             self.storage_path = str(base)
         now = time.time()
         if not self.created_at:
@@ -186,7 +190,7 @@ class KnowledgeBaseManager:
 
     def __init__(self, storage_dir: str = ""):
         if not storage_dir:
-            storage_dir = str(Path.home() / ".fusion-rag" / "stores")
+            storage_dir = str(data_dir() / "stores")
         self._storage_dir = Path(storage_dir)
         self._storage_dir.mkdir(parents=True, exist_ok=True)
         self._bases: dict[str, KnowledgeBase] = {}

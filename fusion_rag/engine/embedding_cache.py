@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .._data_dir import data_dir
 from .sqlite_base import SqliteBase
 
 logger = logging.getLogger(__name__)
@@ -39,7 +40,7 @@ class EmbeddingCache(SqliteBase):
         if max_entries is None:
             max_entries = cfg.embedding_cache_max_entries
         if not db_path:
-            db_path = str(Path.home() / ".fusion-rag" / "embed_cache.db")
+            db_path = str(data_dir() / "embed_cache.db")
         self.db_path = db_path
         self.ttl = ttl
         self.max_entries = max_entries

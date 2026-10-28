@@ -283,7 +283,7 @@ async def _generate_answer(
         set_llm_auth_status("ok")
     except Exception as e:
         # Issue #93: distinguish a REJECTED credential (401/403 — config
-        # error, fix by rotating FUSION_MLX_API_KEY) from a real outage, both
+        # error, fix by rotating FUSION_CLIENT_KEY) from a real outage, both
         # in the log (with the key hash prefix, never the key) and in the
         # exception type so /ask maps it to a distinct message. with_retry
         # does not retry 4xx, so the first 401 surfaces here.
@@ -293,7 +293,7 @@ async def _generate_answer(
             set_llm_auth_status("rejected")
             logger.error(
                 "RAG answer generation: LLM credential REJECTED by upstream (HTTP %s) — "
-                "rotate FUSION_MLX_API_KEY (key_hash_prefix=%s)",
+                "rotate FUSION_CLIENT_KEY (key_hash_prefix=%s)",
                 _status,
                 key_hash_prefix(embed.api_key),
             )

@@ -19,6 +19,7 @@ import logging
 import os
 from typing import Any
 
+from fusion_core.config import client_key
 from fusion_core.http_client import get_async_client, with_retry
 
 from .llm_errors import LLMUnavailable
@@ -33,10 +34,6 @@ _MAX_DOC_CHARS = 2000
 def _mlx_base_url() -> str:
     raw = os.environ.get("FUSION_MLX_URL", "http://127.0.0.1:11432/v1").strip()
     return raw.rstrip("/")
-
-
-def _mlx_api_key() -> str:
-    return os.environ.get("FUSION_MLX_API_KEY", "").strip()
 
 
 class CrossEncoderReranker:
@@ -59,7 +56,9 @@ class CrossEncoderReranker:
     ):
         self._base = (mlx_base_url or _mlx_base_url())
         self._model = model or os.environ.get("FUSION_RAG_RERANK_MODEL", "").strip() or _DEFAULT_MODEL
-        self._api_key = api_key or _mlx_api_key()
+        # Issue #96: single-point resolution via fusion_core client_key() —
+        # alias chain FUSION_CLIENT_KEY → FUSION_MLX_API_KEY → MLX_API_KEY.
+        self._api_key = api_key or client_key()
         self._timeout = timeout
 
     async def rerank(

@@ -404,7 +404,7 @@ async def ask(
         # Issue #93: credential rejected is a CONFIG error, not an outage —
         # distinct message so orchestrators alert correctly (retry after key
         # rotation, no incident).
-        raise HTTPException(502, "Answer generation failed (LLM credential rejected — check FUSION_MLX_API_KEY)") from e
+        raise HTTPException(502, "Answer generation failed (LLM credential rejected — check FUSION_CLIENT_KEY)") from e
     except LLMUnavailable as e:
         # L9: fusion-mlx down → no fabricated 200 answer. Surface as 502 so
         # the caller knows generation failed, not "answered with no info".
