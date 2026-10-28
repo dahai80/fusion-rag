@@ -100,6 +100,7 @@ fusion_rag/
 ├── permissions/
 │   └── acl.py               # Role-based ACL with path-prefix inheritance
 ├── _validators.py           # 硬伤3 trust-boundary layer — kb_id/SQL-id regex, path-confine-to-root (+symlink reject), URL SSRF guard, git ext:: RCE guard. Every external-input caller MUST route through here.
+├── _data_dir.py             # Issue #96: data-dir root via fusion_core service_data_dir("rag") — FUSION_RAG_DATA_DIR override, default ~/.fusion-rag (explicit; bare-app default would be ~/.rag)
 ├── bnup/
 │   └── corpus.py            # Issue #74: BnupCorpus — parse beishi-math JSON → lesson docs (KG metadata tags) + knowledge_graph + stats export. Pure logic, no I/O.
 ├── embed/
@@ -146,15 +147,16 @@ fusion_rag/
 - **Exact chunk-id deletion (#94)**: doc delete/replace/rollback paths use `VectorStore.delete_by_chunk_ids` (new `StoreBackend` surface, implemented by all 4 backends) instead of `delete_by_doc` — two docs ingested with the same `doc_path` (e.g. same inline `doc_name` twice) share no chunk ids, so deleting one keeps the other's vectors + BM25 rows. The remote `/store/*` surface gained `POST /delete_by_chunk_ids`; the `VectorStore` wrapper falls back to `delete_by_doc` (logged) only when a backend/old remote node lacks the precise path. `BM25Index.remove_chunks` is the keyword-index counterpart.
 - **LLM auth surfacing (#93)**: a 401/403 from fusion-mlx chat-completions is raised as `LLMAuthRejected` (subclass of `LLMUnavailable` — enhancement fallbacks still degrade gracefully) and `/ask` maps it to a distinct 502 "LLM credential rejected". `llm_auth_state.py` holds the process-wide status (ok/rejected/unknown): startup probes `{url}/models` (loud ERROR on rejection, never exits — /search unaffected; honors `FUSION_RAG_SKIP_STARTUP_PROBE`), `/health` exposes it as an informational `llm_auth` field, and a successful generation clears a stale rejected flag. Logs identify the key only by blake2b hash prefix, never key material.
 - **Process title (#92)**: `run_server` renames the process to `fusion-rag serve :{port}` via setproctitle (soft dependency — missing lib only logs at DEBUG). `start.sh` stops by PID file, so the rename never breaks lifecycle control.
+- **Single-point config resolution (#96)**: all key/port/data-dir resolution lives in `fusion_core.config` — this repo keeps one-line call sites only. MLX key: `client_key()` (alias chain `FUSION_CLIENT_KEY` → `FUSION_MLX_API_KEY` → `MLX_API_KEY`; dev missing = "" + warning, prod missing = RuntimeError), used by `EmbeddingClient` + `CrossEncoderReranker`; `server.py __main__` chains `client_key() or resolve_api_key()` so the local-first `~/.fusion-mlx/settings.json` fallback survives (client_key does NOT read settings.json). Port: `service_port("rag", default=11436)` — fusion-core expects the SHORT app name ("rag"); passing "fusion-rag" doubles the `FUSION_` env prefix. Data dir: `_data_dir.data_dir()` = `service_data_dir("rag", default=~/.fusion-rag)` — explicit default is REQUIRED, fusion-core's bare-app default is `~/.rag` and would orphan existing stores; used by `KnowledgeBaseManager`, the watch registry, and the auth/graph/embed-cache/eval SQLite paths. `FUSION_RAG_API_KEY` (service's own auth) is intentionally NOT migrated — it is not the MLX client key.
 
 ### Environment Variables
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `FUSION_RAG_PORT` | 11436 | Server port |
+| `FUSION_RAG_PORT` | 11436 | Server port (resolved via `fusion_core.config.service_port("rag")`, #96) |
 | `FUSION_RAG_HOST` | 127.0.0.1 | Listen address |
 | `FUSION_MLX_URL` | http://127.0.0.1:11432/v1 | fusion-mlx base URL |
-| `FUSION_MLX_API_KEY` | (auto-detected) | MLX API key; auto-read from `~/.fusion-mlx/settings.json` if unset |
+| `FUSION_CLIENT_KEY` | (alias chain) | MLX/gateway API key, resolved via `fusion_core.config.client_key()` (#96): `FUSION_CLIENT_KEY` → `FUSION_MLX_API_KEY` (legacy) → `MLX_API_KEY` (legacy); dev profile missing key = "" + one-shot warning, `FUSION_PROFILE=prod` missing key = RuntimeError. `server.py` additionally falls back to `resolve_api_key()` (reads `~/.fusion-mlx/settings.json`). |
 | `FUSION_RAG_EMBED` | BGE-M3 | Default embedding model |
 | `FUSION_RAG_API_KEY` | (empty) | API key auth — empty = auth disabled |
 | `FUSION_RAG_AUTH_BACKEND` | apikey | Auth backend: `apikey` or `none` |
@@ -190,6 +192,7 @@ fusion_rag/
 | `FUSION_RAG_TRAJECTORY_KEEP` | 5 | Rotated trajectory files kept (R6) |
 | `FUSION_RAG_AUDIT_RETENTION_DAYS` | 30 | Audit log retention days, 0 = forever (R6) |
 | `FUSION_RAG_STORES_DIR` | ~/.fusion-rag/stores | Per-KB store root (R3 watch registry) |
+| `FUSION_RAG_DATA_DIR` | ~/.fusion-rag | Data-dir root via `fusion_core.config.service_data_dir` (#96): stores root, watch registry, auth/graph/cache/eval SQLite paths all derive from it (explicit default keeps the pre-#96 `~/.fusion-rag` location; fusion-core's bare-app default would be `~/.rag`) |
 | `FUSION_RAG_LOG_DIR` | `./logs` | Log file dir — RotatingFileHandler 10MB x 5 (O-P1-2) |
 | `FUSION_RAG_LOG_FORMAT` | text | Log format: `text` or `json` (one JSON obj/line for aggregators) (O-P2-2) |
 | `FUSION_RAG_SKIP_STARTUP_PROBE` | (empty) | `1` = skip boot-time fusion-mlx reachability probe (O-P2-3) |

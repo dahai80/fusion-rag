@@ -21,6 +21,8 @@ from typing import Any
 from fastapi import HTTPException, Security
 from fastapi.security import APIKeyHeader
 
+from .._data_dir import data_dir
+
 logger = logging.getLogger(__name__)
 
 API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -91,7 +93,7 @@ class AuthConfig:
 
     def __init__(self, db_path: str = ""):
         if not db_path:
-            db_path = str(Path.home() / ".fusion-rag" / "auth.db")
+            db_path = str(data_dir() / "auth.db")
         self.db_path = db_path
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()

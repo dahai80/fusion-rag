@@ -1,6 +1,6 @@
 """LLM credential health state — issue #93.
 
-A stale/rejected FUSION_MLX_API_KEY used to surface only as a generic
+A stale/rejected FUSION_CLIENT_KEY used to surface only as a generic
 "upstream LLM unavailable" 502 on /ask, indistinguishable from a real outage.
 This module tracks the credential status (ok / rejected / unknown) in process
 memory so /health can expose it and the startup probe can flag it loudly.

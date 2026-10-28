@@ -31,8 +31,8 @@ class LLMAuthRejected(LLMUnavailable):
     Subclass of LLMUnavailable so existing enhancement-fallback paths (rewrite,
     rerank, contextualize) keep degrading gracefully, while the /ask route can
     catch it FIRST and map it to a distinct message — a config error the
-    operator fixes by rotating FUSION_MLX_API_KEY, not an outage.
+    operator fixes by rotating FUSION_CLIENT_KEY, not an outage.
     """
 
-    def __init__(self, msg: str = "LLM credential rejected (check FUSION_MLX_API_KEY)"):
+    def __init__(self, msg: str = "LLM credential rejected (check FUSION_CLIENT_KEY)"):
         super().__init__(msg)

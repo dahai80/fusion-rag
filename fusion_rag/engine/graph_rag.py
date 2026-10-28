@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 from fusion_core.http_client import get_async_client, with_retry
 
+from .._data_dir import data_dir
 from .llm_errors import LLMUnavailable
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ class GraphRAG:
 
     def __init__(self, db_path: str = "", mlx_url: str = "http://127.0.0.1:11432/v1", model: str = "qwen3.5-9b"):
         if not db_path:
-            db_path = str(Path.home() / ".fusion-rag" / "graph.db")
+            db_path = str(data_dir() / "graph.db")
         self.db_path = db_path
         self.mlx_url = mlx_url.rstrip("/")
         self.model = model

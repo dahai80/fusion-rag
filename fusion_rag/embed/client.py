@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 
 import httpx
+from fusion_core.config import client_key
 
 logger = logging.getLogger(__name__)
 
@@ -71,16 +71,19 @@ class EmbeddingClient:
         fallback_api_key: str = "",
     ):
         if not api_key:
-            api_key = os.environ.get("FUSION_MLX_API_KEY", "")
+            # Issue #96: single-point resolution via fusion_core (config-conventions
+            # §2) — alias chain FUSION_CLIENT_KEY → FUSION_MLX_API_KEY → MLX_API_KEY.
+            # dev: "" + one-shot warning; prod: RuntimeError (fail-fast).
+            api_key = client_key()
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
         if not self.api_key:
             logger.warning(
-                "EmbeddingClient started without FUSION_MLX_API_KEY; MLX calls will 401 if gateway auth is on"
+                "EmbeddingClient started without FUSION_CLIENT_KEY; MLX calls will 401 if gateway auth is on"
             )
         else:
-            logger.info("EmbeddingClient api_key loaded from FUSION_MLX_API_KEY (len=%d)", len(self.api_key))
+            logger.info("EmbeddingClient api_key resolved via fusion_core client_key() (len=%d)", len(self.api_key))
         self.timeout = timeout
         self.max_retries = max_retries
         self.batch_size = batch_size

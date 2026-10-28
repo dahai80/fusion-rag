@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 from fusion_core.http_client import get_async_client, with_retry
 
+from .._data_dir import data_dir
 from .llm_errors import LLMUnavailable
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ class RAGEvaluator:
         self.mlx_url = mlx_url.rstrip("/")
         self.model = model
         if not db_path:
-            db_path = str(Path.home() / ".fusion-rag" / "eval.db")
+            db_path = str(data_dir() / "eval.db")
         self.db_path = db_path
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()

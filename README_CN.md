@@ -189,6 +189,10 @@ Fusion-RAG 通过 `/kb/*` 提供 REST API。
 
 ## 更新日志
 
+### v0.8.12
+
+- **配置解析收敛到 fusion_core 单点（issue #96）** — 删除全部手写密钥/环境变量解析，统一走 `fusion_core.config`（config Phase 2.2）：MLX API key 经 `client_key()` 解析（别名链 `FUSION_CLIENT_KEY` → `FUSION_MLX_API_KEY` → `MLX_API_KEY`；dev 缺 key = 空值 + 一次性告警；`FUSION_PROFILE=prod` 缺 key = RuntimeError 快速失败）；服务端口经 `service_port("rag")`（读 `FUSION_RAG_PORT`）；数据目录根经 `service_data_dir`（`FUSION_RAG_DATA_DIR` 可覆盖，默认保持 `~/.fusion-rag`）—— 覆盖 KB 存储根、watch 注册表、auth/graph/缓存/评估 SQLite 路径。`server.py` 用 `client_key() or resolve_api_key()` 保留本地优先的 `~/.fusion-mlx/settings.json` 回退；本地 `_mlx_api_key()` 之类解析函数全部删除（调用点保持一行）。不改环境变量名；`FUSION_RAG_API_KEY`（服务自身鉴权）不变。新增 11 个测试，全量 469 通过；`scripts/check-env.py` 对 fusion-rag 报 0 错误。
+
 ### v0.8.11
 
 - **按 chunk-id 精确删除（issue #94）** — 删除一篇文档不再连带删除内容完全相同的另一篇文档的物理分片。两篇文档以相同 `doc_path` 入库（如同一 inline `doc_name` 提交两次）时共用同一个删除键，删除任一篇都会把两篇的向量和 BM25 行一起删掉。所有删除/替换/回滚路径改走新的 `delete_by_chunk_ids` 存储接口（local/qdrant/fusion-store/remote 四个后端均已实现；remote `/store/*` 面新增 `POST /delete_by_chunk_ids`），仅在旧版远端节点缺该接口时回退 `delete_by_doc`（有日志）。新增 5 个测试，全量 458 通过。
