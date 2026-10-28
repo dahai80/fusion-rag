@@ -95,6 +95,23 @@ async def delete_by_doc(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     return {"deleted": int(deleted)}
 
 
+@router.post("/delete_by_chunk_ids")
+async def delete_by_chunk_ids(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    # Issue #94: M2M server half of the precise chunk-id delete. A remote node
+    # WITHOUT this endpoint answers 404, which RemoteBackend maps to
+    # NotImplementedError so the caller falls back to delete_by_doc.
+    _get_base(kb_id)
+    chunk_ids = data.get("chunk_ids")
+    if not isinstance(chunk_ids, list) or not chunk_ids:
+        raise HTTPException(400, "chunk_ids (non-empty list) required")
+    try:
+        deleted = await run_in_threadpool(_vec_store(kb_id).delete_by_chunk_ids, chunk_ids)
+    except Exception as e:
+        logger.error("store delete_by_chunk_ids failed for kb=%s: %s", kb_id, e)
+        raise HTTPException(500, f"delete_by_chunk_ids failed: {e}")
+    return {"deleted": int(deleted)}
+
+
 @router.get("/count")
 async def count(kb_id: str) -> dict[str, Any]:
     _get_base(kb_id)

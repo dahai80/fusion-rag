@@ -79,9 +79,11 @@ class TestH2RollbackSignal:
             from fusion_rag.store.vector_store import VectorStore
 
             # Patch at the module the route imports: VectorStore.add_batch keeps
-            # real, delete_by_doc raises (rollback fails), add_document raises
-            # (metadata fails). That exercises both rollback branches.
-            with patch.object(VectorStore, "delete_by_doc", side_effect=RuntimeError("disk gone")), \
+            # real, delete_by_chunk_ids raises (rollback fails — issue #94 moved
+            # the rollback path from delete_by_doc to exact chunk-id deletion),
+            # add_document raises (metadata fails). That exercises both rollback
+            # branches.
+            with patch.object(VectorStore, "delete_by_chunk_ids", side_effect=RuntimeError("disk gone")), \
                     patch(
                         "fusion_rag.api.routes_docs.MetadataStore.add_document",
                         side_effect=RuntimeError("metadata db locked"),

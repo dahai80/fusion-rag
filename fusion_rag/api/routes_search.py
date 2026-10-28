@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
 
-from ..engine.llm_errors import LLMUnavailable
+from ..engine.llm_errors import LLMAuthRejected, LLMUnavailable
 from ..engine.query_rewriter import QueryRewriter
 from ..engine.reranker import HybridSearch
 from ..engine.runtime_config import get_runtime_config
@@ -400,6 +400,11 @@ async def ask(
             temperature=temperature,
             system_prompt=system_prompt,
         )
+    except LLMAuthRejected as e:
+        # Issue #93: credential rejected is a CONFIG error, not an outage —
+        # distinct message so orchestrators alert correctly (retry after key
+        # rotation, no incident).
+        raise HTTPException(502, "Answer generation failed (LLM credential rejected — check FUSION_MLX_API_KEY)") from e
     except LLMUnavailable as e:
         # L9: fusion-mlx down → no fabricated 200 answer. Surface as 502 so
         # the caller knows generation failed, not "answered with no info".

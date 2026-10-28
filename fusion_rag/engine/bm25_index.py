@@ -214,6 +214,18 @@ class BM25Index(SqliteBase):
             "BM25 index updated: %d docs (+%d new), %d tokens", self._corpus_size, new_count, len(self._inverted)
         )
 
+    def remove_chunks(self, chunk_ids: list[str]) -> int:
+        # Issue #94: delete by exact chunk id, NOT by doc_path. Two docs with
+        # identical content share a doc_path (inline ingest derives it from the
+        # doc name); a doc_path-keyed delete removed BOTH docs' chunks, so
+        # deleting one doc silently destroyed the other's retrievability.
+        to_remove = [c for c in dict.fromkeys(chunk_ids) if c and c in self._doc_texts]
+        if not to_remove:
+            return 0
+        removed = self._retract_chunks(to_remove)
+        logger.info("BM25 index: removed %d chunks by chunk_id", removed)
+        return removed
+
     def remove_document(self, doc_path: str) -> int:
         # L5: exact doc_path match against the stored per-chunk doc_path field,
         # never substring. The old `doc_path in txt or doc_path in str(did)`
@@ -221,6 +233,11 @@ class BM25Index(SqliteBase):
         to_remove = [did for did, dp in self._doc_paths.items() if dp == doc_path]
         if not to_remove:
             return 0
+        removed = self._retract_chunks(to_remove)
+        logger.info("BM25 index: removed %d chunks for doc %s", removed, doc_path)
+        return removed
+
+    def _retract_chunks(self, to_remove: list[str]) -> int:
         removed_set = set(to_remove)
         # P-P2-1: capture each removed doc's tokens BEFORE deleting its text so
         # the affected-token set is known directly (O(doc tokens)). The prior
@@ -256,7 +273,6 @@ class BM25Index(SqliteBase):
         self._avgdl = total_len / max(self._corpus_size, 1)
         # P2: delete only the rows for the removed doc_ids, not the whole table.
         self._persist_delta(added_docs=None, added_postings=None, removed_doc_ids=removed_set)
-        logger.info("BM25 index: removed %d chunks for doc %s", len(to_remove), doc_path)
         return len(to_remove)
 
     def search(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:

@@ -193,7 +193,17 @@ def create_app(
         # event loop turns" probe. It must NOT check downstream deps (embed
         # health, store writability) or a transient MLX hiccup evicts the pod
         # from a load balancer and cascades restarts. Deps live on /ready.
-        return {"status": "ok", "service": "fusion-rag", "version": _pkg_version()}
+        # Issue #93: llm_auth is an INFORMATIONAL cached field (ok/rejected/
+        # unknown, updated by the startup probe and each generation call) — it
+        # never gates the liveness status itself.
+        from ..engine.llm_auth_state import get_llm_auth_status
+
+        return {
+            "status": "ok",
+            "service": "fusion-rag",
+            "version": _pkg_version(),
+            "llm_auth": get_llm_auth_status(),
+        }
 
     @app.get("/ready")
     async def ready():
@@ -256,6 +266,20 @@ def create_app(
     return app
 
 
+def _apply_process_title(port: int) -> None:
+    # Issue #92: rename the process so `ps`/Activity Monitor show the product
+    # name instead of a bare homebrew "Python". Soft dependency — a missing
+    # setproctitle only means the title stays default, never a startup failure.
+    # start.sh stops by PID file, so the rename cannot break lifecycle control.
+    try:
+        import setproctitle
+
+        setproctitle.setproctitle(f"fusion-rag serve :{port}")
+        logger.info("process title set: fusion-rag serve :%d", port)
+    except Exception as e:
+        logger.debug("setproctitle unavailable, keeping default process title: %s", e)
+
+
 def run_server(
     host: str = "127.0.0.1",
     port: int = 11436,
@@ -293,6 +317,7 @@ def run_server(
     # string (PII: the search query) at INFO. Keep app logs (which we control
     # and have already downgraded PII fields to DEBUG); drop uvicorn.access so
     # the raw request line never hits the log sink.
+    _apply_process_title(port)
     uvicorn.run(
         app,
         host=host,
@@ -345,6 +370,26 @@ if __name__ == "__main__":
                 e,
             )
             sys.exit(1)
+        # Issue #93: a stale FUSION_MLX_API_KEY breaks EVERY /ask generation
+        # but left /search working, so the degradation went unnoticed until a
+        # failed acceptance run. Probe the LLM credential with a cheap /models
+        # call and flag a rejection loudly at boot. Do NOT exit — retrieval
+        # (embed) already passed and search keeps working; the operator sees
+        # the error + /health llm_auth=rejected and rotates the key.
+        from ..engine.llm_auth_state import key_hash_prefix, probe_llm_auth_sync
+
+        llm_auth = probe_llm_auth_sync(mlx_url, mlx_api_key)
+        if llm_auth == "rejected":
+            logger.error(
+                "startup probe: LLM credential REJECTED by %s (key_hash_prefix=%s) — "
+                "/ask will fail with 'LLM credential rejected' until FUSION_MLX_API_KEY "
+                "is rotated. /search is unaffected. /health reports llm_auth=rejected.",
+                mlx_url,
+                key_hash_prefix(mlx_api_key),
+            )
+        elif llm_auth == "ok":
+            logger.info("startup probe: LLM credential accepted by %s", mlx_url)
+
     run_server(
         host=host,
         port=port,

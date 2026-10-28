@@ -247,6 +247,32 @@ class LocalBackend(StoreBackend):
         self.bm25.remove_document(doc_path)
         return count
 
+    def delete_by_chunk_ids(self, chunk_ids: list[str]) -> int:
+        # Issue #94: delete exactly these chunk ids. doc_path-keyed delete
+        # removed physically-shared chunks of identical-content docs (inline
+        # ingest derives doc_path from the doc name, so two docs can share it).
+        # P0-4 parity: chunk ids are escaped with the same DataFusion
+        # string-literal builder as delete_by_doc (they are internal
+        # {doc_id}_{i} strings, but harden regardless).
+        ids = [c for c in dict.fromkeys(chunk_ids) if c]
+        if not ids:
+            return 0
+        literals = ",".join(_lance_string_literal(c) for c in ids)
+        result = self.table.delete(f"id IN ({literals})")
+        if isinstance(result, int):
+            count = result
+        elif hasattr(result, "__int__") and not hasattr(result, "num_deleted_rows"):
+            count = int(result)
+        elif hasattr(result, "num_deleted_rows"):
+            count = int(result.num_deleted_rows)
+        elif hasattr(result, "rows_deleted"):
+            count = result.rows_deleted
+        else:
+            logger.debug("delete_by_chunk_ids returned unexpected type: %s", type(result))
+            count = 0
+        self.bm25.remove_chunks(ids)
+        return count
+
     def count(self) -> int:
         # M3: failure used to return 0, indistinguishable from an empty store.
         # Stats endpoints would report "0 vectors" on a corrupt index. Raise.

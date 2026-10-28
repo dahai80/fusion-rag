@@ -303,6 +303,32 @@ class FusionStoreBackend(StoreBackend):
         logger.info("FusionStoreBackend delete_by_doc: doc_path=%s deleted=%d", doc_path, deleted)
         return deleted
 
+    def delete_by_chunk_ids(self, chunk_ids: list[str]) -> int:
+        # Issue #94: delete exactly these chunk ids via the i:<chunk_id> → int_id
+        # KV idmap instead of every vector under a (possibly shared) doc_path.
+        # Stale idmap entries (int_id already deleted) are skipped, same as
+        # delete_by_doc; KV has no delete in the binding, so the idmap entry
+        # itself remains but is unreachable after delete_vector.
+        ids = [c for c in dict.fromkeys(chunk_ids) if c]
+        if not ids:
+            return 0
+        deleted = 0
+        for chunk_id in ids:
+            raw = self._store.get_kv(self._IDMAP_PREFIX + chunk_id.encode("utf-8"))
+            if raw is None:
+                continue
+            try:
+                int_id = int(raw.decode("utf-8"))
+            except ValueError:
+                logger.warning("FusionStoreBackend delete_by_chunk_ids: bad idmap value for %r", chunk_id)
+                continue
+            self._store.delete_vector(int_id)
+            deleted += 1
+            logger.debug("FusionStoreBackend delete_by_chunk_ids: removed int_id=%s chunk_id=%s", int_id, chunk_id)
+        self.bm25.remove_chunks(ids)
+        logger.info("FusionStoreBackend delete_by_chunk_ids: %d/%d removed", deleted, len(ids))
+        return deleted
+
     def count(self) -> int:
         return self._store.vector_count()
 

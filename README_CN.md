@@ -189,6 +189,12 @@ Fusion-RAG 通过 `/kb/*` 提供 REST API。
 
 ## 更新日志
 
+### v0.8.11
+
+- **按 chunk-id 精确删除（issue #94）** — 删除一篇文档不再连带删除内容完全相同的另一篇文档的物理分片。两篇文档以相同 `doc_path` 入库（如同一 inline `doc_name` 提交两次）时共用同一个删除键，删除任一篇都会把两篇的向量和 BM25 行一起删掉。所有删除/替换/回滚路径改走新的 `delete_by_chunk_ids` 存储接口（local/qdrant/fusion-store/remote 四个后端均已实现；remote `/store/*` 面新增 `POST /delete_by_chunk_ids`），仅在旧版远端节点缺该接口时回退 `delete_by_doc`（有日志）。新增 5 个测试，全量 458 通过。
+- **LLM 凭证问题显性化（issue #93）** — 失效的 `FUSION_MLX_API_KEY` 之前只会让每个 `/ask` 报笼统的 "upstream LLM unavailable"。现在 fusion-mlx 返回 401/403 时会清晰呈现：`/ask` 返回 502 "LLM credential rejected"，启动探针打显眼 ERROR（不退出 —— 检索不受影响），`/health` 报告信息性字段 `llm_auth: ok/rejected/unknown`。凭证轮换后一次成功生成会自动清除旧的 rejected 标记；日志仅用 blake2b 哈希前缀标识密钥，绝不落密钥明文。新增 11 个测试。
+- **进程标题（issue #92）** — 服务进程在 `ps`/活动监视器中显示为 `fusion-rag serve :11436`，不再是裸 Python（setproctitle 软依赖）。`start.sh` 按 PID 文件停止，生命周期控制不受影响。新增 3 个测试。
+
 ### v0.8.10
 
 - **内联二进制入库修复（issue #90）** — `POST /kb/bases/{id}/documents/ingest` 中 `content_type` 为 `pdf`/`docx`/`epub` 时，`content` 现在按 base64 编码的二进制数据处理：解码为临时文件并走完整 `DocumentParser` 解析管线（PDF 文本抽取、EPUB 章节、扫描件 OCR 路径 #84），而不是把 base64 文本本身分片入库污染检索。非法 base64 返回 400；`text`/`markdown`/`html`/`csv` 直接入库路径不变。新增 5 个测试（PDF/EPUB 解析往返、扫描件 OCR 路径、非法 base64、纯文本回归），全量 439 通过。

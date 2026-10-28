@@ -23,3 +23,16 @@ class LLMUnavailable(RuntimeError):
 
     def __init__(self, msg: str = "LLM call failed (unavailable or empty)"):
         super().__init__(msg)
+
+
+class LLMAuthRejected(LLMUnavailable):
+    """Issue #93: the upstream rejected the credential (HTTP 401/403).
+
+    Subclass of LLMUnavailable so existing enhancement-fallback paths (rewrite,
+    rerank, contextualize) keep degrading gracefully, while the /ask route can
+    catch it FIRST and map it to a distinct message — a config error the
+    operator fixes by rotating FUSION_MLX_API_KEY, not an outage.
+    """
+
+    def __init__(self, msg: str = "LLM credential rejected (check FUSION_MLX_API_KEY)"):
+        super().__init__(msg)
