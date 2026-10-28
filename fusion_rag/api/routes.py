@@ -8,7 +8,8 @@ from fastapi import APIRouter, HTTPException
 from fusion_core.http_client import get_async_client, with_retry
 
 from .._validators import validate_identifier
-from ..engine.llm_errors import LLMUnavailable
+from ..engine.llm_auth_state import key_hash_prefix, set_llm_auth_status
+from ..engine.llm_errors import LLMAuthRejected, LLMUnavailable
 from ..engine.reranker import Reranker
 from ..store.metadata_store import MetadataStore
 from ..store.vector_store import VectorStore
@@ -277,7 +278,26 @@ async def _generate_answer(
             # O-P1-3: question is PII — drop snippet, keep the warning signal.
             logger.warning("RAG answer empty content (question len=%d)", len(question))
             raise ValueError("empty_content")
+        # Issue #93: a successful generation also clears a stale "rejected"
+        # flag (the key was rotated without a restart).
+        set_llm_auth_status("ok")
     except Exception as e:
+        # Issue #93: distinguish a REJECTED credential (401/403 — config
+        # error, fix by rotating FUSION_MLX_API_KEY) from a real outage, both
+        # in the log (with the key hash prefix, never the key) and in the
+        # exception type so /ask maps it to a distinct message. with_retry
+        # does not retry 4xx, so the first 401 surfaces here.
+        _resp = getattr(e, "response", None)
+        _status = getattr(_resp, "status_code", None)
+        if _status in (401, 403):
+            set_llm_auth_status("rejected")
+            logger.error(
+                "RAG answer generation: LLM credential REJECTED by upstream (HTTP %s) — "
+                "rotate FUSION_MLX_API_KEY (key_hash_prefix=%s)",
+                _status,
+                key_hash_prefix(embed.api_key),
+            )
+            raise LLMAuthRejected() from e
         # L9: do not return "Failed to generate answer: {e}" with HTTP 200 —
         # that makes a down upstream (fusion-mlx) look like a successful (if
         # unhelpful) answer. Propagate so the ask endpoint maps to 502.

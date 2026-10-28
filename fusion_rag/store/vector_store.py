@@ -121,6 +121,26 @@ class VectorStore:
     def delete_by_doc(self, doc_path: str) -> int:
         return self._backend.delete_by_doc(doc_path)
 
+    def delete_by_chunk_ids(self, chunk_ids: list[str], doc_path: str = "") -> int:
+        # Issue #94: delete exactly the listed chunk ids so identical-content
+        # docs that share a doc_path (inline ingest derives it from the doc
+        # name) keep their own chunks. Falls back to delete_by_doc ONLY when
+        # the backend lacks the precise path (RemoteBackend → old remote node)
+        # — logged loudly because the fallback carries the shared-chunk hazard.
+        if not chunk_ids:
+            return 0
+        try:
+            return self._backend.delete_by_chunk_ids(chunk_ids)
+        except NotImplementedError:
+            if not doc_path:
+                return 0
+            logger.warning(
+                "VectorStore: backend %s lacks delete_by_chunk_ids, falling back to "
+                "delete_by_doc(doc_path) — shared-doc_path chunks of other docs may be removed",
+                self.backend_type,
+            )
+            return self._backend.delete_by_doc(doc_path)
+
     def clear(self) -> None:
         self._backend.clear()
 

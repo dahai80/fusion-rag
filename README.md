@@ -609,6 +609,12 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.11
+
+- **Exact chunk-id deletion (issue #94)** — deleting one document no longer removes the physically-shared chunks of an identical-content doc. Two docs ingested with the same `doc_path` (e.g. the same inline `doc_name` twice) used to share one deletion key, so `DELETE` on either removed both docs' vectors and BM25 rows. All delete/replace/rollback paths now go through a new `delete_by_chunk_ids` store surface (implemented by the local, qdrant, fusion-store, and remote backends; the remote `/store/*` surface gained `POST /delete_by_chunk_ids`), with a logged `delete_by_doc` fallback only for old remote nodes. 5 new tests; full suite 458 passing.
+- **LLM auth surfacing (issue #93)** — a stale `FUSION_MLX_API_KEY` used to break every `/ask` with a generic "upstream LLM unavailable". A 401/403 from fusion-mlx now surfaces distinctly: `/ask` returns 502 "LLM credential rejected", the startup probe logs a loud ERROR (never exits — search keeps working), and `/health` reports an informational `llm_auth: ok/rejected/unknown` field. A successful generation clears a stale rejected flag after key rotation; logs identify the key only by blake2b hash prefix. 11 new tests.
+- **Process title (issue #92)** — the server process now shows as `fusion-rag serve :11436` in `ps`/Activity Monitor instead of a bare Python (setproctitle, soft dependency). `start.sh` stops by PID file, so lifecycle control is unaffected. 3 new tests.
+
 ## What's New in v0.8.10
 
 - **Inline binary ingest fix (issue #90)** — `POST /kb/bases/{kb_id}/documents/ingest` with `content_type` `pdf`/`docx`/`epub` now treats `content` as base64-encoded binary: it is decoded to a temp file and run through the full `DocumentParser` pipeline (PDF text extraction, EPUB chapters, and the scanned-PDF OCR path from #84), instead of chunking and indexing the base64 text itself — which silently polluted retrieval with garbage chunks. Invalid base64 returns 400. The text-ish types (`text`/`markdown`/`html`/`csv`) keep the direct-text path unchanged. 5 new tests (PDF/EPUB parse round-trips, scanned-PDF OCR path, invalid base64, plain-text regression); full suite 439 passing.

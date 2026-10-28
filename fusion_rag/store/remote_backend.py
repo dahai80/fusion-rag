@@ -180,6 +180,26 @@ class RemoteBackend(StoreBackend):
         logger.info("RemoteBackend delete_by_doc: doc_path=%s deleted=%d", doc_path, deleted)
         return deleted
 
+    def delete_by_chunk_ids(self, chunk_ids: list[str]) -> int:
+        # Issue #94: precise chunk-id delete via the remote /store surface. An
+        # old remote node without the endpoint answers 404 — raise
+        # NotImplementedError so the VectorStore wrapper falls back to
+        # delete_by_doc (with its shared-doc_path hazard) instead of failing
+        # the whole document delete.
+        ids = [c for c in dict.fromkeys(chunk_ids) if c]
+        if not ids:
+            return 0
+        try:
+            resp = self._post("delete_by_chunk_ids", {"chunk_ids": ids})
+        except Exception as e:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status == 404:
+                raise NotImplementedError("remote node has no delete_by_chunk_ids endpoint") from e
+            raise
+        deleted = int(resp.get("deleted", 0))
+        logger.info("RemoteBackend delete_by_chunk_ids: %d/%d deleted", deleted, len(ids))
+        return deleted
+
     def count(self) -> int:
         resp = self._get("count")
         return int(resp.get("count", 0))

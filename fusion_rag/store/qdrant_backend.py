@@ -267,6 +267,26 @@ class QdrantBackend(StoreBackend):
         logger.debug("QdrantBackend delete_by_doc(%s) removed %d points from %s", doc_path, len(ids), collection)
         return len(ids)
 
+    def delete_by_chunk_ids(self, chunk_ids: list[str]) -> int:
+        # Issue #94: delete exactly these chunk ids (deterministic blake2b
+        # point-id mapping) instead of every point under a shared doc_path.
+        ids = [c for c in dict.fromkeys(chunk_ids) if c]
+        if not ids:
+            return 0
+        collection = self._collection_for()
+        try:
+            self._client.get_collection(collection)
+        except Exception:
+            self.bm25.remove_chunks(ids)
+            return 0
+        point_ids = [self._point_id(c) for c in ids]
+        self._client.delete(collection, points_selector=point_ids)
+        self.bm25.remove_chunks(ids)
+        logger.debug(
+            "QdrantBackend delete_by_chunk_ids removed %d points from %s", len(point_ids), collection
+        )
+        return len(point_ids)
+
     def count(self) -> int:
         # M3 parity: raise on failure (do not return 0 indistinguishable from
         # empty). Count the caller's collection only (tenant-aware).

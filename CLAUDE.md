@@ -90,7 +90,8 @@ fusion_rag/
 │   ├── recall_bench.py      # Issue #79: recall@k/MRR benchmark — deterministic ≥500-chunk corpus, BM25 vs vector vs RRF ablation, mock (wiring) + real (BGE-M3, quality) modes
 │   ├── runtime_config.py    # RuntimeConfig — env-driven operator knobs (scan cap, cache TTL, token budget) + reset for tests
 │   ├── metrics.py           # R5 RED metrics registry + middleware → /metrics (Prometheus text format)
-│   ├── llm_errors.py        # LLMUnavailable — raised on total LLM failure so routes map to 503, not a fabricated 200 (L1)
+│   ├── llm_errors.py        # LLMUnavailable + LLMAuthRejected (401/403 subclass, #93) — raised on LLM failure so routes map to 502/503, not a fabricated 200 (L1)
+│   ├── llm_auth_state.py    # Issue #93: process-wide LLM credential state (ok/rejected/unknown) + startup /models probe; exposed as /health llm_auth (informational, never gates liveness)
 │   ├── sqlite_base.py       # 硬伤6 unified SQLite base — WAL + thread-safe shared connection (fixes async "database is locked")
 │   └── streaming.py         # SSEStreamer, MetadataExtractor
 ├── connectors/
@@ -142,6 +143,9 @@ fusion_rag/
 - **OCR evidence + citations (#85)**: OCR chunks carry flat `ocr_*` metadata keys (`ocr_confidence`, `ocr_task_id`, `ocr_slice_id`, `ocr_slice_url`, `ocr_bbox`, `ocr_kind`). `_normalize_evidence` (`routes.py`) surfaces `ocr_confidence` + `low_confidence` (vs `RuntimeConfig.low_ocr_confidence`, env `FUSION_RAG_LOW_OCR_CONFIDENCE`, default 0.85) + `slice_ref` on search rows. `/ask` additionally returns per-chunk `citations[]` (NOT deduped, unlike `sources[]`) + top-level `has_low_confidence` — consumers flag shaky OCR text and link the source slice image.
 - **Document active/deprecated status (#86)**: `PATCH /kb/bases/{kb_id}/documents/{doc_id}` (`routes_docs.py`) flips doc `status` (`active`/`deprecated`, optional `superseded_by`) in the documents table + mirrors onto SQLite chunk rows. CRITICAL: search results read chunk metadata from the LANCEDB records written at ingest — stale after a PATCH — so `_apply_status_filter` (`routes.py`) resolves the AUTHORITATIVE status from the documents table at query time (`MetadataStore.get_document_status_map`, one batched query per search) and overwrites the row's `status`. `/search`, `/ask`, `/similar` all accept `status_filter` (`active` default / `deprecated` / `all`); `/ask` marks deprecated context `[已作废版本]` so the model knows it's stale.
 - **Inline binary ingest (#90)**: `POST /kb/bases/{kb_id}/documents/ingest` with `content_type` in `BINARY_CONTENT_TYPES` (`pdf`/`docx`/`epub`) treats `content` as base64-encoded binary — `_ingest_binary_inline` (`routes_docs.py`) decodes it to a temp file and runs `_index_document`, so the payload goes through the FULL parse pipeline (PDF text extraction, EPUB chapters, and the #84 scanned-PDF OCR path). Invalid base64 → 400. Previously the base64 text itself was chunked and indexed, silently polluting retrieval with garbage chunks. Text-ish types (`text`/`markdown`/`html`/`csv`) keep the direct-text path unchanged.
+- **Exact chunk-id deletion (#94)**: doc delete/replace/rollback paths use `VectorStore.delete_by_chunk_ids` (new `StoreBackend` surface, implemented by all 4 backends) instead of `delete_by_doc` — two docs ingested with the same `doc_path` (e.g. same inline `doc_name` twice) share no chunk ids, so deleting one keeps the other's vectors + BM25 rows. The remote `/store/*` surface gained `POST /delete_by_chunk_ids`; the `VectorStore` wrapper falls back to `delete_by_doc` (logged) only when a backend/old remote node lacks the precise path. `BM25Index.remove_chunks` is the keyword-index counterpart.
+- **LLM auth surfacing (#93)**: a 401/403 from fusion-mlx chat-completions is raised as `LLMAuthRejected` (subclass of `LLMUnavailable` — enhancement fallbacks still degrade gracefully) and `/ask` maps it to a distinct 502 "LLM credential rejected". `llm_auth_state.py` holds the process-wide status (ok/rejected/unknown): startup probes `{url}/models` (loud ERROR on rejection, never exits — /search unaffected; honors `FUSION_RAG_SKIP_STARTUP_PROBE`), `/health` exposes it as an informational `llm_auth` field, and a successful generation clears a stale rejected flag. Logs identify the key only by blake2b hash prefix, never key material.
+- **Process title (#92)**: `run_server` renames the process to `fusion-rag serve :{port}` via setproctitle (soft dependency — missing lib only logs at DEBUG). `start.sh` stops by PID file, so the rename never breaks lifecycle control.
 
 ### Environment Variables
 
@@ -207,7 +211,7 @@ Probes: `/health` = liveness (process up), `/ready` = readiness (deps reachable,
 
 ### Dependencies
 
-Runtime: fusion-core (in-tree), httpx, fastapi, uvicorn, pydantic, lancedb, pyarrow, PyMuPDF, python-docx, ebooklib, markdownify, aiofiles, jieba, rank_bm25
+Runtime: fusion-core (in-tree), httpx, fastapi, uvicorn, pydantic, lancedb, pyarrow, PyMuPDF, python-docx, ebooklib, markdownify, aiofiles, jieba, rank_bm25, setproctitle
 Test: pytest, pytest-asyncio, pytest-cov, pytest-mock
 
 Requires Python 3.12+ (CI matrix: 3.12, 3.13; local venv runs 3.14) and macOS Apple Silicon. fusion-mlx must be running for embedding/RAG endpoints.

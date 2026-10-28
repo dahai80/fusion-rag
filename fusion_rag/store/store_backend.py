@@ -34,6 +34,14 @@ class StoreBackend(abc.ABC):
     @abc.abstractmethod
     def delete_by_doc(self, doc_path: str) -> int: ...
 
+    def delete_by_chunk_ids(self, chunk_ids: list[str]) -> int:
+        # Issue #94: delete exactly the listed chunk ids. Concrete backends
+        # override this; the default raises NotImplementedError so the
+        # VectorStore wrapper can fall back to delete_by_doc (with its
+        # shared-doc_path hazard) only when the backend genuinely lacks
+        # chunk-id precision (e.g. a RemoteBackend pointed at an old node).
+        raise NotImplementedError("backend does not support delete_by_chunk_ids")
+
     @abc.abstractmethod
     def count(self) -> int: ...
 

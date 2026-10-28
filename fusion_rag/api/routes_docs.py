@@ -242,7 +242,11 @@ async def _write_doc_to_stores(
     except Exception as e:
         logger.error("_write_doc_to_stores: add_batch (vectors+bm25) failed for doc %s: %s", doc_id, e)
         try:
-            await run_in_threadpool(vec_store.delete_by_doc, doc_path)
+            # Issue #94: roll back by exact chunk ids, not doc_path — the same
+            # doc_path may be shared by another doc's chunks.
+            await run_in_threadpool(
+                vec_store.delete_by_chunk_ids, [r["id"] for r in records], doc_path
+            )
         except Exception as de:
             # H2: rollback failed — orphan vectors may be durable. Signal it.
             rollback_failed = True
@@ -284,7 +288,10 @@ async def _write_doc_to_stores(
     except Exception as e:
         logger.error("_write_doc_to_stores: metadata write failed for doc %s (rolling back vectors): %s", doc_id, e)
         try:
-            await run_in_threadpool(vec_store.delete_by_doc, doc_path)
+            # Issue #94: exact chunk-id rollback (see add_batch failure path).
+            await run_in_threadpool(
+                vec_store.delete_by_chunk_ids, [r["id"] for r in records], doc_path
+            )
         except Exception as de:
             rollback_failed = True
             logger.error(
@@ -445,7 +452,13 @@ async def _index_document(kb_id: str, file_path: str, contextualize: bool = True
         old_path = existing.get("file_path", file_path)
         old_chunks = await run_in_threadpool(meta_store.get_chunks_by_doc, doc_id)
         old_chunk_count = len(old_chunks)
-        await run_in_threadpool(vec_store.delete_by_doc, old_path)
+        # Issue #94: tear down the old index by exact chunk ids — the same
+        # doc_path can be shared by another doc (identical inline doc_name).
+        old_ids = [c["id"] for c in old_chunks]
+        if old_ids:
+            await run_in_threadpool(vec_store.delete_by_chunk_ids, old_ids, old_path)
+        else:
+            await run_in_threadpool(vec_store.delete_by_doc, old_path)
         await run_in_threadpool(meta_store.delete_chunks_by_doc, doc_id)
         await run_in_threadpool(meta_store.delete_document, doc_id)
     # P4-1 + 硬伤B: single write path. vectors-first ordering (hard-undo side
@@ -731,7 +744,15 @@ async def delete_document(kb_id: str, doc_id: str) -> dict[str, Any]:
     # jieba BM25 synchronously and would freeze the event loop on large docs.
     async with _kb_lock(kb_id):
         try:
-            await run_in_threadpool(vec_store.delete_by_doc, doc_path)
+            # Issue #94: delete by exact chunk ids so a doc sharing the same
+            # doc_path with another doc (identical inline doc_name / same file
+            # re-ingested under a different doc_id) keeps its own chunks. The
+            # doc_path fallback only runs when the doc has no chunk rows.
+            chunk_ids = [c["id"] for c in chunks]
+            if chunk_ids:
+                await run_in_threadpool(vec_store.delete_by_chunk_ids, chunk_ids, doc_path)
+            else:
+                await run_in_threadpool(vec_store.delete_by_doc, doc_path)
         except Exception as e:
             logger.error("delete_document: vector delete_by_doc failed for %s: %s", doc_id, e)
             raise HTTPException(500, f"vector delete failed: {e}") from e
@@ -805,8 +826,12 @@ async def replace_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dic
     old_chunks = await run_in_threadpool(meta_store.get_chunks_by_doc, doc_id)
     old_chunk_count = len(old_chunks)
     # R1: wrap the old-index teardown in a threadpool — delete_by_doc walks
-    # LanceDB + jieba BM25 synchronously.
-    await run_in_threadpool(vec_store.delete_by_doc, old_path)
+    # LanceDB + jieba BM25 synchronously. Issue #94: by exact chunk ids.
+    old_ids = [c["id"] for c in old_chunks]
+    if old_ids:
+        await run_in_threadpool(vec_store.delete_by_chunk_ids, old_ids, old_path)
+    else:
+        await run_in_threadpool(vec_store.delete_by_doc, old_path)
     await run_in_threadpool(meta_store.delete_chunks_by_doc, doc_id)
     await run_in_threadpool(meta_store.delete_document, doc_id)
 
