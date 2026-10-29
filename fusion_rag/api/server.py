@@ -333,10 +333,10 @@ if __name__ == "__main__":
 
     host = os.environ.get("FUSION_RAG_HOST", "127.0.0.1")
     # Issue #96: single-point resolution via fusion_core (config-conventions §2)
-    # — FUSION_RAG_PORT (registered in port-registry.yaml), then the client-key
-    # alias chain FUSION_CLIENT_KEY → FUSION_MLX_API_KEY → MLX_API_KEY with the
-    # local-first ~/.fusion-mlx/settings.json fallback. All resolvers live in
-    # fusion-core; this repo keeps one-line call sites only.
+    # — FUSION_RAG_PORT (registered in port-registry.yaml), then the canonical
+    # client key FUSION_CLIENT_KEY (legacy aliases resolved inside fusion-core)
+    # with the local-first ~/.fusion-mlx/settings.json fallback. All resolvers
+    # live in fusion-core; this repo keeps one-line call sites only.
     port = service_port("rag", default=11436)
     mlx_url = os.environ.get("FUSION_MLX_URL", "http://127.0.0.1:11432/v1")
     embed_model = os.environ.get("FUSION_RAG_EMBED", "BGE-M3")
@@ -377,7 +377,7 @@ if __name__ == "__main__":
             logger.error(
                 "startup probe: LLM credential REJECTED by %s (key_hash_prefix=%s) — "
                 "/ask will fail with 'LLM credential rejected' until FUSION_CLIENT_KEY "
-                "(or legacy FUSION_MLX_API_KEY) is rotated. /search is unaffected. "
+                "is rotated (legacy aliases owned by fusion-core). /search is unaffected. "
                 "/health reports llm_auth=rejected.",
                 mlx_url,
                 key_hash_prefix(mlx_api_key),

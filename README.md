@@ -494,6 +494,7 @@ Modules migrated to fusion-core: `contextualizer`, `query_rewriter`, `reranker`,
 | `FUSION_RAG_LOG_DIR` | `./logs` | Log file dir (RotatingFileHandler, 10MB x 5 files) |
 | `FUSION_RAG_LOG_FORMAT` | text | Log line format: `text` (readable) or `json` (one JSON object/line, for ELK/Loki) |
 | `FUSION_RAG_SKIP_STARTUP_PROBE` | (empty) | Set `1` to skip the boot-time fusion-mlx reachability probe (MLX comes up later) |
+| `FUSION_REGISTRY` | ~/fusion/architecture/port-registry.yaml | Port registry checked by `start.sh` before serving (issue #98). A port missing from the registry refuses to start; `FUSION_SKIP_REGISTRY_CHECK=1` bypasses; a missing registry file warns and continues (standalone deploy). |
 | `FUSION_RAG_REQUIRE_GATEWAY` | (empty) | Set `1` to enforce multi-tenant isolation (#61): `/kb/*` requests require the `X-Fusion-Route: gateway-decision` header (403 without it), and KB access is scoped to the `X-Fusion-Tenant` header. Default off — single-tenant deployments are unaffected. |
 | `FUSION_RAG_REQUIRE_IDENTITY` | (empty) | Set `1` to enable authoritative tenant resolution via fusion-identity (#68): `/kb/*` requests require a valid `Authorization: Bearer <JWT>` verified by the identity service, and the tenant is taken from the JWT `tid` claim. `X-Fusion-Tenant` is demoted to defense-in-depth (must match the JWT `tid` if present). Default off. |
 | `FUSION_IDENTITY_URL` | http://127.0.0.1:11470 | fusion-identity base URL (HTTP service, port 11470). Used only when `FUSION_RAG_REQUIRE_IDENTITY=1`. |
@@ -608,6 +609,10 @@ ruff check fusion_rag/
 ```
 
 ---
+
+## What's New in v0.8.13
+
+- **Config Phase 3: legacy key-name cleanup + register-then-start self-check (issue #98)** — the last literal references to legacy env key names are gone from the code: key resolution reads the canonical `FUSION_CLIENT_KEY` only, with the legacy alias chain owned entirely by `fusion_core.config.client_key()` (never spelled out in this repo, so `scripts/check-env.py` reports 0 legacy warns for fusion-rag — and stays green when the check auto-escalates to errors on 2027-01-01). `start.sh` now verifies its own `port-registry.yaml` entry before serving (config Phase 3.3): an unregistered port fails at start with a clear message instead of at CI, `FUSION_SKIP_REGISTRY_CHECK=1` bypasses, and a missing registry file warns + continues for standalone deploys. 4 new tests cover the refuse/pass/bypass/missing-file paths; full suite 473 passing.
 
 ## What's New in v0.8.12
 
