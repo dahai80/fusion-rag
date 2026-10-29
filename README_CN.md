@@ -189,6 +189,10 @@ Fusion-RAG 通过 `/kb/*` 提供 REST API。
 
 ## 更新日志
 
+### v0.8.13
+
+- **Config Phase 3：legacy 密钥变量名清理 + 启动前端口注册自检（issue #98）** — 代码中最后一处 legacy 环境变量名字面引用清除：密钥解析只读规范名 `FUSION_CLIENT_KEY`，legacy 别名链完全由 `fusion_core.config.client_key()` 内部处理（本仓库不再拼写，`scripts/check-env.py` 对 fusion-rag 报 0 条 legacy 告警 —— 2027-01-01 检查升级为 error 后依然保持绿）。`start.sh` 启动前校验自身在 `port-registry.yaml` 的注册项（config Phase 3.3）：端口未注册直接拒绝启动并给出明确提示（问题在启动时暴露，而非 CI），`FUSION_SKIP_REGISTRY_CHECK=1` 可跳过，注册表文件缺失则告警后继续（独立部署场景）。新增 4 个测试覆盖 拒绝/通过/跳过/文件缺失 四条路径，全量 473 通过。
+
 ### v0.8.12
 
 - **配置解析收敛到 fusion_core 单点（issue #96）** — 删除全部手写密钥/环境变量解析，统一走 `fusion_core.config`（config Phase 2.2）：MLX API key 经 `client_key()` 解析（别名链 `FUSION_CLIENT_KEY` → `FUSION_MLX_API_KEY` → `MLX_API_KEY`；dev 缺 key = 空值 + 一次性告警；`FUSION_PROFILE=prod` 缺 key = RuntimeError 快速失败）；服务端口经 `service_port("rag")`（读 `FUSION_RAG_PORT`）；数据目录根经 `service_data_dir`（`FUSION_RAG_DATA_DIR` 可覆盖，默认保持 `~/.fusion-rag`）—— 覆盖 KB 存储根、watch 注册表、auth/graph/缓存/评估 SQLite 路径。`server.py` 用 `client_key() or resolve_api_key()` 保留本地优先的 `~/.fusion-mlx/settings.json` 回退；本地 `_mlx_api_key()` 之类解析函数全部删除（调用点保持一行）。不改环境变量名；`FUSION_RAG_API_KEY`（服务自身鉴权）不变。新增 11 个测试，全量 469 通过；`scripts/check-env.py` 对 fusion-rag 报 0 错误。

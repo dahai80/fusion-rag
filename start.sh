@@ -56,11 +56,31 @@ is_running() {
     return 1
 }
 
+check_port_registry() {
+    # Issue #98 (config Phase 3.3): register-then-start self-check — refuse to
+    # serve on a port missing from port-registry.yaml so the drift fails at
+    # start instead of at CI. FUSION_SKIP_REGISTRY_CHECK=1 bypasses; a missing
+    # registry file is a warn + continue (standalone deploy).
+    SERVICE="fusion-rag"
+    REGISTRY="${FUSION_REGISTRY:-$HOME/fusion/architecture/port-registry.yaml}"
+    if [ ! -f "$REGISTRY" ]; then
+        echo "warn: port-registry.yaml not found at $REGISTRY — registry self-check skipped" >&2
+    elif ! grep -A3 "^  ${SERVICE}:" "$REGISTRY" 2>/dev/null | grep -q "port: $PORT$"; then
+        if [ "${FUSION_SKIP_REGISTRY_CHECK:-}" != "1" ]; then
+            echo "port $PORT for ${SERVICE} not registered in $REGISTRY — refusing to start" >&2
+            exit 1
+        fi
+        echo "warn: registry check bypassed (FUSION_SKIP_REGISTRY_CHECK=1)" >&2
+    fi
+}
+
 start() {
     if is_running; then
         echo "Fusion-RAG is already running (PID $(get_pid))"
         exit 1
     fi
+
+    check_port_registry
 
     ensure_log_dir
 

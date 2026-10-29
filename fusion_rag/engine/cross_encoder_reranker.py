@@ -57,7 +57,7 @@ class CrossEncoderReranker:
         self._base = (mlx_base_url or _mlx_base_url())
         self._model = model or os.environ.get("FUSION_RAG_RERANK_MODEL", "").strip() or _DEFAULT_MODEL
         # Issue #96: single-point resolution via fusion_core client_key() —
-        # alias chain FUSION_CLIENT_KEY → FUSION_MLX_API_KEY → MLX_API_KEY.
+        # canonical name FUSION_CLIENT_KEY (legacy aliases resolved inside fusion-core).
         self._api_key = api_key or client_key()
         self._timeout = timeout
 

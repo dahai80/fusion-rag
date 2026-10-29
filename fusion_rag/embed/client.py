@@ -72,8 +72,8 @@ class EmbeddingClient:
     ):
         if not api_key:
             # Issue #96: single-point resolution via fusion_core (config-conventions
-            # §2) — alias chain FUSION_CLIENT_KEY → FUSION_MLX_API_KEY → MLX_API_KEY.
-            # dev: "" + one-shot warning; prod: RuntimeError (fail-fast).
+            # §2) — canonical name FUSION_CLIENT_KEY (legacy aliases resolved
+            # inside fusion-core). dev: "" + one-shot warning; prod: RuntimeError.
             api_key = client_key()
         self.base_url = base_url.rstrip("/")
         self.model = model
