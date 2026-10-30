@@ -224,6 +224,10 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.15
+
+- **横向扩容模式下禁用本地密钥创建（issue #102）** — 每实例 SQLite `auth.db` 与文档"无状态负载均衡后横向扩容"契约矛盾：节点 A 上签发的密钥在节点 B 上 401。决策：方案一（仅配置面凭证）。`FUSION_RAG_REQUIRE_GATEWAY=1` 或 `FUSION_RAG_REQUIRE_IDENTITY=1` 开启时，`POST /kb/auth/keys` 返回 409 拒绝创建单节点密钥；扩容部署使用共享 `FUSION_RAG_API_KEY` 环境变量或网关/identity 签发凭证。单租户默认行为不变。README 记录该约束及被否决的方案二（auth.db 迁 PG）。新增 4 个测试；双节点演练已验证。
+
 ### v0.8.14
 
 - **数据层依赖文档（issue #100）** — README 新增"数据层依赖"章节：何时需要 Qdrant（仅 `qdrant` 后端/按租户隔离需要，默认本地 LanceDB 后端无需外部数据库）、本地运行方式（需容器运行时，`qdrant/qdrant:v1.12.4`）、规范连接地址 `QDRANT_URL=http://localhost:6333`（仅 HTTP —— gRPC 端口 6334 保留但 fusion-rag 未使用）、写入路径的响亮失败预期，以及约束文档 `architecture/fusion-db-conventions-1030.md` 的指引。issue 中记录后续项：Qdrant 不可达时搜索路径存在静默降级。
