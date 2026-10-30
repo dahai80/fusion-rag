@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import secrets
 import time
 from typing import Any
@@ -17,6 +18,19 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/kb/auth", tags=["auth"])
 
 
+def _scaled_mode() -> bool:
+    # Issue #102 (DB conventions DB-5): in gateway/identity mode the deployment
+    # is horizontally scaled (stateless LB, issue #61/#68 topology), and the
+    # per-instance SQLite auth.db cannot serve as a shared key store — a key
+    # provisioned on node A 401s on node B. Scaled deployments must use
+    # config-plane credentials only (shared FUSION_RAG_API_KEY env /
+    # gateway-issued / identity JWT); local key creation is refused.
+    for var in ("FUSION_RAG_REQUIRE_GATEWAY", "FUSION_RAG_REQUIRE_IDENTITY"):
+        if os.environ.get(var, "").strip().lower() in ("1", "true", "yes"):
+            return True
+    return False
+
+
 @router.get("/keys", dependencies=[Depends(require_admin())])
 async def list_api_keys() -> dict[str, Any]:
     keys = AuthConfig().list_keys()
@@ -25,6 +39,17 @@ async def list_api_keys() -> dict[str, Any]:
 
 @router.post("/keys", dependencies=[Depends(require_admin())])
 async def create_api_key(body: dict[str, Any]) -> dict[str, Any]:
+    if _scaled_mode():
+        # Issue #102 option 1: per-instance auth.db keys are unusable behind a
+        # stateless LB — refuse loudly instead of minting a key that works on
+        # one node and 401s on the rest.
+        logger.warning("local API key creation refused: scaled mode (gateway/identity) is on")
+        raise HTTPException(
+            409,
+            "Local API key creation is disabled in scaled mode (FUSION_RAG_REQUIRE_GATEWAY/"
+            "FUSION_RAG_REQUIRE_IDENTITY): per-instance auth.db does not survive horizontal "
+            "scaling. Use the shared FUSION_RAG_API_KEY env or gateway/identity-issued credentials.",
+        )
     name = body.get("name", "default")
     # S-P0-1: belt-and-suspenders — require_admin blocks non-admin callers, and
     # this rejects a reserved name even if an admin mistypes one. add_key also

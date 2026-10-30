@@ -291,6 +291,8 @@ The full `metadata` dict is stamped on the document AND every chunk, so `metadat
 
 **Per-project KB pattern** (~100 concurrent projects, EnviPermit-style): one KB per project via `POST /kb/bases` (`kb_id=project_<id>`), ingest project documents, search with `POST /kb/bases/project_<id>/search`. For multi-tenant isolation enable `FUSION_RAG_REQUIRE_GATEWAY=1` (KB-level tenant scoping) or `FUSION_RAG_REQUIRE_IDENTITY=1` (JWT-verified tenant via fusion-identity); with `FUSION_RAG_STORE_BACKEND=qdrant`, tenants get separate vector collections. fusion-rag is single-process per stores dir (H3) — scale horizontally behind a stateless load balancer, never by running multiple processes against one `FUSION_RAG_STORES_DIR`.
 
+**Horizontal scaling + auth (issue #102)**: the "stateless LB" contract covers the vector path, NOT the local API-key store. `auth.db` is a per-instance SQLite file (`~/.fusion-rag/auth.db`) — a key provisioned on node A does not exist on node B. Decision (option 1, per `architecture/fusion-db-conventions-1030.md` DB-5): horizontally-scaled deployments use **config-plane credentials only** — the shared `FUSION_RAG_API_KEY` env on every node, or gateway/identity-issued credentials (`FUSION_RAG_REQUIRE_GATEWAY=1` / `FUSION_RAG_REQUIRE_IDENTITY=1`). When either scaled mode is on, `POST /kb/auth/keys` refuses with 409 ("disabled in scaled mode") so no one can mint a single-node key; read-only key listing stays available per instance. Moving auth.db to Postgres (option 2) was rejected — it would add a PG dependency where the existing gateway/identity auth paths already cover the scaled case.
+
 ### GraphRAG (Issue #79)
 
 Entity-relation graph retrieval, wired to HTTP (experimental). A build extracts entities + relations from a KB's chunks via the fusion-mlx LLM (one call per chunk, semaphore-bounded, capped) and stores them in a per-KB SQLite graph (`graph.db` under the KB's store dir); graph search expands entity matches over relation hops and resolves hit chunk ids back to text.
@@ -644,6 +646,10 @@ ruff check fusion_rag/
 ```
 
 ---
+
+## What's New in v0.8.15
+
+- **Scaled-mode local key creation refused (issue #102)** — the per-instance SQLite `auth.db` contradicted the documented "scale horizontally behind a stateless load balancer" contract: a key provisioned on node A 401s on node B. Decision: option 1 (config-plane keys only). When `FUSION_RAG_REQUIRE_GATEWAY=1` or `FUSION_RAG_REQUIRE_IDENTITY=1` is on, `POST /kb/auth/keys` refuses with 409 instead of minting a single-node key; scaled deployments use the shared `FUSION_RAG_API_KEY` env or gateway/identity-issued credentials. Single-tenant default unchanged. README documents the constraint and the rejected option 2 (auth.db to Postgres). 4 new tests; two-node drill verified.
 
 ## What's New in v0.8.14
 
