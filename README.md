@@ -592,6 +592,41 @@ tar -czf kb-snapshot.tgz -C ~/.fusion-rag/stores {kb_id}
 
 ---
 
+## Data Layer Dependencies
+
+Governing conventions: [`architecture/fusion-db-conventions-1030.md`](../architecture/fusion-db-conventions-1030.md) (single shared Qdrant instance per node; no alternative vector stores — DB-8).
+
+### When Qdrant is required
+
+- **Default (`FUSION_RAG_STORE_BACKEND=local`)** — no external database. Vectors live in embedded LanceDB + SQLite under `~/.fusion-rag/stores/{kb_id}/`.
+- **Qdrant backend (`FUSION_RAG_STORE_BACKEND=qdrant`)** — required for per-tenant collection isolation (issue #66) and the multi-tenant deployments that rely on it. Install the client with `pip install 'fusion-rag[qdrant]'`.
+
+### Running Qdrant locally
+
+The canonical Qdrant instance is **`http://localhost:6333` (HTTP)**; the gRPC port `6334` is reserved by the conventions doc but **not used by fusion-rag** — the backend connects over HTTP only. Qdrant has no native Homebrew formula, so a local run needs a container runtime (OrbStack or Docker):
+
+```bash
+docker run -d --name qdrant -p 6333:6333 -p 6334:6334 \
+  -v $(pwd)/qdrant_storage:/qdrant/storage qdrant/qdrant:v1.12.4
+```
+
+Production provides the same instance (same ports, same version `v1.12.4`) via `fusion-supervisor`'s `docker-compose.sidecar.yml` — do not spin up a second Qdrant.
+
+### Connection + failure behavior
+
+Connection is configured through `QDRANT_URL` (per DB-3 of the conventions doc):
+
+```bash
+export FUSION_RAG_STORE_BACKEND=qdrant
+export QDRANT_URL=http://localhost:6333
+```
+
+The default `QDRANT_URL=:memory:` runs an in-process ephemeral Qdrant — dev/test only, data does not survive restart.
+
+Expected behavior when Qdrant is unreachable: **ingest fails loudly** — upsert/connection errors propagate to a visible 4xx/5xx, never a silently successful ingest. Known caveat (tracked as a follow-up in issue #100): the search path currently treats any `get_collection` failure as "collection does not exist" and returns empty results, so an unreachable Qdrant can surface as an empty search rather than an error. Check `logs/fusion-rag.log` for `QdrantBackend` errors when results look unexpectedly empty.
+
+---
+
 ## Development
 
 ```bash
@@ -609,6 +644,10 @@ ruff check fusion_rag/
 ```
 
 ---
+
+## What's New in v0.8.14
+
+- **Data layer dependencies documentation (issue #100)** — new README section documenting when Qdrant is required (only for the `qdrant` backend / per-tenant isolation — the default local LanceDB backend needs no external DB), how to run it locally (container runtime required, `qdrant/qdrant:v1.12.4`), the canonical connection `QDRANT_URL=http://localhost:6333` (HTTP-only — the gRPC port 6334 is reserved but unused by fusion-rag), fail-loud expectations on ingest, and a pointer to `architecture/fusion-db-conventions-1030.md` as the governing doc. Follow-up noted in the issue: search-path silent degradation when Qdrant is unreachable.
 
 ## What's New in v0.8.13
 
