@@ -187,7 +187,46 @@ Fusion-RAG 通过 `/kb/*` 提供 REST API。
 
 ---
 
+## 数据层依赖
+
+约束文档：[`architecture/fusion-db-conventions-1030.md`](../architecture/fusion-db-conventions-1030.md)（每节点单一共享 Qdrant 实例；不引入其他向量数据库 —— DB-8）。
+
+### 何时需要 Qdrant
+
+- **默认模式（`FUSION_RAG_STORE_BACKEND=local`）** —— 无需外部数据库。向量存于内嵌 LanceDB + SQLite（`~/.fusion-rag/stores/{kb_id}/`）。
+- **Qdrant 后端（`FUSION_RAG_STORE_BACKEND=qdrant`）** —— 按租户集合隔离（issue #66）及依赖它的多租户部署必须使用。客户端安装：`pip install 'fusion-rag[qdrant]'`。
+
+### 本地运行 Qdrant
+
+规范实例地址：**`http://localhost:6333`（HTTP）**；gRPC 端口 `6334` 在约束文档中保留，但 **fusion-rag 不使用** —— 后端仅走 HTTP。Qdrant 无原生 Homebrew formula，本地运行需容器运行时（OrbStack 或 Docker）：
+
+```bash
+docker run -d --name qdrant -p 6333:6333 -p 6334:6334 \
+  -v $(pwd)/qdrant_storage:/qdrant/storage qdrant/qdrant:v1.12.4
+```
+
+生产环境由 `fusion-supervisor` 的 `docker-compose.sidecar.yml` 提供同一实例（相同端口、相同版本 `v1.12.4`）—— 不要再起第二个 Qdrant。
+
+### 连接与故障表现
+
+连接通过 `QDRANT_URL` 配置（约束文档 DB-3）：
+
+```bash
+export FUSION_RAG_STORE_BACKEND=qdrant
+export QDRANT_URL=http://localhost:6333
+```
+
+默认 `QDRANT_URL=:memory:` 为进程内临时 Qdrant —— 仅限开发/测试，重启后数据不保留。
+
+Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— upsert/连接错误向上传播为可见的 4xx/5xx，绝不静默成功。已知缺口（issue #100 中记录为后续项）：搜索路径目前把任何 `get_collection` 失败当作"集合不存在"并返回空结果，因此 Qdrant 不可达时搜索可能表现为空结果而非报错。结果异常为空时请查 `logs/fusion-rag.log` 中的 `QdrantBackend` 错误。
+
+---
+
 ## 更新日志
+
+### v0.8.14
+
+- **数据层依赖文档（issue #100）** — README 新增"数据层依赖"章节：何时需要 Qdrant（仅 `qdrant` 后端/按租户隔离需要，默认本地 LanceDB 后端无需外部数据库）、本地运行方式（需容器运行时，`qdrant/qdrant:v1.12.4`）、规范连接地址 `QDRANT_URL=http://localhost:6333`（仅 HTTP —— gRPC 端口 6334 保留但 fusion-rag 未使用）、写入路径的响亮失败预期，以及约束文档 `architecture/fusion-db-conventions-1030.md` 的指引。issue 中记录后续项：Qdrant 不可达时搜索路径存在静默降级。
 
 ### v0.8.13
 
