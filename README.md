@@ -647,6 +647,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.16
+
+- **Startup probe actually runs (issue #104)** — the O-P2-3 startup gate called the async `EmbeddingClient.health()` bare: the coroutine was never awaited, so the probe passed unconditionally (a fusion-rag booted with fusion-mlx down reported healthy) and every boot emitted a `RuntimeWarning: coroutine ... never awaited`. The gate is now an extracted `_run_startup_probe()` that probes fusion-mlx `GET /models` directly — deliberately NOT via `health()`, whose local sentence-transformers fallback would mask a down MLX on boxes where the local model is installed. Boot-time console logging is configured before the probe (previously the passing probe's log line was dropped — no handler existed until `run_server`). MLX unreachable → loud ERROR + exit 1; `FUSION_RAG_SKIP_STARTUP_PROBE=1` still bypasses. 4 new tests; full suite 460 passing.
+
 ## What's New in v0.8.15
 
 - **Scaled-mode local key creation refused (issue #102)** — the per-instance SQLite `auth.db` contradicted the documented "scale horizontally behind a stateless load balancer" contract: a key provisioned on node A 401s on node B. Decision: option 1 (config-plane keys only). When `FUSION_RAG_REQUIRE_GATEWAY=1` or `FUSION_RAG_REQUIRE_IDENTITY=1` is on, `POST /kb/auth/keys` refuses with 409 instead of minting a single-node key; scaled deployments use the shared `FUSION_RAG_API_KEY` env or gateway/identity-issued credentials. Single-tenant default unchanged. README documents the constraint and the rejected option 2 (auth.db to Postgres). 4 new tests; two-node drill verified.

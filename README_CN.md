@@ -224,6 +224,10 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.16
+
+- **启动探针真正执行（issue #104）** — O-P2-3 启动门禁裸调用异步的 `EmbeddingClient.health()`：协程从未被 await，探针无条件通过（fusion-mlx 未启动也能拉起 fusion-rag 并谎报健康），且每次启动都产生一条 `RuntimeWarning: coroutine ... never awaited`。门禁重构为独立的 `_run_startup_probe()`，直接探测 fusion-mlx `GET /models` —— 刻意不用 `health()`：其本地 sentence-transformers 回退会在装了本地模型的机器上掩盖 MLX 宕机。启动时先配置好控制台日志（此前探针通过时的日志行因无 handler 被丢弃 —— `run_server` 之前没有任何日志处理器）。MLX 不可达 → 响亮 ERROR + exit 1；`FUSION_RAG_SKIP_STARTUP_PROBE=1` 仍可跳过。新增 4 个测试，全量 460 通过。
+
 ### v0.8.15
 
 - **横向扩容模式下禁用本地密钥创建（issue #102）** — 每实例 SQLite `auth.db` 与文档"无状态负载均衡后横向扩容"契约矛盾：节点 A 上签发的密钥在节点 B 上 401。决策：方案一（仅配置面凭证）。`FUSION_RAG_REQUIRE_GATEWAY=1` 或 `FUSION_RAG_REQUIRE_IDENTITY=1` 开启时，`POST /kb/auth/keys` 返回 409 拒绝创建单节点密钥；扩容部署使用共享 `FUSION_RAG_API_KEY` 环境变量或网关/identity 签发凭证。单租户默认行为不变。README 记录该约束及被否决的方案二（auth.db 迁 PG）。新增 4 个测试；双节点演练已验证。
