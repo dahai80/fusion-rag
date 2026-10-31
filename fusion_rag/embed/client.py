@@ -256,6 +256,19 @@ class EmbeddingClient:
         return await self._call_local_embed(texts)
 
     async def _call_local_embed(self, texts: list[str]) -> list[list[float]]:
+        # Issue #106: fail-fast mode. Cold-loading the local BGE-M3 takes ~2-4
+        # minutes; an operator who prefers a quick retryable error (caller
+        # retries when fusion-mlx recovers) sets FUSION_RAG_EMBED_LOCAL_FALLBACK=0.
+        from ..engine.runtime_config import get_runtime_config
+
+        if not get_runtime_config().embed_local_fallback:
+            logger.warning(
+                "Local embedding fallback disabled (FUSION_RAG_EMBED_LOCAL_FALLBACK=0); failing fast"
+            )
+            raise EmbeddingError(
+                "all embedding providers failed (MLX + fallback); local fallback disabled "
+                "(FUSION_RAG_EMBED_LOCAL_FALLBACK=0) — retry when fusion-mlx recovers"
+            )
         logger.info("Falling back to local sentence-transformers embedding")
         try:
             from .local import embed_local
@@ -280,6 +293,14 @@ class EmbeddingClient:
                 return True
         except Exception:
             logger.debug("health check /models failed")
+        # Issue #106: with the local fallback disabled (fail-fast mode), local
+        # embeddings are NOT part of the serving path — reporting healthy via a
+        # model no request may use would mask a down fusion-mlx (same class of
+        # false-healthy as the #104 startup probe).
+        from ..engine.runtime_config import get_runtime_config
+
+        if not get_runtime_config().embed_local_fallback:
+            return False
         try:
             from .local import get_local_model
 

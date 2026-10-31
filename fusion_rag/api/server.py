@@ -187,6 +187,19 @@ def create_app(
     app.include_router(auth_router)
     app.include_router(bnup_router)
 
+    # Issue #106: map EmbeddingError to a clean 503 instead of a bare 500
+    # "Internal Server Error". EmbeddingError means every provider (MLX +
+    # cloud fallback + local) is down or fail-fast disabled — a retryable
+    # service-dependency state, so 503 (not 500) tells callers to back off
+    # and retry rather than treat it as a bug. One app-wide handler covers
+    # every embed call site (/search, /ask, ingest, /similar, bnup).
+    from ..embed.client import EmbeddingError
+
+    @app.exception_handler(EmbeddingError)
+    async def _embedding_error_handler(request, exc: EmbeddingError) -> JSONResponse:
+        logger.warning("EmbeddingError -> 503: %s", exc)
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
+
     @app.get("/health")
     async def health():
         # O-P1-1: /health is LIVENESS only — a cheap "the process is up and the
@@ -221,8 +234,14 @@ def create_app(
             # health() is async — await it, else the coroutine is never
             # awaited and the check silently reports "ok" even when MLX is
             # down (defeating the readiness probe).
-            await embed_client.health()
-            checks["embedding"] = "ok"
+            # Issue #106: the RETURN VALUE matters too — health() returns
+            # False (no exception) when MLX is down and the local fallback is
+            # disabled; treating that as "ok" was a false-ready.
+            if await embed_client.health():
+                checks["embedding"] = "ok"
+            else:
+                ready = False
+                checks["embedding"] = "unavailable: embedding backend down"
         except Exception as e:
             ready = False
             checks["embedding"] = f"unavailable: {e}"

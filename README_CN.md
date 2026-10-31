@@ -224,6 +224,10 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.17
+
+- **本地 embedding 回退：单次共享加载 + 快速失败模式（issue #106）** — fusion-mlx 宕机时每个 embed 请求都回退到本地 sentence-transformers BGE-M3 冷加载（MPS 上约 2-4 分钟），且并发请求各自触发一次加载（模块单例无锁）—— 搜索挂起数分钟、服务形似假死。`get_local_model` 改为双重检查加锁：第一个调用方加载，并发调用方等待后复用（实测验证：5 次回退触发，仅 1 次模型加载）。新增运维开关 `FUSION_RAG_EMBED_LOCAL_FALLBACK=0` 彻底关闭本地回退：embed 调用快速抛出可重试的 `EmbeddingError`（搜索返回带清晰 detail 的 503，约 2.5 秒而非数分钟），不再在请求内冷加载模型。快速失败模式下 `health()` 不再经本地模型谎报健康，`/ready` 也改为尊重 `health()` 返回值（此前忽略布尔值 —— False 仍报 "ok"）。新增 8 个测试，全量 468 通过。
+
 ### v0.8.16
 
 - **启动探针真正执行（issue #104）** — O-P2-3 启动门禁裸调用异步的 `EmbeddingClient.health()`：协程从未被 await，探针无条件通过（fusion-mlx 未启动也能拉起 fusion-rag 并谎报健康），且每次启动都产生一条 `RuntimeWarning: coroutine ... never awaited`。门禁重构为独立的 `_run_startup_probe()`，直接探测 fusion-mlx `GET /models` —— 刻意不用 `health()`：其本地 sentence-transformers 回退会在装了本地模型的机器上掩盖 MLX 宕机。启动时先配置好控制台日志（此前探针通过时的日志行因无 handler 被丢弃 —— `run_server` 之前没有任何日志处理器）。MLX 不可达 → 响亮 ERROR + exit 1；`FUSION_RAG_SKIP_STARTUP_PROBE=1` 仍可跳过。新增 4 个测试，全量 460 通过。

@@ -46,6 +46,18 @@ def _env_float(name: str, default: float, minimum: float = 0.0, maximum: float =
     return val
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    logger.warning("invalid %s=%r, using default %s", name, raw, default)
+    return default
+
+
 @dataclass(frozen=True)
 class RuntimeConfig:
     # D4: every field is env-overridable. Defaults are the prior hardcoded
@@ -70,6 +82,12 @@ class RuntimeConfig:
     # this are flagged low_confidence=True in search results and citations
     # (has_low_confidence on /ask answers).
     low_ocr_confidence: float = 0.85
+    # Issue #106: local sentence-transformers fallback toggle. ON (default)
+    # preserves the existing degrade-to-local behavior. OFF makes every embed
+    # call fail FAST with a retryable EmbeddingError when MLX + cloud fallback
+    # are down — cold-loading BGE-M3 takes ~2-4 minutes, which used to hang
+    # each request for minutes with no way to opt out.
+    embed_local_fallback: bool = True
 
     @classmethod
     def from_env(cls) -> RuntimeConfig:
@@ -94,6 +112,7 @@ class RuntimeConfig:
             rerank_backend=os.environ.get("FUSION_RAG_RERANK_BACKEND", "llm").strip().lower(),
             rerank_top_n=_env_int("FUSION_RAG_RERANK_TOP_N", 20, minimum=1),
             low_ocr_confidence=_env_float("FUSION_RAG_LOW_OCR_CONFIDENCE", 0.85, minimum=0.0, maximum=1.0),
+            embed_local_fallback=_env_bool("FUSION_RAG_EMBED_LOCAL_FALLBACK", True),
         )
 
     def to_dict(self) -> dict:
