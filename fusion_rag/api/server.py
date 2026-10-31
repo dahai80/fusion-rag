@@ -328,6 +328,27 @@ def run_server(
     )
 
 
+def _run_startup_probe(mlx_url: str, embed_model: str, mlx_api_key: str) -> None:
+    # Issue #104: the O-P2-3 startup gate used to call EmbeddingClient.health()
+    # bare — an async def, so it only created a coroutine (never awaited, never
+    # ran) and the probe passed unconditionally. Extracted so the gate is unit-
+    # testable. Probes fusion-mlx /models DIRECTLY rather than via health():
+    # health() also accepts the local sentence-transformers fallback, which
+    # would mask a down fusion-mlx on boxes where the local model is installed
+    # — the gate's contract (issue #104 acceptance) is MLX reachability.
+    import asyncio
+
+    probe = EmbeddingClient(base_url=mlx_url, model=embed_model, api_key=mlx_api_key)
+
+    async def _mlx_reachable() -> bool:
+        resp = await probe.client.get("/models", timeout=2.0)
+        return resp.status_code == 200
+
+    if not asyncio.run(_mlx_reachable()):
+        raise RuntimeError("fusion-mlx /models returned non-200")
+    logger.info("startup probe: fusion-mlx embedding backend reachable at %s", mlx_url)
+
+
 if __name__ == "__main__":
     from fusion_core.config import client_key, resolve_api_key, service_port
 
@@ -342,6 +363,16 @@ if __name__ == "__main__":
     embed_model = os.environ.get("FUSION_RAG_EMBED", "BGE-M3")
     mlx_api_key = client_key() or resolve_api_key()
     log_level = os.environ.get("FUSION_RAG_LOG_LEVEL", "INFO")
+    # Issue #104: configure a console handler BEFORE the startup probe —
+    # configure_logging() only runs inside run_server(), so the probe's log
+    # lines were dropped at boot (no root handler; lastResort prints WARNING+
+    # only, which is why a FAILED boot was visible but a PASSING boot was not).
+    # configure_logging() later reuses this console handler (it skips adding
+    # its own when a non-owned StreamHandler exists) and adds the file sink.
+    logging.basicConfig(
+        level=getattr(logging, log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     # O-P2-3: startup health gate. CLAUDE.md states "fusion-mlx must be running"
     # but nothing enforced it — a fusion-rag started before fusion-mlx served
     # /health=ok while every embed call 401'd until MLX came up (false healthy).
@@ -352,10 +383,8 @@ if __name__ == "__main__":
     if os.environ.get("FUSION_RAG_SKIP_STARTUP_PROBE", "").strip() not in ("1", "true", "yes"):
         import sys
 
-        probe = EmbeddingClient(base_url=mlx_url, model=embed_model, api_key=mlx_api_key)
         try:
-            probe.health()
-            logger.info("startup probe: fusion-mlx embedding backend reachable at %s", mlx_url)
+            _run_startup_probe(mlx_url, embed_model, mlx_api_key)
         except Exception as e:
             logger.error(
                 "startup probe FAILED: fusion-mlx not reachable at %s (%s). "
