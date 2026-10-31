@@ -647,6 +647,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.17
+
+- **Local embedding fallback: one shared load + fail-fast mode (issue #106)** — when fusion-mlx was down, every embed request fell back to a local sentence-transformers BGE-M3 cold load (~2-4 min on MPS), and concurrent requests each triggered their OWN load (no lock on the module singleton) — search hung for minutes and looked hung. `get_local_model` now uses double-checked locking: first caller loads, concurrent callers wait and reuse (verified live: 5 fallback triggers, exactly 1 model load). New operator knob `FUSION_RAG_EMBED_LOCAL_FALLBACK=0` disables the local fallback entirely: embed calls fail FAST with a retryable `EmbeddingError` (search returns a clean 503 with a readable detail, ~2.5s instead of minutes) instead of cold-loading a model in-request. In fail-fast mode `health()` no longer reports healthy via the local model, and `/ready` now respects `health()`'s return value (it previously ignored the boolean — `False` still reported "ok"). 8 new tests; full suite 468 passing.
+
 ## What's New in v0.8.16
 
 - **Startup probe actually runs (issue #104)** — the O-P2-3 startup gate called the async `EmbeddingClient.health()` bare: the coroutine was never awaited, so the probe passed unconditionally (a fusion-rag booted with fusion-mlx down reported healthy) and every boot emitted a `RuntimeWarning: coroutine ... never awaited`. The gate is now an extracted `_run_startup_probe()` that probes fusion-mlx `GET /models` directly — deliberately NOT via `health()`, whose local sentence-transformers fallback would mask a down MLX on boxes where the local model is installed. Boot-time console logging is configured before the probe (previously the passing probe's log line was dropped — no handler existed until `run_server`). MLX unreachable → loud ERROR + exit 1; `FUSION_RAG_SKIP_STARTUP_PROBE=1` still bypasses. 4 new tests; full suite 460 passing.

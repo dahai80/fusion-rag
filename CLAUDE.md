@@ -177,6 +177,7 @@ fusion_rag/
 | `FUSION_RAG_SCAN_MAX_FILES` | 1000 | Max files a single scan_directory ingests (D4) |
 | `FUSION_RAG_EMBED_CACHE_TTL` | 604800 | Embedding cache TTL seconds (D4, default 7d) |
 | `FUSION_RAG_EMBED_CACHE_MAX_ENTRIES` | 100000 | Max embedding cache rows before LRU eviction (D4) |
+| `FUSION_RAG_EMBED_LOCAL_FALLBACK` | 1 | `0` = disable the local sentence-transformers embedding fallback (issue #106): with MLX + cloud fallback down, embed calls fail fast with a retryable `EmbeddingError` (search → clean 503) instead of cold-loading BGE-M3 (~2-4 min) in-request. The local model load is singleton+lock guarded regardless — concurrent fallbacks trigger one load. With the fallback disabled, `health()`/`/ready` no longer report healthy via the local model. |
 | `FUSION_RAG_TOKEN_BUDGET` | 8192 | Multi-turn RAG token budget (D4) |
 | `FUSION_RAG_MAX_HISTORY_TURNS` | 10 | Max RAG history turns kept (D4) |
 | `FUSION_RAG_FETCH_K_MULTIPLIER` | 4 | Over-fetch factor for filtered search (D4) |
