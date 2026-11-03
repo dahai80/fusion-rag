@@ -647,6 +647,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.20
+
+- **Console rebuilt to the union web UI spec (user report: bilingual/styling non-compliant + dead delete button)** — the single-file vanilla console is replaced by a proper React 18 + TypeScript + Tailwind app (`web/`, Vite, Bun build) following the fusion-web-shell unified rules: design tokens via `@fusion/web-ui` (token-only colors, `rounded-card`/`rounded-md`, dark + light via the Shell theme bridge), bilingual copy via the SDK language bridge (`t()`, follows the Shell toggle), four mandatory states (loading skeleton / empty / error+retry / populated) on every data view. Delete-KB fix: the old page used native `confirm()`, which the shell sandboxed iframe blocks silently — the button appeared dead. Deletion now goes through `ConfirmDialog` (danger + type-the-KB-id guard) and feedback via the SDK toast bridge. The API-key localStorage input is removed (spec S8 — the same-origin shell session carries auth; no local token storage). Build output is committed under `fusion_rag/console/` (shipped as package data, served at `/shell/fusion-rag/` exactly as before); dev: `cd web && bun install && bun run dev`. 4 console tests (subpath parity, page-relative API base, no localStorage key, no origin-root fetch); full suite 472 passing.
+
 ## What's New in v0.8.19
 
 - **Console works behind the gateway (issue #109)** — the console's API calls used origin-root-relative paths (`fetch("/kb/bases")`); behind the gateway pass-through proxy (origin `:11432`, which only routes `/shell/fusion-rag/*`) those 404'd. The page now derives its API base from `location.pathname` (page-relative), and fusion-rag serves the FULL `/kb` router plus `/health` under the console subpath `/shell/fusion-rag/` — registered BEFORE the StaticFiles mount so routes win over static-file matching. Direct access (`:11436`) unchanged; behind the gateway the browser now asks `/shell/fusion-rag/kb/...` and the subpath-carrying proxy forwards it to the same handlers. 4 console tests; full suite 472 passing.

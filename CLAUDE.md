@@ -64,6 +64,7 @@ fusion_rag/
 │   ├── tenant.py          # Issue #61: gateway-origin enforcement + X-Fusion-Tenant scoping; #68: authoritative JWT tenant resolution (identity mode)
 │   ├── identity.py        # Issue #68: IdentityClient — fusion-identity /verify HTTP client (authoritative tenant resolution)
 │   └── mcp_server.py      # MCP JSON-RPC server (Claude/Cursor integration)
+├── console/               # Built web console (React app from web/, committed dist) served at /shell/fusion-rag/ + /console alias
 ├── engine/
 │   ├── knowledge_base.py    # KnowledgeBase + KnowledgeBaseManager (CRUD, persistence via kb_meta.json)
 │   ├── document.py          # DocumentParser (PDF/DOCX/MD/TXT/HTML/code)

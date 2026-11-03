@@ -1,0 +1,27 @@
+{
+    "id": "fusion-rag",
+    "title": "知识库",
+    "title_en": "Knowledge Base",
+    "description": "离线向量知识库：建库、文档入库、混合检索测试、服务健康。",
+    "description_en": "Offline vector knowledge base: KB CRUD, document ingest, hybrid search tester, service health.",
+    "version": "0.8.20",
+    "path": "/rag",
+    "icon": "Database",
+    "entry": "/shell/fusion-rag/",
+    "health": "http://127.0.0.1:11436/health",
+    "backend": "http://127.0.0.1:11432/shell/fusion-rag/",
+    "upstream": "http://127.0.0.1:11436",
+    "devices": [
+        "desktop",
+        "mobile-ready"
+    ],
+    "category": "platform",
+    "sort": 44,
+    "pages": [
+        {
+            "route": "/",
+            "title": "控制台",
+            "title_en": "Console"
+        }
+    ]
+}
