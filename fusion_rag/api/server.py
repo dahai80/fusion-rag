@@ -200,6 +200,30 @@ def create_app(
         logger.warning("EmbeddingError -> 503: %s", exc)
         return JSONResponse(status_code=503, content={"detail": str(exc)})
 
+    # Console UI: single static page served at /shell/fusion-rag/ — the same
+    # path convention every web-shell module uses, so a gateway proxy of
+    # /shell/fusion-rag/ -> :11436 maps 1:1 with zero rewrite. The page calls
+    # the /kb API with RELATIVE urls, so it works identically direct
+    # (:11436) and behind the gateway (JWT/user auth injected upstream).
+    from importlib import resources as _resources
+
+    from fastapi.responses import RedirectResponse
+    from starlette.staticfiles import StaticFiles
+
+    try:
+        _console_dir = str(_resources.files("fusion_rag") / "console")
+        app.mount(
+            "/shell/fusion-rag",
+            StaticFiles(directory=_console_dir, html=True),
+            name="console",
+        )
+    except Exception as e:
+        logger.warning("console UI unavailable (missing package data?): %s", e)
+
+    @app.get("/console", include_in_schema=False)
+    async def _console_redirect():
+        return RedirectResponse(url="/shell/fusion-rag/", status_code=307)
+
     @app.get("/health")
     async def health():
         # O-P1-1: /health is LIVENESS only — a cheap "the process is up and the
