@@ -224,6 +224,10 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.19
+
+- **控制台在网关后可用（issue #109）** — 控制台 API 调用此前用源根相对路径（`fetch("/kb/bases")`）；在网关透传代理后（页面源 `:11432`，只路由 `/shell/fusion-rag/*`）这些请求 404。页面改为从 `location.pathname` 推导 API base（页面相对），且 fusion-rag 把完整 `/kb` 路由 + `/health` 同时挂到控制台子路径 `/shell/fusion-rag/` 下 —— 注册在 StaticFiles mount 之前，路由优先于静态文件匹配。直连（`:11436`）行为不变；网关后浏览器请求 `/shell/fusion-rag/kb/...`，携带子路径的代理原样转发到同一批 handler。4 个控制台测试，全量 472 通过。
+
 ### v0.8.18
 
 - **内置 RAG 控制台（admin 菜单后续）** — fusion-rag 自带静态控制台，服务路径 `/shell/fusion-rag/`（别名 `/console`）：知识库列表/建库/删除、文本文档入库/删除、混合检索测试（top-5 带分数）、实时 `/health` 状态条。单 HTML 页面归本仓库所有（随 pip 包分发，无构建步骤）；所有 API 调用使用相对路径，直连（`:11436`）与经 fusion-gateway（现有 `rag:` upstream 已代理用户鉴权）表现一致。网关菜单集成（manifest 条目 + `/shell/fusion-rag/` 代理）已按跨工程规则上游提 issue：dahai80/fusion-gateway#481。新增 3 个测试，全量 471 通过。

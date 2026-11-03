@@ -83,13 +83,24 @@ tailwind.config = {
 const $ = (id) => document.getElementById(id);
 let currentKb = null;
 
+// Issue #109: API base is PAGE-relative, not origin-relative. Behind the
+// gateway the page origin is :11432 and the pass-through proxy only sees
+// /shell/fusion-rag/* — an origin-root API fetch would 404 there.
+// Deriving the base from location.pathname makes every call resolve to
+// <page-dir>/kb/..., which is /shell/fusion-rag/kb/... both behind the
+// gateway AND direct (fusion-rag serves the /kb API under the subpath too).
+const API_BASE = (() => {
+  let p = location.pathname.replace(/index\.html$/, "");
+  return p.endsWith("/") ? p : p + "/";
+})();
+
 const keyHeaders = () => {
   const k = $("api-key").value.trim();
   return k ? { "X-API-Key": k } : {};
 };
 
 async function api(path, opts = {}) {
-  const resp = await fetch(path, {
+  const resp = await fetch(API_BASE + path.replace(/^\//, ""), {
     ...opts,
     headers: { "Content-Type": "application/json", ...keyHeaders(), ...(opts.headers || {}) },
   });

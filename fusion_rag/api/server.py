@@ -203,8 +203,21 @@ def create_app(
     # Console UI: single static page served at /shell/fusion-rag/ — the same
     # path convention every web-shell module uses, so a gateway proxy of
     # /shell/fusion-rag/ -> :11436 maps 1:1 with zero rewrite. The page calls
-    # the /kb API with RELATIVE urls, so it works identically direct
-    # (:11436) and behind the gateway (JWT/user auth injected upstream).
+    # the /kb API with PAGE-relative urls (issue #109), so the /kb router is
+    # ALSO mounted under this subpath — and it must be registered BEFORE the
+    # StaticFiles mount: Starlette matches routes in registration order, and
+    # the mount would otherwise swallow /shell/fusion-rag/kb/* as 404s.
+    app.include_router(kb_router, prefix="/shell/fusion-rag")
+
+    @app.get("/shell/fusion-rag/health", include_in_schema=False)
+    async def health_subpath():
+        # Issue #109: the console's /health pill uses page-relative paths too,
+        # so the liveness payload must exist under the console subpath.
+        # Registered BEFORE the StaticFiles mount (route order = match order;
+        # the mount would otherwise swallow this path). `health` is defined
+        # later in create_app but resolves at request time.
+        return await health()
+
     from importlib import resources as _resources
 
     from fastapi.responses import RedirectResponse
