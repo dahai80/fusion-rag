@@ -647,6 +647,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.18
+
+- **Built-in RAG console (admin menu follow-up)** — fusion-rag now ships a self-contained static console served at `/shell/fusion-rag/` (alias `/console`): KB list/create/delete, inline text doc ingest + delete, hybrid search tester (top-5 with scores), live `/health` pill. Single HTML page owned by this repo (ships in the pip package, no build step); all API calls use relative URLs so the page works identically direct (`:11436`) and behind fusion-gateway (user auth already proxied via the existing `rag:` upstream). Gateway menu integration (manifest entry + `/shell/fusion-rag/` proxy) requested upstream: dahai80/fusion-gateway#481. 3 new tests; full suite 471 passing.
+
 ## What's New in v0.8.17
 
 - **Local embedding fallback: one shared load + fail-fast mode (issue #106)** — when fusion-mlx was down, every embed request fell back to a local sentence-transformers BGE-M3 cold load (~2-4 min on MPS), and concurrent requests each triggered their OWN load (no lock on the module singleton) — search hung for minutes and looked hung. `get_local_model` now uses double-checked locking: first caller loads, concurrent callers wait and reuse (verified live: 5 fallback triggers, exactly 1 model load). New operator knob `FUSION_RAG_EMBED_LOCAL_FALLBACK=0` disables the local fallback entirely: embed calls fail FAST with a retryable `EmbeddingError` (search returns a clean 503 with a readable detail, ~2.5s instead of minutes) instead of cold-loading a model in-request. In fail-fast mode `health()` no longer reports healthy via the local model, and `/ready` now respects `health()`'s return value (it previously ignored the boolean — `False` still reported "ok"). 8 new tests; full suite 468 passing.

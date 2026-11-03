@@ -224,6 +224,10 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.18
+
+- **内置 RAG 控制台（admin 菜单后续）** — fusion-rag 自带静态控制台，服务路径 `/shell/fusion-rag/`（别名 `/console`）：知识库列表/建库/删除、文本文档入库/删除、混合检索测试（top-5 带分数）、实时 `/health` 状态条。单 HTML 页面归本仓库所有（随 pip 包分发，无构建步骤）；所有 API 调用使用相对路径，直连（`:11436`）与经 fusion-gateway（现有 `rag:` upstream 已代理用户鉴权）表现一致。网关菜单集成（manifest 条目 + `/shell/fusion-rag/` 代理）已按跨工程规则上游提 issue：dahai80/fusion-gateway#481。新增 3 个测试，全量 471 通过。
+
 ### v0.8.17
 
 - **本地 embedding 回退：单次共享加载 + 快速失败模式（issue #106）** — fusion-mlx 宕机时每个 embed 请求都回退到本地 sentence-transformers BGE-M3 冷加载（MPS 上约 2-4 分钟），且并发请求各自触发一次加载（模块单例无锁）—— 搜索挂起数分钟、服务形似假死。`get_local_model` 改为双重检查加锁：第一个调用方加载，并发调用方等待后复用（实测验证：5 次回退触发，仅 1 次模型加载）。新增运维开关 `FUSION_RAG_EMBED_LOCAL_FALLBACK=0` 彻底关闭本地回退：embed 调用快速抛出可重试的 `EmbeddingError`（搜索返回带清晰 detail 的 503，约 2.5 秒而非数分钟），不再在请求内冷加载模型。快速失败模式下 `health()` 不再经本地模型谎报健康，`/ready` 也改为尊重 `health()` 返回值（此前忽略布尔值 —— False 仍报 "ok"）。新增 8 个测试，全量 468 通过。

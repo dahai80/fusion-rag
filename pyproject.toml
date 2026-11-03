@@ -1,6 +1,6 @@
 [project]
 name = "fusion-rag"
-version = "0.8.17"
+version = "0.8.18"
 description = "Fusion-RAG — Apple Silicon native offline vector knowledge base backend"
 license = "Apache-2.0"
 requires-python = ">=3.12"
@@ -72,3 +72,7 @@ ignore = ["BLE001", "S101", "S311", "S324", "S608", "RUF003", "RUF005", "E402", 
 
 [tool.setuptools.packages.find]
 include = ["fusion_rag*"]
+
+[tool.setuptools.package-data]
+# Console UI page (issue: admin menu) must ship inside the wheel/editable install.
+"fusion_rag.console" = ["*.html"]
