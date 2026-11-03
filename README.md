@@ -647,6 +647,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.19
+
+- **Console works behind the gateway (issue #109)** — the console's API calls used origin-root-relative paths (`fetch("/kb/bases")`); behind the gateway pass-through proxy (origin `:11432`, which only routes `/shell/fusion-rag/*`) those 404'd. The page now derives its API base from `location.pathname` (page-relative), and fusion-rag serves the FULL `/kb` router plus `/health` under the console subpath `/shell/fusion-rag/` — registered BEFORE the StaticFiles mount so routes win over static-file matching. Direct access (`:11436`) unchanged; behind the gateway the browser now asks `/shell/fusion-rag/kb/...` and the subpath-carrying proxy forwards it to the same handlers. 4 console tests; full suite 472 passing.
+
 ## What's New in v0.8.18
 
 - **Built-in RAG console (admin menu follow-up)** — fusion-rag now ships a self-contained static console served at `/shell/fusion-rag/` (alias `/console`): KB list/create/delete, inline text doc ingest + delete, hybrid search tester (top-5 with scores), live `/health` pill. Single HTML page owned by this repo (ships in the pip package, no build step); all API calls use relative URLs so the page works identically direct (`:11436`) and behind fusion-gateway (user auth already proxied via the existing `rag:` upstream). Gateway menu integration (manifest entry + `/shell/fusion-rag/` proxy) requested upstream: dahai80/fusion-gateway#481. 3 new tests; full suite 471 passing.

@@ -59,10 +59,55 @@ def test_console_alias_redirects():
 
 
 def test_console_page_uses_relative_api_urls():
-    # Behind the gateway the page must hit the SAME origin's /kb API, not a
-    # hardcoded :11436 — assert the page never hardcodes a port.
+    # Issue #109: the page must derive its API base from location.pathname —
+    # an origin-root fetch("/kb/...") 404s behind the gateway pass-through
+    # proxy (origin :11432 only routes /shell/fusion-rag/*).
     from importlib import resources
 
     html = (resources.files("fusion_rag") / "console" / "index.html").read_text(encoding="utf-8")
     assert "11436" not in html
-    assert 'fetch(path' in html
+    assert "API_BASE" in html
+    assert "location.pathname" in html
+    assert 'fetch("/' not in html  # no origin-root-relative fetch survives
+
+
+def test_kb_api_served_under_console_subpath():
+    # Issue #109: page-relative paths resolve to /shell/fusion-rag/kb/... —
+    # the /kb router must answer there too, with the SAME handlers.
+    import tempfile
+    from unittest.mock import patch
+
+    from fusion_rag.api.server import create_app
+    from fusion_rag.embed.client import EmbeddingClient
+
+    async def _fake_embed_batch(self, texts):
+        return [[0.01] * 1024 for _ in texts]
+
+    async def _fake_health(self):
+        return True
+
+    app = create_app(kb_storage_dir=tempfile.mkdtemp())
+    p1 = patch.object(EmbeddingClient, "embed_batch", _fake_embed_batch)
+    p2 = patch.object(EmbeddingClient, "health", _fake_health)
+    p1.start()
+    p2.start()
+    try:
+        with TestClient(app) as tc:
+            tc.post("/kb/bases", json={"kb_id": "sub109", "name": "t"})
+            # root path still works...
+            assert any(kb["id"] == "sub109" for kb in tc.get("/kb/bases").json())
+            # ...and the console subpath serves the SAME data.
+            resp = tc.get("/shell/fusion-rag/kb/bases")
+            assert resp.status_code == 200
+            assert any(kb["id"] == "sub109" for kb in resp.json())
+            # health pill path.
+            h = tc.get("/shell/fusion-rag/health")
+            assert h.status_code == 200
+            assert h.json()["service"] == "fusion-rag"
+            # static page still wins at the subpath root.
+            page = tc.get("/shell/fusion-rag/")
+            assert page.status_code == 200
+            assert "Fusion-RAG" in page.text
+    finally:
+        p1.stop()
+        p2.stop()
