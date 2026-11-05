@@ -106,3 +106,126 @@ export function normalizeDocs(r: KbDoc[] | { documents: KbDoc[] }): KbDoc[] {
 export function normalizeRows(r: SearchRow[] | { results: SearchRow[] }): SearchRow[] {
     return Array.isArray(r) ? r : r.results || [];
 }
+
+// ── Issue #113: previously API-only surfaces ──
+
+export interface GraphStats {
+    kb_id: string;
+    entities: number;
+    relations: number;
+}
+
+export interface GraphHit {
+    chunk_id?: string;
+    doc_id?: string;
+    text?: string;
+    [k: string]: unknown;
+}
+
+export const graphStats = (kbId: string) =>
+    api<GraphStats>(`/kb/bases/${kbId}/graph/stats`);
+export const graphBuild = (kbId: string, maxChunks = 30) =>
+    api<{ status: string; entities: number; relations: number; chunks_processed: number }>(
+        `/kb/bases/${kbId}/graph/build`,
+        { method: "POST", body: JSON.stringify({ max_chunks: maxChunks }) },
+    );
+export const graphSearch = (kbId: string, query: string, maxHops = 2) =>
+    api<GraphHit[]>(`/kb/bases/${kbId}/graph/search`, {
+        method: "POST",
+        body: JSON.stringify({ query, max_hops: maxHops }),
+    });
+
+export interface Snapshot {
+    version_id: string;
+    created_at?: string | number;
+    description?: string;
+    [k: string]: unknown;
+}
+
+export const listVersions = (kbId: string) =>
+    api<Snapshot[]>(`/kb/bases/${kbId}/versions`);
+export const createVersion = (kbId: string, description: string) =>
+    api<Snapshot>(`/kb/bases/${kbId}/versions`, {
+        method: "POST",
+        body: JSON.stringify({ description }),
+    });
+export const rollbackVersion = (kbId: string, versionId: string) =>
+    api<{ success?: boolean }>(`/kb/bases/${kbId}/versions/${versionId}/rollback`, {
+        method: "POST",
+    });
+export const deleteVersion = (kbId: string, versionId: string) =>
+    api<void>(`/kb/bases/${kbId}/versions/${versionId}`, { method: "DELETE" });
+
+export interface SearchTemplateRow {
+    name: string;
+    description?: string;
+    alpha?: number;
+    rerank?: boolean;
+    top_k?: number;
+    threshold?: number;
+    rewrite_mode?: string;
+    [k: string]: unknown;
+}
+
+export const listTemplates = (kbId: string) =>
+    api<SearchTemplateRow[]>(`/kb/bases/${kbId}/templates`);
+export const deleteTemplate = (kbId: string, name: string) =>
+    api<void>(`/kb/bases/${kbId}/templates/${name}`, { method: "DELETE" });
+export const createTemplate = (kbId: string, tpl: Partial<SearchTemplateRow>) =>
+    api<SearchTemplateRow>(`/kb/bases/${kbId}/templates`, {
+        method: "POST",
+        body: JSON.stringify(tpl),
+    });
+
+export interface AclRule {
+    id?: string;
+    subject: string;
+    resource_type?: string;
+    resource_path: string;
+    actions: string[];
+    [k: string]: unknown;
+}
+
+export const listPermissions = (kbId: string) =>
+    api<AclRule[]>(`/kb/bases/${kbId}/permissions`);
+export const addPermission = (kbId: string, rule: Partial<AclRule>) =>
+    api<AclRule>(`/kb/bases/${kbId}/permissions`, {
+        method: "POST",
+        body: JSON.stringify(rule),
+    });
+export const deletePermission = (kbId: string, ruleId: string) =>
+    api<void>(`/kb/bases/${kbId}/permissions/${ruleId}`, { method: "DELETE" });
+export const checkPermission = (kbId: string, subject: string, action: string) =>
+    api<{ allowed: boolean }>(`/kb/bases/${kbId}/permissions/check`, {
+        method: "POST",
+        body: JSON.stringify({ subject, action, resource_path: "/" }),
+    });
+
+export interface AuditRow {
+    id?: number;
+    caller?: string;
+    action?: string;
+    created_at?: string | number;
+    [k: string]: unknown;
+}
+
+export const listAudit = (kbId: string, limit = 50) =>
+    api<AuditRow[]>(`/kb/bases/${kbId}/audit?limit=${limit}`);
+export const auditExportUrl = (kbId: string, fmt: "json" | "csv") =>
+    `${API_BASE}kb/bases/${kbId}/audit/export?format=${fmt}`;
+
+export interface ApiKeyRow {
+    name?: string;
+    key_hash_prefix?: string;
+    created_at?: string | number;
+    [k: string]: unknown;
+}
+
+export const listApiKeys = () => api<{ keys: ApiKeyRow[] }>("/kb/auth/keys");
+export const createApiKey = (name: string) =>
+    api<{ key: string; name: string }>("/kb/auth/keys", {
+        method: "POST",
+        body: JSON.stringify({ name }),
+    });
+export const deleteApiKey = (hashPrefix: string) =>
+    api<void>(`/kb/auth/keys/${hashPrefix}`, { method: "DELETE" });

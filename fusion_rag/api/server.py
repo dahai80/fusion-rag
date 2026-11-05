@@ -208,6 +208,11 @@ def create_app(
     # StaticFiles mount: Starlette matches routes in registration order, and
     # the mount would otherwise swallow /shell/fusion-rag/kb/* as 404s.
     app.include_router(kb_router, prefix="/shell/fusion-rag")
+    # Issue #113: the admin console surface calls /kb/auth/keys (API-key
+    # management) via page-relative paths; the auth router is mounted
+    # separately from the kb router at root level, so it needs its own
+    # subpath inclusion or those calls 404 behind the gateway.
+    app.include_router(auth_router, prefix="/shell/fusion-rag")
 
     @app.get("/shell/fusion-rag/health", include_in_schema=False)
     async def health_subpath():

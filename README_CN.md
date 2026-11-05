@@ -224,6 +224,10 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.21
+
+- **Web 能力补齐（issue #113）** — 控制台此前 2 个视图覆盖约 70 条 REST 路由；纯 API 能力现已全部有界面。KB 详情页新增标签页：**图谱**（统计 + LLM 实体抽取构建（显式忙态，不自动触发）+ 图检索证据命中）、**版本**（快照列表/创建，回滚与删除走破坏性操作 ConfirmDialog）、**模板**（预设 + 自定义检索模板的新建/删除；内置模板隐藏必然失败的删除按钮）。新增 `#/admin` 管理页（控制台头部入口）：按 KB 的 **ACL 规则**（列表/添加/删除 + 实时权限检查）、**审计日志**（最近记录 + JSON/CSV 导出链接）、**API 密钥管理**（列表/生成/删除；新钥仅显示一次）。服务端：auth 路由（`/kb/auth/keys`）现同时挂到控制台子路径 `/shell/fusion-rag/` 下 —— 它在根层级与 `/kb` 路由分开注册，网关透传代理后此前 404。控制台调用保持页面相对路径（#109 契约不变），bundle 断言已扩展。472 测试通过，ruff 干净。
+
 ### v0.8.20
 
 - **控制台按 fusion-web-shell 统一规范重建（用户报告：中英文/样式不合规 + 删除按钮无反应）** — 原单文件原生 JS 控制台替换为正式的 React 18 + TypeScript + Tailwind 应用（`web/`，Vite + Bun 构建），遵循统一规则：`@fusion/web-ui` 设计令牌（仅令牌配色、`rounded-card`/`rounded-md`、经 Shell 主题桥接的深浅色跟随）、SDK 语言桥接双语（`t()`，跟随 Shell 语言切换）、每个数据视图四态齐全（加载骨架 / 空态 / 错误+重试 / 数据）。删除此库修复：旧页面用原生 `confirm()`，在 shell 沙箱 iframe 中被静默拦截 —— 按钮形同虚设。现改为 `ConfirmDialog`（danger + 输入 KB id 确认），反馈走 SDK toast 桥接。移除 API Key 的 localStorage 输入（规范 S8 —— 同源 iframe 会话自动携带鉴权，禁止本地存 token）。构建产物提交在 `fusion_rag/console/`（随包分发，服务路径仍为 `/shell/fusion-rag/`）；开发：`cd web && bun install && bun run dev`。4 个控制台测试（子路径 API 对齐、页面相对 API base、无 localStorage key、无源根 fetch），全量 472 通过。

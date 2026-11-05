@@ -14,6 +14,9 @@ import {
 } from "../api";
 import { sdk } from "../sdk";
 import { t } from "../i18n";
+import { GraphPanel } from "./GraphPanel";
+import { TemplatesPanel } from "./TemplatesPanel";
+import { VersionsPanel } from "./VersionsPanel";
 
 // Right panel: selected KB detail — docs + search tester.
 //
@@ -29,6 +32,9 @@ export function KbDetail({
     onDeleted: () => void;
 }) {
     const [confirmOpen, setConfirmOpen] = useState(false);
+    // Issue #113: tabbed KB detail — docs/search (original), graph,
+    // versions, templates (previously API-only).
+    const [tab, setTab] = useState<"docs" | "graph" | "versions" | "templates">("docs");
 
     if (!kb) {
         return (
@@ -62,6 +68,13 @@ export function KbDetail({
         }
     };
 
+    const TABS: Array<{ id: typeof tab; zh: string; en: string }> = [
+        { id: "docs", zh: "文档 / 检索", en: "Docs / Search" },
+        { id: "graph", zh: "图谱", en: "Graph" },
+        { id: "versions", zh: "版本", en: "Versions" },
+        { id: "templates", zh: "模板", en: "Templates" },
+    ];
+
     return (
         <main className="space-y-4 md:col-span-3">
             <div className="rounded-card border border-border bg-bg-elevated p-4">
@@ -80,8 +93,33 @@ export function KbDetail({
                         {t("删除此库", "Delete KB")}
                     </button>
                 </div>
-                <DocsPanel kbId={kb.id} />
-                <SearchPanel kbId={kb.id} />
+                <nav className="mt-3 flex gap-4 border-b border-border">
+                    {TABS.map((it) => (
+                        <button
+                            key={it.id}
+                            type="button"
+                            onClick={() => setTab(it.id)}
+                            className={`-mb-px border-b-2 pb-2 text-xs ${
+                                tab === it.id
+                                    ? "border-brand text-brand"
+                                    : "border-transparent text-text-secondary hover:text-text-primary"
+                            }`}
+                        >
+                            {t(it.zh, it.en)}
+                        </button>
+                    ))}
+                </nav>
+                <div className="pt-4">
+                    {tab === "docs" && (
+                        <>
+                            <DocsPanel kbId={kb.id} />
+                            <SearchPanel kbId={kb.id} />
+                        </>
+                    )}
+                    {tab === "graph" && <GraphPanel kbId={kb.id} />}
+                    {tab === "versions" && <VersionsPanel kbId={kb.id} />}
+                    {tab === "templates" && <TemplatesPanel kbId={kb.id} />}
+                </div>
             </div>
             <ConfirmDialog
                 open={confirmOpen}
