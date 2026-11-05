@@ -97,6 +97,12 @@ def test_kb_api_served_under_console_subpath():
             h = client.get("/shell/fusion-rag/health")
             assert h.status_code == 200
             assert h.json()["service"] == "fusion-rag"
+            # Issue #113: the auth router (API-key management) must answer
+            # under the subpath too — it is mounted separately from the kb
+            # router at root level.
+            k = client.get("/shell/fusion-rag/kb/auth/keys")
+            assert k.status_code == 200
+            assert "keys" in k.json()
             # static page still wins at the subpath root.
             page = client.get("/shell/fusion-rag/")
             assert page.status_code == 200

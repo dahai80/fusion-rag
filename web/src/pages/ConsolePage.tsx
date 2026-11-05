@@ -99,14 +99,22 @@ function Header({ health }: { health: HealthInfo | null }) {
                         : ""}
                 </p>
             </div>
-            <StatusBadge
-                status={healthKind(health)}
-                label={
-                    health
-                        ? t("运行中", "Running")
-                        : t("不可达", "Unreachable")
-                }
-            />
+            <div className="flex items-center gap-3">
+                <a
+                    href="#/admin"
+                    className="rounded-md border border-border px-3 py-1.5 text-xs text-text-primary hover:bg-bg-muted"
+                >
+                    {t("管理", "Admin")}
+                </a>
+                <StatusBadge
+                    status={healthKind(health)}
+                    label={
+                        health
+                            ? t("运行中", "Running")
+                            : t("不可达", "Unreachable")
+                    }
+                />
+            </div>
         </header>
     );
 }
