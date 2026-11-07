@@ -1,3 +1,19 @@
+---
+doc_id: fusion-rag/readme-cn
+product: fusion-rag
+class: platform
+entry: service
+doc_type: readme
+title: {zh: "Fusion-RAG 离线向量知识库后端（中文）", en: "Fusion-RAG Offline Vector Knowledge Base Backend (Chinese)"}
+audience: engineer
+status: draft
+version: 0.8.21
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - README_CN.md
+---
+
 <div align="center">
 
 # Fusion-RAG
@@ -189,7 +205,7 @@ Fusion-RAG 通过 `/kb/*` 提供 REST API。
 
 ## 数据层依赖
 
-约束文档：[`architecture/fusion-db-conventions-1030.md`](../architecture/fusion-db-conventions-1030.md)（每节点单一共享 Qdrant 实例；不引入其他向量数据库 —— DB-8）。
+约束文档：`architecture/fusion-db-conventions-1030.md`（每节点单一共享 Qdrant 实例；不引入其他向量数据库 —— DB-8）。
 
 ### 何时需要 Qdrant
 

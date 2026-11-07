@@ -1,3 +1,19 @@
+---
+doc_id: fusion-rag/deployment
+product: fusion-rag
+class: platform
+entry: service
+doc_type: guide
+title: {zh: "Fusion-RAG 部署指南", en: "Fusion-RAG Deployment Guide"}
+audience: engineer
+status: draft
+version: 0.8.21
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - DEPLOYMENT.md
+---
+
 # Deployment Guide — Fusion-RAG
 
 Production deployment constraints, operational runbook, and performance baseline for enterprise commercial release.
