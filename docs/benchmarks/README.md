@@ -1,3 +1,19 @@
+---
+doc_id: fusion-rag/recall-benchmarks
+product: fusion-rag
+class: platform
+entry: service
+doc_type: guide
+title: {zh: "召回基准结果", en: "Recall benchmark results"}
+audience: engineer
+status: draft
+version: 0.8.21
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/benchmarks/README.md
+---
+
 # Recall Benchmark Results
 
 Retrieval-quality evidence for issue #79. Corpus: 505 chunks / 90 docs

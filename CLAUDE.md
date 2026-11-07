@@ -1,3 +1,19 @@
+---
+doc_id: fusion-rag/claude
+product: fusion-rag
+class: platform
+entry: service
+doc_type: guide
+title: {zh: "fusion-rag 仓库工程指引", en: "fusion-rag repository engineering guidance"}
+audience: engineer
+status: draft
+version: 0.8.21
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - CLAUDE.md
+---
+
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
