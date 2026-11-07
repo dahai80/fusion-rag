@@ -205,7 +205,7 @@ Fusion-RAG 通过 `/kb/*` 提供 REST API。
 
 ## 数据层依赖
 
-约束文档：[`architecture/fusion-db-conventions-1030.md`](../architecture/fusion-db-conventions-1030.md)（每节点单一共享 Qdrant 实例；不引入其他向量数据库 —— DB-8）。
+约束文档：`architecture/fusion-db-conventions-1030.md`（每节点单一共享 Qdrant 实例；不引入其他向量数据库 —— DB-8）。
 
 ### 何时需要 Qdrant
 

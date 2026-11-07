@@ -350,7 +350,7 @@ Parameters: `top_k` (1-100, default 10), `threshold` (default: the KB's `similar
 
 ### EPUB + Scanned-PDF OCR (Issues #84/#85)
 
-`DocumentParser` now reads EPUB (each XHTML chapter becomes a `# <name>` headed section via ebooklib). Scanned PDFs (pages present, zero extractable text) are no longer silently ingested as empty docs: they are handed to the [fusion-drawing-parser](../fusion-drawing-parser) OCR service over HTTP and fail visibly when none is configured:
+`DocumentParser` now reads EPUB (each XHTML chapter becomes a `# <name>` headed section via ebooklib). Scanned PDFs (pages present, zero extractable text) are no longer silently ingested as empty docs: they are handed to the [fusion-drawing-parser](https://github.com/dahai80/fusion-drawing-parser) OCR service over HTTP and fail visibly when none is configured:
 
 ```bash
 export FUSION_RAG_OCR_URL=http://127.0.0.1:11491     # drawing-parser base URL
@@ -612,7 +612,7 @@ tar -czf kb-snapshot.tgz -C ~/.fusion-rag/stores {kb_id}
 
 ## Data Layer Dependencies
 
-Governing conventions: [`architecture/fusion-db-conventions-1030.md`](../architecture/fusion-db-conventions-1030.md) (single shared Qdrant instance per node; no alternative vector stores — DB-8).
+Governing conventions: `architecture/fusion-db-conventions-1030.md` (single shared Qdrant instance per node; no alternative vector stores — DB-8).
 
 ### When Qdrant is required
 
