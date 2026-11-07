@@ -663,6 +663,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.22
+
+- **Docs: fusion docs-system v1.1 contract (PR #115)** — new `docs/` tree (product page, architecture, API reference REST+MCP, config reference, get-started, backup-and-restore + multi-tenant-isolation guides, troubleshooting, benchmarks) following the platform × service contract; `ci/validate_docs.py` contract validator wired as a CI gate (`.github/workflows/docs.yml`) — sibling-link integrity + required sections enforced on every PR. Version bump only; no runtime change.
+
 ## What's New in v0.8.21
 
 - **Web surface gap closed (issue #113)** — the console covered 2 views over ~70 REST routes; the previously API-only capabilities now have UI. KB detail gained tabs: **Graph** (stats tiles, LLM entity-extraction build with explicit busy state, graph search with evidence hits), **Versions** (snapshot list/create, rollback + delete via destructive-action ConfirmDialog), **Templates** (preset + custom search templates, create/delete; builtin templates hide the doomed delete action). New `#/admin` page (linked from the console header) with: per-KB **ACL rules** (list/add/delete + live permission check), **audit log** (recent records + JSON/CSV export links), and **API-key management** (list/create/delete; a minted key is shown once). Server-side: the auth router (`/kb/auth/keys`) is now also mounted under the console subpath `/shell/fusion-rag/` — it is registered separately from the `/kb` router at root level, so its endpoints 404'd behind the gateway pass-through proxy. Console calls ride page-relative paths (#109 contract preserved); bundle checks extended. 472 tests passing; ruff clean.
