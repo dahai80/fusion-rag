@@ -9,7 +9,7 @@ audience: engineer
 status: draft
 version: 0.8.21
 updated: 2026-11-07
-owner: @dahai
+owner: "@dahai"
 source_of_truth:
   - docs/benchmarks/README.md
 ---
