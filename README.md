@@ -663,6 +663,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.23
+
+- **Docs: frontmatter fix (PR #116)** — `owner: @dahai` quoted as `owner: "@dahai"` in all 15 frontmatter-bearing docs (bare `@` handle is an invalid YAML mapping value in strict parsers). No runtime change.
+
 ## What's New in v0.8.22
 
 - **Docs: fusion docs-system v1.1 contract (PR #115)** — new `docs/` tree (product page, architecture, API reference REST+MCP, config reference, get-started, backup-and-restore + multi-tenant-isolation guides, troubleshooting, benchmarks) following the platform × service contract; `ci/validate_docs.py` contract validator wired as a CI gate (`.github/workflows/docs.yml`) — sibling-link integrity + required sections enforced on every PR. Version bump only; no runtime change.

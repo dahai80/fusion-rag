@@ -240,6 +240,10 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.23
+
+- **文档：frontmatter 修复（PR #116）** — 15 个带 frontmatter 的文档中 `owner: @dahai` 加引号改为 `owner: "@dahai"`（裸 `@` 句柄在严格 YAML 解析器下非法）。无运行时变化。
+
 ### v0.8.22
 
 - **文档：fusion docs-system v1.1 契约（PR #115）** — 新增 `docs/` 文档树（产品页、架构、API 参考 REST+MCP、配置参考、上手指南、备份恢复 + 多租户隔离指南、故障排查、基准），遵循 platform × service 契约；`ci/validate_docs.py` 契约校验器接入 CI 门禁（`.github/workflows/docs.yml`）—— 每个 PR 强制校验同级链接完整性与必备章节。仅版本号变更，无运行时行为变化。
