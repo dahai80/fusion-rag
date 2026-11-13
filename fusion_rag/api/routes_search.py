@@ -66,6 +66,34 @@ def _audit_and_trajectory(
         logger.warning("trajectory write failed: %s", e)
 
 
+async def _citation_audit_async(
+    kb_id: str,
+    original_query: str,
+    rewrites: list[str],
+    results: list[dict[str, Any]],
+) -> None:
+    """Issue #117: queryable citation audit trail (FUSION_RAG_CITATION_AUDIT=1).
+
+    Writes the query chain (original + rewrite steps) and the retrieved chunks
+    (with similarity + rank) to citation_audit.db so an answer's citations can
+    be reconstructed from the DB alone. Off by default; a write failure logs
+    and never affects the search response."""
+    if not get_runtime_config().citation_audit:
+        return
+
+    def _write():
+        from ..engine.citation_audit import CitationAuditStore
+        from .routes import _get_kb_storage_path
+
+        store = CitationAuditStore(f"{_get_kb_storage_path(kb_id)}/citation_audit.db")
+        store.record_retrieval(kb_id, original_query, rewrites, results)
+
+    try:
+        await run_in_threadpool(_write)
+    except Exception as e:
+        logger.warning("citation audit write failed: %s", e)
+
+
 async def _audit_and_trajectory_async(
     kb_id: str,
     query: str,
@@ -100,6 +128,8 @@ async def search(
     query = data.get("query", "")
     if not query:
         raise HTTPException(400, "query is required")
+    orig_query = query
+    rewrite_steps: list[str] = []
     status_filter = _read_status_filter(data)
 
     top_k = data.get("top_k", kb.config.max_results)
@@ -224,8 +254,11 @@ async def search(
             if use_rerank:
                 results = await _do_rerank(query, results, top_k, backend=rerank_backend, model=rerank_model)
             await _audit_and_trajectory_async(kb_id, query, "search", results, (time.time() - _start) * 1000)
+            await _citation_audit_async(kb_id, orig_query, valid_rewrites, results)
             return results
         query = rewritten
+        if rewritten and rewritten != orig_query:
+            rewrite_steps = [rewritten]
 
     query_vector = await embed.embed(query)
     if not query_vector or all(v == 0.0 for v in query_vector):
@@ -279,6 +312,7 @@ async def search(
         results = await _do_rerank(query, results, top_k, backend=rerank_backend, model=rerank_model)
 
     await _audit_and_trajectory_async(kb_id, query, "search", results, (time.time() - _start) * 1000)
+    await _citation_audit_async(kb_id, orig_query, rewrite_steps, results)
     return results
 
 
@@ -303,6 +337,8 @@ async def ask(
     question = data.get("question", "")
     if not question:
         raise HTTPException(400, "question is required")
+    orig_question = question
+    rewrite_steps_ask: list[str] = []
     status_filter = _read_status_filter(data)
 
     top_k = data.get("top_k", kb.config.max_results)
@@ -331,6 +367,8 @@ async def ask(
         try:
             rewritten = await rewriter.rewrite(question, history=history, mode=mode)
             if isinstance(rewritten, str) and rewritten:
+                if rewritten != orig_question:
+                    rewrite_steps_ask = [rewritten]
                 question = rewritten
         except LLMUnavailable as e:
             # L1: rewrite is an enhancement; condense failure on multi-turn
@@ -377,6 +415,7 @@ async def ask(
 
     if not chunks:
         await _audit_and_trajectory_async(kb_id, question, "ask", [], (time.time() - _start) * 1000)
+        await _citation_audit_async(kb_id, orig_question, rewrite_steps_ask, [])
         return {"answer": "No relevant documents found.", "sources": [], "citations": [], "has_low_confidence": False}
 
     if use_rerank:
@@ -417,6 +456,7 @@ async def ask(
         (time.time() - _start) * 1000,
         {"model": model, "has_answer": bool(answer.get("answer"))},
     )
+    await _citation_audit_async(kb_id, orig_question, rewrite_steps_ask, chunks)
     return answer
 
 
@@ -491,4 +531,42 @@ async def similar(
     await _audit_and_trajectory_async(
         kb_id, text[:200] or "(embedding)", "similar", results, (time.time() - _start) * 1000
     )
+    await _citation_audit_async(kb_id, text[:200] or "(embedding)", [], results)
     return {"matches": matches, "count": len(matches), "threshold": threshold}
+
+
+@router.get("/bases/{kb_id}/citations/traces")
+async def list_citation_traces(
+    kb_id: str,
+    limit: int = 50,
+    offset: int = 0,
+    subject: str | None = Depends(require_kb_action("read")),
+) -> dict[str, Any]:
+    """Issue #117: list citation-audit retrieval roots (newest first)."""
+    from ..engine.citation_audit import CitationAuditStore
+    from .routes import _get_kb_storage_path
+
+    if limit < 1 or limit > 200:
+        raise HTTPException(400, "limit must be an int in [1, 200]")
+    if offset < 0:
+        raise HTTPException(400, "offset must be >= 0")
+    store = CitationAuditStore(f"{_get_kb_storage_path(kb_id)}/citation_audit.db")
+    traces = await run_in_threadpool(store.list_traces, kb_id, limit, offset)
+    return {"traces": traces, "count": len(traces), "limit": limit, "offset": offset}
+
+
+@router.get("/bases/{kb_id}/citations/traces/{query_id}")
+async def get_citation_trace(
+    kb_id: str,
+    query_id: int,
+    subject: str | None = Depends(require_kb_action("read")),
+) -> dict[str, Any]:
+    """Issue #117: reconstruct one retrieval trace (query chain + citations) from the DB alone."""
+    from ..engine.citation_audit import CitationAuditStore
+    from .routes import _get_kb_storage_path
+
+    store = CitationAuditStore(f"{_get_kb_storage_path(kb_id)}/citation_audit.db")
+    trace = await run_in_threadpool(store.get_trace, kb_id, query_id)
+    if trace is None:
+        raise HTTPException(404, f"trace {query_id} not found in kb {kb_id}")
+    return trace

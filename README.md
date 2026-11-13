@@ -522,6 +522,7 @@ Modules migrated to fusion-core: `contextualizer`, `query_rewriter`, `reranker`,
 | `FUSION_RAG_OCR_TIMEOUT` | 300 | Total poll budget in seconds for one OCR task (issue #84). |
 | `FUSION_RAG_OCR_TENANT_ID` | (empty) | `X-Tenant-Id` fallback for OCR calls when no request tenant is bound (background watch-loop ingestion, single-tenant deployments). The OCR service requires the header unconditionally (issue #88); during a request the calling tenant is passed through automatically. |
 | `FUSION_RAG_LOW_OCR_CONFIDENCE` | 0.85 | OCR chunk confidence below this flags `low_confidence: true` on search results and `/ask` citations (issue #85). |
+| `FUSION_RAG_CITATION_AUDIT` | (empty) | `1` = write a queryable citation audit trail (issue #117): query chain + retrieved chunks per retrieval call to `citation_audit.db`, reconstructable via `GET /kb/bases/{kb_id}/citations/traces`. Default OFF. |
 
 **Multi-tenant isolation (#61).** When `FUSION_RAG_REQUIRE_GATEWAY=1`, fusion-rag enforces the backend half of fusion-gateway's tenant scoping: every `/kb/*` request must transit the gateway (proven by the `X-Fusion-Route: gateway-decision` header) and carries an authoritative `X-Fusion-Tenant`. KBs are stamped with their tenant at creation and scoped on list/get — a tenant-A caller never sees tenant-B's KBs. The client-supplied `X-Space-Id` is a non-authoritative passthrough, ignored for scoping. `/health`, `/ready`, `/metrics`, `/mcp`, and auth routes stay open so the service remains observable when the gateway is down. Default off; no migration needed (existing KBs have `tenant=null`).
 
@@ -662,6 +663,11 @@ ruff check fusion_rag/
 ```
 
 ---
+
+## What's New in v0.8.24
+
+- **Citation audit trail (issue #117, feature 1)** — every retrieval call (`/search`, `/ask`, `/similar`) can now write a queryable audit trail to `citation_audit.db`: one `rag_queries` row per query version (the original plus each rewrite step chained via `parent_id`/`depth`) and `rag_citations` rows for the retrieved chunks linked to the FINAL query version with per-chunk similarity + rank. An answer's citations are reconstructable from the DB alone: `GET /kb/bases/{kb_id}/citations/traces` (list) + `GET /kb/bases/{kb_id}/citations/traces/{query_id}` (full chain + evidence). Opt-in via `FUSION_RAG_CITATION_AUDIT=1` (default OFF — zero behavior change); write failures log and never affect the response.
+- **Schema'd RAG eval set + offline eval gate (issue #117, feature 2)** — `engine/eval_set.py`: `eval_cases` (query / gold chunks, seeded deterministically from the recall_bench 55-query corpus, idempotent) + `eval_runs` (metric rows per run). `run_offline_eval()` is BM25-only — no embedding model, no LLM, no network — computing recall@5 / recall@10 / mrr@10 (baseline: 0.7939 / 0.9212 / 1.0000). `scripts/eval_gate.py` compares against `scripts/eval_baseline.json` and FAILS the build when any metric drops beyond tolerance (default 0.02) while always reporting deltas; new `.github/workflows/eval.yml` CI job runs the gate on every PR touching retrieval code.
 
 ## What's New in v0.8.23
 

@@ -1,0 +1,8 @@
+{
+  "metrics": {
+    "recall@5": 0.7939,
+    "recall@10": 0.9212,
+    "mrr@10": 1.0
+  },
+  "case_count": 55
+}

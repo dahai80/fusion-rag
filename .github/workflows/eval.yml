@@ -1,0 +1,31 @@
+name: eval
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "fusion_rag/**"
+      - "scripts/eval_gate.py"
+      - "scripts/eval_baseline.json"
+      - ".github/workflows/eval.yml"
+  pull_request:
+    paths:
+      - "fusion_rag/**"
+      - "scripts/eval_gate.py"
+      - "scripts/eval_baseline.json"
+      - ".github/workflows/eval.yml"
+
+jobs:
+  eval-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install fusion-core + self
+        run: |
+          pip install git+https://github.com/dahai80/fusion-core.git
+          pip install -e ".[test]"
+      - name: Run offline eval gate (reports metric deltas, fails beyond tolerance)
+        run: python scripts/eval_gate.py
