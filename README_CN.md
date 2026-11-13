@@ -240,6 +240,11 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.24
+
+- **引用审计链路（issue #117 特性一）** — `/search`、`/ask`、`/similar` 每次检索调用可写入可查询的审计库 `citation_audit.db`：每个查询版本一行 `rag_queries`（原始查询 + 各改写步骤，经 `parent_id`/`depth` 链接），检索到的 chunk 写入 `rag_citations` 并关联到最终查询版本（含相似度与排名）。仅凭数据库即可重建一次回答的引用：`GET /kb/bases/{kb_id}/citations/traces`（列表）+ `GET /kb/bases/{kb_id}/citations/traces/{query_id}`（完整链路 + 证据）。通过 `FUSION_RAG_CITATION_AUDIT=1` 开启（默认关闭，零行为变化）；写入失败仅记日志，绝不影响检索响应。
+- **结构化评测集 + 离线评测门禁（issue #117 特性二）** — `engine/eval_set.py`：`eval_cases`（查询/金标 chunk，由 recall_bench 55 条确定性语料幂等播种）+ `eval_runs`（每次运行的指标行）。`run_offline_eval()` 纯 BM25 离线运行——不需要 embedding 模型、LLM 或网络——计算 recall@5 / recall@10 / mrr@10（基线：0.7939 / 0.9212 / 1.0000）。`scripts/eval_gate.py` 对照 `scripts/eval_baseline.json`，任一指标回落超过容差（默认 0.02）即判失败，同时始终输出指标差值；新增 `.github/workflows/eval.yml` CI 任务，在触及检索代码的 PR 上运行门禁。
+
 ### v0.8.23
 
 - **文档：frontmatter 修复（PR #116）** — 15 个带 frontmatter 的文档中 `owner: @dahai` 加引号改为 `owner: "@dahai"`（裸 `@` 句柄在严格 YAML 解析器下非法）。无运行时变化。
@@ -333,6 +338,7 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 | `FUSION_RAG_OCR_TIMEOUT` | 300 | 单个 OCR 任务的轮询总预算（秒，issue #84） |
 | `FUSION_RAG_OCR_TENANT_ID` | (空) | OCR 调用 `X-Tenant-Id` 兜底值：请求上下文无租户时使用（后台目录监听入库、单租户部署）。OCR 服务端中间件无条件要求该头（issue #88）；请求内调用会自动透传当前租户 |
 | `FUSION_RAG_LOW_OCR_CONFIDENCE` | 0.85 | OCR 片段置信度低于该值时，检索结果与 `/ask` 引用标记 `low_confidence: true`（issue #85） |
+| `FUSION_RAG_CITATION_AUDIT` | (空) | `1` = 写入可查询的引用审计链路（issue #117）：每次检索调用的查询链 + 检索 chunk 落库 `citation_audit.db`，经 `GET /kb/bases/{kb_id}/citations/traces` 重建。默认关闭 |
 
 ### 使用 start.sh
 
