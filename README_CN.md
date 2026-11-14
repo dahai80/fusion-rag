@@ -240,6 +240,10 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.25
+
+- **控制台问答 Tab** — 知识库详情新增"问答"页：RAG 聊天框，调用 `POST /kb/bases/{kb_id}/ask`。答案附带逐 chunk 引用标签（文档名、页码、分数；低 OCR 置信度引用标 ⚠ 并有整体提示）。纯文本渲染（不引 markdown 库）——定位是 /ask 能力的验证界面。控制台重建（v0.8.25，bundle gzip +1.2 kB）。
+
 ### v0.8.24
 
 - **引用审计链路（issue #117 特性一）** — `/search`、`/ask`、`/similar` 每次检索调用可写入可查询的审计库 `citation_audit.db`：每个查询版本一行 `rag_queries`（原始查询 + 各改写步骤，经 `parent_id`/`depth` 链接），检索到的 chunk 写入 `rag_citations` 并关联到最终查询版本（含相似度与排名）。仅凭数据库即可重建一次回答的引用：`GET /kb/bases/{kb_id}/citations/traces`（列表）+ `GET /kb/bases/{kb_id}/citations/traces/{query_id}`（完整链路 + 证据）。通过 `FUSION_RAG_CITATION_AUDIT=1` 开启（默认关闭，零行为变化）；写入失败仅记日志，绝不影响检索响应。
