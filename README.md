@@ -676,6 +676,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.40
+
+- **Optional Docling layout-aware PDF ingestion (R9, issue #131)** — PDF extraction was PyMuPDF-only: per-cell text with no layout understanding, so table rows scatter across column-contiguous chunks. New `engine/docling_parser.py` (opt-in `pip install 'fusion-rag[docling]'`): TableFormer ACCURATE table structure + reading order, per-page markdown export giving exact #77 page spans. Selectable per KB (`pdf_backend`: ""/legacy/docling) or globally (`FUSION_RAG_PDF_BACKEND`); ANY docling failure falls back to legacy — ingest never fails. Ablation (`docs/benchmarks/docling-ablation.json`): on column-major cell PDFs legacy row-intact ratio is 0.00 (no chunk holds item+value together) vs docling 1.00 with BM25 recall@10 1.0; parse cost ~2.3 s/PDF (CPU-pinned — TableFormer breaks under auto-MPS on Apple Silicon).
+
 ## What's New in v0.8.39
 
 - **Bench-derived chunking profiles per KB (R8, issue #130)** — chunk size/overlap were magic constants applied identically to every document type. New chunk-size ablation over the labeled corpus with real BGE-M3 + BM25 (`docs/benchmarks/chunk-size-ablation.json`): 512 chars @ 12.5% overlap wins recall@10 AND map@10 (768 worse on both, 1024 collapses recall to 0.5394 — topic docs merge, evidence diluted), so the default is now bench-validated. `Chunker.CHUNK_PROFILES` (markdown/prose 512/64, code 384/48, table 256/32) selectable per KB via `chunk_profile` at KB create (explicit `chunk_size`/`chunk_overlap` override; unknown profile = 400). Also fixed: KB-level `chunk_overlap` existed on the config but all 4 ingest Chunker call sites dropped it — every KB silently used the 64 default; now passed through. Late-chunking spike BLOCKED upstream: fusion-mlx `/v1/embeddings` returns pooled vectors only (dahai80/fusion-mlx#1624).

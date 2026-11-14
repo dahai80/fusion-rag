@@ -250,6 +250,10 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.40
+
+- **可选 Docling 版面感知 PDF 解析（R9，issue #131）** — 此前 PDF 解析只有 PyMuPDF：逐单元格文本、无版面理解，表格行被打散到按列连续的块里。新增 `engine/docling_parser.py`（可选装 `pip install 'fusion-rag[docling]'`）：TableFormer ACCURATE 表格结构 + 阅读顺序，按页导出 markdown，#77 页码锚点精确。可按知识库选择（`pdf_backend`：""/legacy/docling）或全局 `FUSION_RAG_PDF_BACKEND`；docling 任何失败自动回退 legacy —— 入库永不失败。消融结果（`docs/benchmarks/docling-ablation.json`）：列优先单元格 PDF 上 legacy 行完整率 0.00（没有任何块同时含 item 与值）vs docling 1.00 且 BM25 recall@10 1.0；解析代价约 2.3 秒/PDF（固定 CPU —— Apple Silicon 上 TableFormer 在自动 MPS 下崩溃）。
+
 ### v0.8.39
 
 - **按知识库选择的基准派生分块档案（R8，issue #130）** — 此前 chunk size/overlap 是对所有文档类型一视同仁的魔法常数。新增标注语料分块尺寸消融（真实 BGE-M3 + BM25，`docs/benchmarks/chunk-size-ablation.json`）：512 字符 @ 12.5% overlap 同时拿下 recall@10 与 map@10（768 两项皆差，1024 recall 崩至 0.5394 —— 主题文档被合并、证据被稀释），默认值从此有基准背书。`Chunker.CHUNK_PROFILES`（markdown/prose 512/64，code 384/48，table 256/32）可在建 KB 时用 `chunk_profile` 选择（显式 `chunk_size`/`chunk_overlap` 覆盖档案；未知档案返回 400）。另修复：KB 级 `chunk_overlap` 一直存在于配置上，但 4 处入库 Chunker 调用点全部丢掉它 —— 每个 KB 都在静默用 64 默认值；现已透传。Late-chunking 试验被上游阻塞：fusion-mlx `/v1/embeddings` 只返回池化向量（dahai80/fusion-mlx#1624）。
