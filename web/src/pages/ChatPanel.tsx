@@ -66,7 +66,7 @@ export function ChatPanel({ kbId }: { kbId: string }) {
                     {t("调用 /ask：检索 + 生成，答案带引用", "calls /ask: retrieval + generation with citations")}
                 </span>
             </div>
-            <div ref={listRef} className="max-h-96 min-h-40 space-y-3 overflow-y-auto p-3 text-xs">
+            <div ref={listRef} className="max-h-[48rem] min-h-80 space-y-3 overflow-y-auto p-3 text-xs">
                 {msgs.length === 0 && (
                     <div className="py-6 text-center text-text-muted">
                         {t("问一个关于此知识库的问题", "Ask a question about this KB")}
