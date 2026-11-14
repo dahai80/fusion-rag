@@ -264,8 +264,14 @@ def _resolve_kb_id(args: dict) -> str:
     kb_id = args.get("kb_id") or ""
     if kb_id:
         return str(kb_id)
-    _tenant, _require_match = tenant_scope()
-    kbs = _kb_manager_singleton().list(tenant=_tenant, require_tenant_match=_require_match)
+    try:
+        _tenant, _require_match = tenant_scope()
+        kbs = _kb_manager_singleton().list(tenant=_tenant, require_tenant_match=_require_match)
+    except Exception as e:
+        # No app state (bare call outside the FastAPI lifecycle) or manager
+        # failure — still a typed -32602, never a raw RuntimeError.
+        logger.warning("kb_id default resolution failed: %s", e)
+        raise _MCPError(-32602, "kb_id is required: could not resolve a default knowledge base")
     if not kbs:
         raise _MCPError(-32602, "kb_id is required: no knowledge bases exist yet (create one with kb_create)")
     latest = max(kbs, key=lambda k: (getattr(k, "created_at", 0.0), getattr(k, "id", "")))
