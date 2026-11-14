@@ -86,11 +86,59 @@ export const deleteKb = (id: string) =>
     api<void>(`/kb/bases/${id}`, { method: "DELETE" });
 export const fetchDocs = (kbId: string) =>
     api<KbDoc[] | { documents: KbDoc[] }>(`/kb/bases/${kbId}/documents`);
-export const ingestDoc = (kbId: string, docName: string, content: string) =>
+export const ingestDoc = (kbId: string, docName: string, content: string, contentType = "text") =>
     api<{ chunks?: number }>(`/kb/bases/${kbId}/documents/ingest`, {
         method: "POST",
-        body: JSON.stringify({ content_type: "text", content, doc_name: docName }),
+        body: JSON.stringify({ content_type: contentType, content, doc_name: docName }),
     });
+
+// File ingest: text-ish extensions go as text, binary (pdf/docx/epub) as
+// base64 — the #90 inline binary ingest path runs the FULL parse pipeline
+// (PDF text extraction, EPUB chapters, scanned-PDF OCR).
+const TEXT_EXTS: Record<string, string> = {
+    txt: "text",
+    md: "markdown",
+    markdown: "markdown",
+    html: "html",
+    htm: "html",
+    csv: "csv",
+};
+const BINARY_EXTS: Record<string, string> = {
+    pdf: "pdf",
+    docx: "docx",
+    epub: "epub",
+};
+
+export function contentTypeForFile(name: string): string | null {
+    const ext = name.split(".").pop()?.toLowerCase() || "";
+    return TEXT_EXTS[ext] || BINARY_EXTS[ext] || null;
+}
+
+export function ingestFile(kbId: string, file: File): Promise<{ chunks?: number }> {
+    const ct = contentTypeForFile(file.name);
+    if (!ct) {
+        return Promise.reject(
+            new Error(`unsupported file type: .${file.name.split(".").pop()} (txt/md/html/csv/pdf/docx/epub)`),
+        );
+    }
+    if (ct in BINARY_EXTS) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onerror = () => reject(new Error("failed to read file"));
+            reader.onload = () => {
+                const dataUrl = String(reader.result || "");
+                const b64 = dataUrl.includes(",") ? dataUrl.split(",")[1] : "";
+                if (!b64) {
+                    reject(new Error("failed to encode file"));
+                    return;
+                }
+                resolve(ingestDoc(kbId, file.name, b64, ct));
+            };
+            reader.readAsDataURL(file);
+        });
+    }
+    return file.text().then((content) => ingestDoc(kbId, file.name, content, ct));
+}
 export const deleteDoc = (kbId: string, docId: string) =>
     api<void>(`/kb/bases/${kbId}/documents/${docId}`, { method: "DELETE" });
 export const searchKb = (kbId: string, query: string, topK = 5) =>
