@@ -17,13 +17,21 @@ import uuid
 from contextlib import contextmanager
 from typing import Any
 
-from .recall_bench import SEED, build_chunk_records, generate_corpus
+from .recall_bench import (
+    SEED,
+    _map_at_k,
+    _ndcg_at_k,
+    build_chunk_records,
+    generate_corpus,
+)
 from .sqlite_base import SqliteBase
 
 logger = logging.getLogger(__name__)
 
 EVAL_K_VALUES = (5, 10)
-EVAL_METRICS = ("recall@5", "recall@10", "mrr@10")
+# R12 (issue #134): ndcg@10 + map@10 added — position-aware metrics that
+# credit every relevant hit, not just the first (mrr) or raw counts (recall).
+EVAL_METRICS = ("recall@5", "recall@10", "mrr@10", "ndcg@10", "map@10")
 
 
 class EvalStore(SqliteBase):
@@ -167,6 +175,8 @@ async def run_offline_eval(workdir: str) -> tuple[dict[str, float], list[dict[st
         sums["recall@5"] += rec5
         sums["recall@10"] += rec10
         sums["mrr@10"] += mrr10
+        sums["ndcg@10"] += _ndcg_at_k(retrieved, truth, 10)
+        sums["map@10"] += _map_at_k(retrieved, truth, 10)
         per_case.append(
             {
                 "query": query_text,
@@ -174,6 +184,8 @@ async def run_offline_eval(workdir: str) -> tuple[dict[str, float], list[dict[st
                 "recall@5": round(rec5, 4),
                 "recall@10": round(rec10, 4),
                 "mrr@10": round(mrr10, 4),
+                "ndcg@10": round(_ndcg_at_k(retrieved, truth, 10), 4),
+                "map@10": round(_map_at_k(retrieved, truth, 10), 4),
             }
         )
     n = len(per_case)

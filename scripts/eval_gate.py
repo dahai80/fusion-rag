@@ -31,6 +31,27 @@ logger = logging.getLogger("eval_gate")
 BASELINE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval_baseline.json")
 DEFAULT_TOLERANCE = 0.02
 
+# R12 (issue #134): retune protocol — Qdrant fusion-tuning discipline:
+# "hand-tuned weights without measurement are unlikely to beat the default
+# reliably." Any change to the embedding model, chunking, or fusion
+# parameters MUST re-run against the fixed labeled sample before merging,
+# and an intentional improvement re-baselines in the SAME PR. Full doc:
+# docs/retrieval-retune-checklist.md
+RETUNE_CHECKLIST = """
+Retune checklist (docs/retrieval-retune-checklist.md):
+  1. Identify the lever you changed: embedding model / chunking / fusion
+     params / rerank — each one invalidates the previous baseline.
+  2. Re-run the benchmark against the FIXED labeled sample:
+     python scripts/eval_gate.py            (offline, BM25-only)
+     python scripts/recall_benchmark.py     (ablation; --real for live BGE-M3)
+  3. Compare per-metric: recall@5/@10, mrr@10, ndcg@10, map@10. A change
+     that lifts one metric while dropping another is a trade-off — decide
+     explicitly, do not cherry-pick.
+  4. Improvement: commit the re-baselined scripts/eval_baseline.json in the
+     SAME PR. Regression: do not merge, or raise tolerance with a written
+     justification in the PR body.
+"""
+
 
 async def _main(tolerance: float, update_baseline: bool) -> int:
     with tempfile.TemporaryDirectory(prefix="fusion-rag-eval-") as workdir:
@@ -77,6 +98,7 @@ async def _main(tolerance: float, update_baseline: bool) -> int:
 
     if failures:
         logger.error("eval gate FAILED for %s (tolerance %.4f) — retrieval regression", failures, tolerance)
+        print(RETUNE_CHECKLIST)
         return 1
     logger.info("eval gate passed (tolerance %.4f)", tolerance)
     return 0

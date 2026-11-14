@@ -664,6 +664,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.32
+
+- **Eval completeness (R12, issue #134)** — NDCG@K + MAP@K added alongside recall/MRR in `recall_bench` (all three modes) and the offline eval harness; `scripts/eval_baseline.json` re-baselined with `ndcg@10` 0.9469 / `map@10` 0.9212, CI gate fails on regression. Retune checklist (`docs/retrieval-retune-checklist.md`) + printed on gate failure: any embedding-model / chunking / fusion-parameter change requires a re-run against the fixed labeled sample. `POST /search` accepts `source_weights` (per-`doc_type` trust multipliers, [0,10], invalid entries ignored with a warning) — deterministic post-fusion re-rank applied before the rerank stage; scored rows carry `source_weight` for audit.
+
 ## What's New in v0.8.31
 
 - **Citation auditing ON by default (R2, issue #124)** — `FUSION_RAG_CITATION_AUDIT` now defaults to `1` (set `0` to disable). Measured overhead: ~0.11 ms per retrieval write (10 chunks + 1 rewrite, sqlite WAL batch) — noise against search latency. The evaluator (`RAGEvaluator`) gained a citation-accuracy judge (`CITATION_ACCURACY_PROMPT`: what fraction of the answer's claims are supported by the CITED sources — Anthropic/Glean production rubric) emitted per-case as `citation_accuracy` + aggregate `avg_citation_accuracy` (averaged only over cases that carry citations), and `citation_accuracy_from_trace()` scores an /ask response's citations against a citation-audit trace (chunk-id overlap).

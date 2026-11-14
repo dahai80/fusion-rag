@@ -19,6 +19,9 @@ class TestOfflineEval:
         assert m1 == m2
         assert m1["mrr@10"] >= 0.9
         assert m1["recall@10"] >= 0.8
+        # R12 (issue #134): position-aware metrics present and sane
+        assert m1["ndcg@10"] >= 0.8
+        assert m1["map@10"] >= 0.8
         for c in cases1:
             assert c["gold_doc_id"]
             assert set(EVAL_METRICS).issubset(c)

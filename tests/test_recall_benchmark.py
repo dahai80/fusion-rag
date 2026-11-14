@@ -57,6 +57,12 @@ def test_mock_benchmark_pipeline_and_ablation():
         assert 0.0 <= metrics[mode]["recall@5"] <= 1.0
         assert 0.0 <= metrics[mode]["recall@10"] <= 1.0
         assert 0.0 <= metrics[mode]["mrr@10"] <= 1.0
+        # R12 (issue #134): position-aware metrics present and sane
+        assert 0.0 <= metrics[mode]["ndcg@5"] <= 1.0
+        assert 0.0 <= metrics[mode]["ndcg@10"] <= 1.0
+        assert 0.0 <= metrics[mode]["map@10"] <= 1.0
+        assert metrics[mode]["ndcg@10"] > 0.5
+        assert metrics[mode]["map@10"] > 0.5
         # mock channels carry real signal (distinctive terms) — not a vacuous pass
         assert metrics[mode]["recall@10"] > 0.5
     # CI contract: fusion never drops below the best single mode
