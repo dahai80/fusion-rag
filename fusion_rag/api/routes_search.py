@@ -408,6 +408,38 @@ async def ask(
 
     rewrite_mode = data.get("rewrite_mode")
     history = data.get("history")
+
+    # Issue #128 (R6): query complexity routing (opt-in). Explicit `route`
+    # param wins; else FUSION_RAG_ROUTER=auto classifies by rules. Route map:
+    # simple -> single-path (no hybrid/rerank/retry), standard -> hybrid +
+    # rerank, complex -> full pipeline + bounded retry (R5).
+    route_decision: dict[str, str] | None = None
+    eff_crag_rounds = data.get("crag_rounds", _cfg.crag_rounds)
+    if not isinstance(eff_crag_rounds, int) or eff_crag_rounds < 0:
+        eff_crag_rounds = 0
+    route_override = data.get("route")
+    if route_override or _cfg.router_mode == "auto":
+        from ..engine.query_router import QueryRouter
+
+        router = QueryRouter()
+        if route_override:
+            base = router.route(str(route_override))
+            decision = type(base)(str(route_override), f"explicit route param: {route_override}")
+        else:
+            decision = router.route(question, len(history) if history else 0)
+        route_decision = {"level": decision.level, "reason": decision.reason}
+        logger.info("query routed: level=%s reason=%s", decision.level, decision.reason)
+        if decision.level == "simple":
+            use_hybrid = False
+            use_rerank = False
+            eff_crag_rounds = 0
+        elif decision.level == "standard":
+            use_hybrid = True
+        else:  # complex
+            use_hybrid = True
+            use_rerank = True
+            if eff_crag_rounds == 0:
+                eff_crag_rounds = 2
     if rewrite_mode or history:
         rewriter = QueryRewriter(mlx_url=embed.base_url, enabled=True, api_key=embed.api_key)
         mode = rewrite_mode or ("condense" if history else "hyde")
@@ -473,7 +505,7 @@ async def ask(
     # merged chunks; insufficient rounds rewrite + re-retrieve, capped at
     # crag_rounds extra rounds. Every LLM failure degrades to current results.
     crag_trace: list[dict[str, Any]] = []
-    crag_rounds = data.get("crag_rounds", _cfg.crag_rounds)
+    crag_rounds = eff_crag_rounds
     if isinstance(crag_rounds, int) and crag_rounds > 0:
         from ..engine.crag import CorrectiveRAG, RetrievalGrader
 
@@ -534,6 +566,8 @@ async def ask(
     # Issue #127 (R5): per-round observability — only present when the loop ran.
     if crag_trace:
         answer["crag"] = crag_trace
+    if route_decision:
+        answer["route"] = route_decision
     return answer
 
 

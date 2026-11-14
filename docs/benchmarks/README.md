@@ -117,3 +117,21 @@ single-hop and keyword-heavy by construction — the loop's target case (weak
 first retrieval on multi-hop/paraphrased queries) does not occur here. Re-run
 on a multi-hop labeled set before quoting any recall lift. Default
 `FUSION_RAG_CRAG_ROUNDS=0` (off) unchanged.
+
+## Query routing A/B — 2026-11-14 (`router-ablation.json`, mode=real, issue #128)
+
+Rule-based complexity router (`engine/query_router.py`, `FUSION_RAG_ROUTER=auto`
+or per-request `route`) A/B'd against always-full-pipeline on the
+deterministic corpus (55 queries, real BGE-M3; full = hybrid RRF, simple =
+vector-only).
+
+| arm | recall@5 | recall@10 | mrr@10 | ndcg@10 | map@10 |
+|-----|----------|-----------|--------|---------|--------|
+| full (hybrid) | 0.7909 | 0.9212 | 1.0000 | 0.9460 | 0.9190 |
+| routed | 0.7848 | 0.9182 | 1.0000 | 0.9430 | 0.9147 |
+
+Route mix: 49 simple / 6 standard. Simple-bucket latency p50 3.4 ms vs 5.0 ms
+full (−32%); quality delta −0.003 recall@10 — inside the eval-gate tolerance
+(0.02). Routing decisions logged per query (`query routed: level=...`), the
+decision rides on the `/ask` response as `route`. Default `FUSION_RAG_ROUTER=
+off` unchanged.

@@ -95,6 +95,12 @@ class RuntimeConfig:
     # re-retrieved, up to this many extra rounds. Results merge (dedupe by
     # chunk id, best score kept). Latency cost: one grader call per round.
     crag_rounds: int = 0
+    # Issue #128 (R6): query complexity routing. "off" (default) = every query
+    # runs the caller's requested pipeline. "auto" = a rule-based router picks
+    # simple/standard/complex and overrides hybrid/rerank/crag accordingly
+    # (simple -> single-path, standard -> hybrid+rerank, complex -> + retry).
+    # Per-request override: "route" in {simple, standard, complex}.
+    router_mode: str = "off"
 
     @classmethod
     def from_env(cls) -> RuntimeConfig:
@@ -122,6 +128,7 @@ class RuntimeConfig:
             embed_local_fallback=_env_bool("FUSION_RAG_EMBED_LOCAL_FALLBACK", True),
             citation_audit=_env_bool("FUSION_RAG_CITATION_AUDIT", True),
             crag_rounds=_env_int("FUSION_RAG_CRAG_ROUNDS", 0, minimum=0),
+            router_mode=os.environ.get("FUSION_RAG_ROUTER", "off").strip().lower(),
         )
 
     def to_dict(self) -> dict:
