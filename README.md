@@ -664,6 +664,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.27
+
+- **UI: chat input doubled** — the 问答 / Chat input is now a 2-row textarea (Enter sends, Shift+Enter newline, IME-safe), send button bottom-aligned. Console rebuilt.
+
 ## What's New in v0.8.26
 
 - **UI: chat tab height doubled** — the 问答 / Chat message area now scrolls within `max-h-[48rem]` (was `max-h-96`), min height raised to match. Console rebuilt.
