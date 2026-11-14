@@ -1,0 +1,317 @@
+"""MCP Server — Model Context Protocol server for Fusion-RAG.
+
+callers: External MCP clients (Claude Desktop, Cursor, etc.)
+API: MCP tool definitions for kb_list, kb_search, kb_ask, kb_create
+schema: JSON-RPC 2.0 protocol, tools following MCP specification
+user instruction: "按照你的方案和计划落地所有phase阶段的需求"
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any
+
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
+
+from .auth import get_auth_backend
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/mcp", tags=["mcp"])
+
+
+class _MCPError(Exception):
+    # L16: typed tool error → JSON-RPC error code + generic message. Subclasses
+    # set code; message must not echo internal str(e) (paths/SQL/stack).
+    def __init__(self, code: int, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+MCP_TOOLS = [
+    {
+        "name": "kb_list",
+        "description": "List all knowledge bases",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "kb_create",
+        "description": "Create a new knowledge base",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Knowledge base name"},
+                "description": {"type": "string", "description": "Optional description"},
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "kb_search",
+        "description": "Search for relevant chunks in a knowledge base",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "kb_id": {"type": "string", "description": "Knowledge base ID"},
+                "query": {"type": "string", "description": "Search query"},
+                "top_k": {"type": "integer", "description": "Max results (default 5)"},
+            },
+            "required": ["kb_id", "query"],
+        },
+    },
+    {
+        "name": "kb_ask",
+        "description": "Ask a question and get an AI-generated answer with sources",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "kb_id": {"type": "string", "description": "Knowledge base ID"},
+                "question": {"type": "string", "description": "Question to ask"},
+                "top_k": {"type": "integer", "description": "Max context chunks (default 5)"},
+            },
+            "required": ["kb_id", "question"],
+        },
+    },
+    {
+        "name": "kb_upload",
+        "description": "Upload a document to a knowledge base",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "kb_id": {"type": "string", "description": "Knowledge base ID"},
+                "file_path": {"type": "string", "description": "Path to document file"},
+            },
+            "required": ["kb_id", "file_path"],
+        },
+    },
+    {
+        "name": "kb_status",
+        "description": "Get knowledge base statistics",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "kb_id": {"type": "string", "description": "Knowledge base ID"},
+            },
+            "required": ["kb_id"],
+        },
+    },
+]
+
+
+@router.post("")
+async def mcp_handler(request: Request) -> JSONResponse:
+    """Handle MCP JSON-RPC requests."""
+    body = await request.json()
+    method = body.get("method", "")
+    request_id = body.get("id")
+    params = body.get("params", {})
+
+    if method == "initialize":
+        return JSONResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {"listChanged": False}},
+                    "serverInfo": {"name": "fusion-rag", "version": "0.3.0"},
+                },
+            }
+        )
+
+    if method == "tools/list":
+        return JSONResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {"tools": MCP_TOOLS},
+            }
+        )
+
+    if method == "tools/call":
+        # F13: MCP tool calls read/create KBs + upload docs — enforce the same
+        # API-key auth as the REST surface. initialize/tools/list stay open per
+        # MCP discovery, but tools/call must not bypass auth when it is enabled.
+        api_key = request.headers.get("X-API-Key")
+        try:
+            subject = get_auth_backend().verify(api_key)
+        except Exception as e:
+            detail = getattr(e, "detail", str(e))
+            status = getattr(e, "status_code", 401)
+            return JSONResponse(
+                {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32001, "message": detail}},
+                status_code=status,
+            )
+        tool_name = params.get("name", "")
+        arguments = params.get("arguments", {})
+        # S-P0-2: REST routes enforce per-KB ACL via require_kb_action; MCP
+        # previously called only verify() and skipped ACL entirely — a
+        # subtree-restricted subject could read/upload any KB via /mcp. Enforce
+        # the same _check_kb_access gate here, mapped by tool action.
+        try:
+            _enforce_mcp_acl(tool_name, arguments, subject)
+        except _MCPError:
+            raise
+        except Exception as e:
+            status = getattr(e, "status_code", 403)
+            return JSONResponse(
+                {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32001, "message": "Access denied"}},
+                status_code=status,
+            )
+        try:
+            result = await _dispatch_tool(tool_name, arguments)
+        except _MCPError as e:
+            # L16: tool failures surface as a JSON-RPC `error` (not a `result`
+            # containing {"error": str(e)}), so clients can distinguish success
+            # from failure programmatically. No raw str(e) leaks — messages are
+            # generic; details stay in server logs.
+            logger.warning("MCP tool '%s' rejected: code=%d msg=%s", tool_name, e.code, e.message)
+            return JSONResponse(
+                {"jsonrpc": "2.0", "id": request_id, "error": {"code": e.code, "message": e.message}},
+                status_code=200,
+            )
+        except Exception as e:
+            logger.error("MCP tool '%s' failed: %s", tool_name, e, exc_info=True)
+            return JSONResponse(
+                {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32603, "message": "internal error"}},
+                status_code=200,
+            )
+        return JSONResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]},
+            }
+        )
+
+    return JSONResponse(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": -32601, "message": f"Method not found: {method}"},
+        }
+    )
+
+
+def _enforce_mcp_acl(tool_name: str, args: dict, subject: str | None) -> None:
+    """S-P0-2: apply the same per-KB ACL the REST surface enforces.
+
+    REST routes use `Depends(require_kb_action(action))`; MCP `tools/call`
+    previously skipped ACL entirely. Map each KB-scoped tool to its action and
+    run `_check_kb_access` (the shared gate behind require_kb_action).
+
+    - kb_list / kb_create: no {kb_id} to check against — auth-only (same as
+      the REST GET / POST /bases, which use plain verify_api_key). A created
+      KB is open until an admin writes rules.
+    - kb_search / kb_ask / kb_status: read on the named KB.
+    - kb_upload: write on the named KB.
+    """
+    from .access import _check_kb_access
+
+    if tool_name in ("kb_list", "kb_create"):
+        return
+    action_map = {
+        "kb_search": "read",
+        "kb_ask": "read",
+        "kb_status": "read",
+        "kb_upload": "write",
+    }
+    action = action_map.get(tool_name)
+    if action is None:
+        return  # unknown tool -> _dispatch_tool raises _MCPError(-32601)
+    kb_id = args.get("kb_id", "")
+    if not kb_id:
+        return  # missing param -> _dispatch_tool raises _MCPError(-32602)
+    _check_kb_access(kb_id, subject, action, "/")
+
+
+async def _dispatch_tool(name: str, args: dict) -> Any:
+    """Dispatch MCP tool calls to internal API.
+
+    L16: raises _MCPError (mapped to a JSON-RPC error by the caller) on
+    missing/invalid params or known tool failures; unexpected exceptions
+    propagate to the caller's generic -32603 handler. Never returns
+    {"error": str(e)} as a JSON-RPC result.
+    """
+    from .routes import _get_base, _get_embed_client, _get_kb_manager, _get_vector_store
+
+    def _require(key: str) -> Any:
+        if key not in args or args[key] in (None, ""):
+            raise _MCPError(-32602, f"missing required parameter: {key}")
+        return args[key]
+
+    if name == "kb_list":
+        # Issue #61: scope to the request tenant when isolation is on.
+        from .tenant import tenant_scope
+
+        _tenant, _require_match = tenant_scope()
+        return _get_kb_manager().list(tenant=_tenant, require_tenant_match=_require_match)
+
+    if name == "kb_create":
+        kb_name = _require("name")
+        # Issue #61: stamp the request's authoritative tenant on the new KB.
+        from .tenant import get_request_tenant
+
+        kb = _get_kb_manager().create(
+            name=kb_name, description=args.get("description", ""), tenant=get_request_tenant()
+        )
+        return {"id": kb.id, "name": kb.config.name, "status": "created"}
+
+    if name == "kb_search":
+        from fastapi.concurrency import run_in_threadpool
+
+        kb_id = _require("kb_id")
+        query = _require("query")
+        kb = _get_base(kb_id)
+        embed = _get_embed_client()
+        # 硬伤A: reuse pooled backend handle; prior raw VectorStore(kb.vector_path)
+        # opened a new handle per call (default backend, no env-var) and leaked.
+        vec_store = _get_vector_store(kb_id)
+        query_vector = await embed.embed(query)
+        if not query_vector or all(v == 0.0 for v in query_vector):
+            raise _MCPError(-32603, "embedding failed")
+        top_k = args.get("top_k", kb.config.max_results)
+        # P1-8: vec_store.search is sync (LanceDB+BM25); run off the event loop.
+        results = await run_in_threadpool(vec_store.search, query_vector, top_k=top_k)
+        return results
+
+    if name == "kb_ask":
+        from fastapi.concurrency import run_in_threadpool
+
+        from .routes import _generate_answer
+
+        kb_id = _require("kb_id")
+        question = _require("question")
+        kb = _get_base(kb_id)
+        embed = _get_embed_client()
+        vec_store = _get_vector_store(kb_id)
+        query_vector = await embed.embed(question)
+        if not query_vector or all(v == 0.0 for v in query_vector):
+            raise _MCPError(-32603, "embedding failed")
+        top_k = args.get("top_k", kb.config.max_results)
+        # P1-8: sync search off-loop.
+        chunks = await run_in_threadpool(vec_store.search, query_vector, top_k=top_k)
+        if not chunks:
+            return {"answer": "No relevant documents found.", "sources": []}
+        context = "\n\n".join(f"[{c['doc_name']}] {c['text'][:2000]}" for c in chunks)
+        return await _generate_answer(question, context, chunks)
+
+    if name == "kb_upload":
+        from .routes_docs import _index_document
+
+        kb_id = _require("kb_id")
+        file_path = _require("file_path")
+        result = await _index_document(kb_id, file_path)
+        return result
+
+    if name == "kb_status":
+        kb_id = _require("kb_id")
+        kb = _get_base(kb_id)
+        return kb.to_dict()
+
+    raise _MCPError(-32601, f"unknown tool: {name}")

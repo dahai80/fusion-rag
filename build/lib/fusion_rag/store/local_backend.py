@@ -1,0 +1,313 @@
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+from typing import Any
+
+from .store_backend import StoreBackend
+
+logger = logging.getLogger(__name__)
+
+
+def _lancedb():
+    try:
+        import lancedb
+
+        return lancedb
+    except ImportError:
+        raise ImportError("Install lancedb: pip install lancedb")
+
+
+def _pa():
+    try:
+        import pyarrow as pa
+
+        return pa
+    except ImportError:
+        raise ImportError("Install pyarrow: pip install pyarrow")
+
+
+def _lance_string_literal(value: str) -> str:
+    """P0-4: build a safely-escaped single-quoted DataFusion string literal.
+
+    lancedb Table.delete takes a SQL filter string (no bind parameters), so the
+    matched value is interpolated. Single-quote doubling is the correct escape
+    for a DataFusion char literal — `x' OR '1'='1` becomes the single literal
+    `x' OR '1'='1`. We also reject control chars (NUL/newline/CR/tab) which are
+    not valid in a real doc_path and could break the filter parser. Returns the
+    quoted literal INCLUDING the surrounding single quotes.
+    """
+    if not value:
+        return "''"
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in value):
+        raise ValueError(f"control char in doc_path rejected (len={len(value)})")
+    escaped = value.replace("'", "''")
+    return f"'{escaped}'"
+
+
+class LocalBackend(StoreBackend):
+    def __init__(self, vector_path: str, dimension: int = 1024, **_):
+        # P4-5: accept and ignore **_ so VectorStore can route every backend
+        # through StoreBackendFactory.create(**kwargs) uniformly — remote-only
+        # params (endpoint/api_key) passed to a local backend no longer raise
+        # TypeError. Unknown kwargs are silently dropped here; this backend has
+        # no optional knobs beyond vector_path/dimension.
+        self.vector_path = vector_path
+        self.dimension = dimension
+        self._db = None
+        self._table = None
+        self._bm25_index = None
+        self._connect()
+
+    def _connect(self) -> None:
+        Path(self.vector_path).parent.mkdir(parents=True, exist_ok=True)
+        ldb = _lancedb()
+        self._db = ldb.connect(str(self.vector_path))
+        table_name = "chunks"
+        pa = _pa()
+        schema = pa.schema(
+            [
+                pa.field("id", pa.string()),
+                pa.field("vector", pa.list_(pa.float32(), self.dimension)),
+                pa.field("text", pa.string()),
+                pa.field("doc_path", pa.string()),
+                pa.field("doc_name", pa.string()),
+                pa.field("doc_type", pa.string()),
+                pa.field("chunk_index", pa.int32()),
+                pa.field("metadata_json", pa.string()),
+                pa.field("context", pa.string()),
+            ]
+        )
+        try:
+            self._table = self._db.open_table(table_name)
+            self._migrate_schema(self._table, schema)
+        except Exception as e:
+            # F8: only rebuild on a missing-table condition; any other error
+            # (corrupt index, schema mismatch, IO) must surface — silently
+            # rebuilding an empty table wiped real data on transient faults.
+            msg = str(e).lower()
+            if "does not exist" in msg or "not found" in msg or isinstance(e, FileNotFoundError):
+                logger.info("LocalBackend table '%s' absent, creating new", table_name)
+                self._table = self._db.create_table(table_name, schema=schema)
+            else:
+                logger.error("LocalBackend open_table failed (not auto-rebuilding): %s", e)
+                raise
+
+    def _migrate_schema(self, table, target_schema) -> None:
+        existing_fields = {f.name for f in table.schema}
+        missing = [f for f in target_schema if f.name not in existing_fields]
+        if not missing:
+            return
+        for field in missing:
+            logger.info("Migrating schema: adding column '%s'", field.name)
+            # F8: a failed migration leaves a half-applied schema — abort loudly
+            # rather than swallow + continue on a corrupt table.
+            table.add_columns({field.name: "''"})
+
+    @property
+    def table(self):
+        if self._table is None:
+            self._connect()
+        return self._table
+
+    @property
+    def bm25(self):
+        if self._bm25_index is None:
+            from ..engine.bm25_index import BM25Index
+
+            bm25_path = str(Path(self.vector_path).parent / "bm25_index.db")
+            self._bm25_index = BM25Index(bm25_path)
+        return self._bm25_index
+
+    def _check_vector_dim(self, records: list[dict[str, Any]]) -> None:
+        # P1-4: validate every vector length BEFORE any table.add. LanceDB's
+        # fixed-width list schema (pa.list_(pa.float32(), self.dimension)) will
+        # raise mid-batch, but only after partially writing — leaving an
+        # all-or-nothing batch half-committed. Pre-validate so a model swap
+        # (1024→768) or a short/zero fallback vector fails loud and clean, with
+        # the offending id, before touching the table.
+        for r in records:
+            vec = r.get("vector")
+            if vec is None or len(vec) != self.dimension:
+                raise ValueError(
+                    f"vector dimension mismatch for chunk {r.get('id', '?')}: "
+                    f"got {len(vec) if vec is not None else 'None'}, expected {self.dimension}. "
+                    "Embedding model changed or provider returned a short vector."
+                )
+
+    def add(
+        self,
+        chunk_id: str,
+        vector: list[float],
+        text: str,
+        doc_path: str = "",
+        doc_name: str = "",
+        doc_type: str = "",
+        chunk_index: int = 0,
+        metadata: dict | None = None,
+        context: str = "",
+    ) -> None:
+        data = [
+            {
+                "id": chunk_id,
+                "vector": vector,
+                "text": text,
+                "doc_path": doc_path,
+                "doc_name": doc_name,
+                "doc_type": doc_type,
+                "chunk_index": chunk_index,
+                "metadata_json": json.dumps(metadata or {}, ensure_ascii=False),
+                "context": context,
+            }
+        ]
+        self._check_vector_dim(data)
+        self.table.add(data)
+        self.bm25.add_documents(data)
+
+    def add_batch(self, records: list[dict[str, Any]]) -> None:
+        if not records:
+            return
+        for r in records:
+            if "metadata_json" not in r and "metadata" in r:
+                r["metadata_json"] = json.dumps(r.pop("metadata", {}), ensure_ascii=False)
+        self._check_vector_dim(records)
+        self.table.add(records)
+        self.bm25.add_documents(records)
+
+    def search(self, query_vector: list[float], top_k: int = 10, threshold: float = 0.0) -> list[dict[str, Any]]:
+        # M3: a genuine search failure (corrupt index, IO) used to return [],
+        # indistinguishable from a legitimate "no matches". Callers (HybridSearch,
+        # routes_search) cannot tell a broken store from an empty one. Let it
+        # raise — an empty table returns [] normally (verified), so only real
+        # errors propagate. metadata-JSON parse stays a per-row warning (one
+        # bad row shouldn't fail the whole search).
+        try:
+            results = self.table.search(query_vector).metric("cosine").limit(top_k).to_list()
+        except Exception as e:
+            logger.error("LocalBackend search failed (propagating, no silent []): %s", e)
+            raise
+        filtered = []
+        for r in results:
+            # P3-3: a missing _distance (schema drift / bad row) must NOT
+            # default to 0.0 — that scores 1.0, the maximum similarity, so a
+            # malformed row outranks every real match. Default to 2.0 (cosine
+            # distance range is [0,2]) → score -1.0, filtered out under any sane
+            # threshold. Surface it so the drift is visible, not silent.
+            dist = r.get("_distance")
+            if dist is None:
+                logger.warning("LocalBackend search: row id=%s missing _distance, skipping", r.get("id"))
+                continue
+            score = 1.0 - float(dist)
+            if score < threshold:
+                continue
+            r["score"] = score
+            r.pop("_distance", None)
+            try:
+                r["metadata"] = json.loads(r.get("metadata_json", "{}"))
+            except Exception as e:
+                logger.warning("Failed to parse metadata JSON: %s", e)
+                r["metadata"] = {}
+            r.pop("metadata_json", None)
+            filtered.append(r)
+        return filtered
+
+    def keyword_search(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
+        return self.bm25.search(query, top_k)
+
+    def delete_by_doc(self, doc_path: str) -> int:
+        # M3: failure used to return 0, indistinguishable from "no matching doc".
+        # Callers (routes_docs delete/replace/scan) ignored the return and
+        # reported success either way — a broken delete looked like "deleted 0".
+        # Let it raise so the route surfaces a real failure. The return value
+        # still means "matched rows" on success.
+        #
+        # P0-4: lancedb Table.delete takes a SQL filter STRING (no bind params),
+        # so the doc_path is interpolated into the filter. The single-quote
+        # doubling below is the correct DataFusion string-literal escape and
+        # defeats `x' OR '1'='1` (it parses as one literal). We additionally
+        # reject NUL/newline/control chars — they are invalid in real file paths
+        # and can break the DataFusion parser. doc_path is internally sourced
+        # (read from metadata at delete time), but inline ingest lets a user
+        # store an arbitrary doc_name, so harden the literal builder regardless.
+        safe = _lance_string_literal(doc_path)
+        result = self.table.delete(f"doc_path = {safe}")
+        if isinstance(result, int):
+            count = result
+        elif hasattr(result, "__int__") and not hasattr(result, "num_deleted_rows"):
+            count = int(result)
+        elif hasattr(result, "num_deleted_rows"):
+            # LanceDB >=0.10 returns DeleteResult(num_deleted_rows=N, version=V).
+            count = int(result.num_deleted_rows)
+        elif hasattr(result, "rows_deleted"):
+            count = result.rows_deleted
+        else:
+            logger.debug("delete_by_doc returned unexpected type: %s", type(result))
+            count = 0
+        self.bm25.remove_document(doc_path)
+        return count
+
+    def delete_by_chunk_ids(self, chunk_ids: list[str]) -> int:
+        # Issue #94: delete exactly these chunk ids. doc_path-keyed delete
+        # removed physically-shared chunks of identical-content docs (inline
+        # ingest derives doc_path from the doc name, so two docs can share it).
+        # P0-4 parity: chunk ids are escaped with the same DataFusion
+        # string-literal builder as delete_by_doc (they are internal
+        # {doc_id}_{i} strings, but harden regardless).
+        ids = [c for c in dict.fromkeys(chunk_ids) if c]
+        if not ids:
+            return 0
+        literals = ",".join(_lance_string_literal(c) for c in ids)
+        result = self.table.delete(f"id IN ({literals})")
+        if isinstance(result, int):
+            count = result
+        elif hasattr(result, "__int__") and not hasattr(result, "num_deleted_rows"):
+            count = int(result)
+        elif hasattr(result, "num_deleted_rows"):
+            count = int(result.num_deleted_rows)
+        elif hasattr(result, "rows_deleted"):
+            count = result.rows_deleted
+        else:
+            logger.debug("delete_by_chunk_ids returned unexpected type: %s", type(result))
+            count = 0
+        self.bm25.remove_chunks(ids)
+        return count
+
+    def count(self) -> int:
+        # M3: failure used to return 0, indistinguishable from an empty store.
+        # Stats endpoints would report "0 vectors" on a corrupt index. Raise.
+        return self.table.count_rows()
+
+    def clear(self) -> None:
+        try:
+            self.table.delete("true")
+        except Exception as e:
+            logger.warning("LocalBackend clear failed: %s", e)
+
+    def checkpoint(self) -> None:
+        # O-P2-1: fold a snapshot-consistent state before a stores-dir backup.
+        # Two parts: (1) the in-process BM25Index is a SqliteBase WAL store —
+        # checkpoint(TRUNCATE) folds its -wal into bm25_index.db. (2) LanceDB
+        # accumulates fragment files on each add; table.optimize() compacts
+        # them so a tar/rsync of vectors/ captures a compacted, consistent
+        # dataset rather than many small fragments mid-merge.
+        if self._bm25_index is not None:
+            try:
+                self._bm25_index.checkpoint()
+            except Exception as e:
+                logger.warning("LocalBackend checkpoint: BM25 checkpoint failed: %s", e)
+        try:
+            self.table.optimize()
+            logger.debug("LocalBackend checkpoint: LanceDB table optimized")
+        except Exception as e:
+            logger.warning("LocalBackend checkpoint: LanceDB optimize failed: %s", e)
+
+    def close(self) -> None:
+        if self._bm25_index is not None:
+            try:
+                self._bm25_index._close_conn()
+            except Exception as e:
+                logger.warning("LocalBackend close: BM25 conn close failed: %s", e)
+        self._db = None
+        self._table = None
+        self._bm25_index = None

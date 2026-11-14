@@ -1,0 +1,138 @@
+"""D4: RuntimeConfig — env-driven operator knobs, single source of truth.
+
+Before this, runtime tuning (scan max_files, embedding-cache TTL/size, RAG
+token budget / max history, search fetch_k multiplier) was hardcoded across
+8+ files. An operator could not raise the cache size or shrink the token
+budget without a code change + redeploy. RuntimeConfig centralizes those
+knobs, reads each from env at startup, and exposes a read-only view via
+/admin/config. Defaults match the prior hardcoded values (no behavior change
+unless an env is set)."""
+from __future__ import annotations
+
+import logging
+import os
+from dataclasses import asdict, dataclass
+
+logger = logging.getLogger(__name__)
+
+
+def _env_int(name: str, default: int, minimum: int = 0) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        val = int(raw)
+    except ValueError:
+        logger.warning("invalid %s=%r, using default %d", name, raw, default)
+        return default
+    if val < minimum:
+        logger.warning("%s=%d below minimum %d, using default %d", name, val, minimum, default)
+        return default
+    return val
+
+
+def _env_float(name: str, default: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        val = float(raw)
+    except ValueError:
+        logger.warning("invalid %s=%r, using default %s", name, raw, default)
+        return default
+    if val < minimum or val > maximum:
+        logger.warning("%s=%s outside [%s, %s], using default %s", name, val, minimum, maximum, default)
+        return default
+    return val
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    logger.warning("invalid %s=%r, using default %s", name, raw, default)
+    return default
+
+
+@dataclass(frozen=True)
+class RuntimeConfig:
+    # D4: every field is env-overridable. Defaults are the prior hardcoded
+    # values so a deployment that sets no envs behaves exactly as before.
+    scan_max_files: int = 1000
+    embedding_cache_ttl_seconds: int = 86400 * 7
+    embedding_cache_max_entries: int = 100_000
+    rag_token_budget: int = 8192
+    rag_max_history_turns: int = 10
+    search_fetch_k_multiplier: int = 4
+    max_content_chars: int = 2_000_000
+    max_batch_files: int = 200
+    # Issue #70: rerank operator knobs. rerank_model empty => rerank off unless
+    # the caller explicitly passes rerank=true. rerank_backend selects the
+    # scoring stage: "llm" (legacy prompt-scoring) or "cross_encoder"
+    # (fusion-mlx /v1/rerank). rerank_top_n = candidate pool size fed to the
+    # reranker before truncating to top_k (recall lift without changing top_k).
+    rerank_model: str = ""
+    rerank_backend: str = "llm"
+    rerank_top_n: int = 20
+    # Issue #85: OCR confidence threshold. Chunks whose ocr_confidence is below
+    # this are flagged low_confidence=True in search results and citations
+    # (has_low_confidence on /ask answers).
+    low_ocr_confidence: float = 0.85
+    # Issue #106: local sentence-transformers fallback toggle. ON (default)
+    # preserves the existing degrade-to-local behavior. OFF makes every embed
+    # call fail FAST with a retryable EmbeddingError when MLX + cloud fallback
+    # are down — cold-loading BGE-M3 takes ~2-4 minutes, which used to hang
+    # each request for minutes with no way to opt out.
+    embed_local_fallback: bool = True
+    citation_audit: bool = True
+
+    @classmethod
+    def from_env(cls) -> RuntimeConfig:
+        return cls(
+            scan_max_files=_env_int("FUSION_RAG_SCAN_MAX_FILES", 1000, minimum=1),
+            embedding_cache_ttl_seconds=_env_int(
+                "FUSION_RAG_EMBED_CACHE_TTL", 86400 * 7, minimum=0
+            ),
+            embedding_cache_max_entries=_env_int(
+                "FUSION_RAG_EMBED_CACHE_MAX_ENTRIES", 100_000, minimum=1
+            ),
+            rag_token_budget=_env_int("FUSION_RAG_TOKEN_BUDGET", 8192, minimum=1),
+            rag_max_history_turns=_env_int("FUSION_RAG_MAX_HISTORY_TURNS", 10, minimum=1),
+            search_fetch_k_multiplier=_env_int(
+                "FUSION_RAG_FETCH_K_MULTIPLIER", 4, minimum=1
+            ),
+            max_content_chars=_env_int(
+                "FUSION_RAG_MAX_CONTENT_CHARS", 2_000_000, minimum=1
+            ),
+            max_batch_files=_env_int("FUSION_RAG_MAX_BATCH_FILES", 200, minimum=1),
+            rerank_model=os.environ.get("FUSION_RAG_RERANK_MODEL", "").strip(),
+            rerank_backend=os.environ.get("FUSION_RAG_RERANK_BACKEND", "llm").strip().lower(),
+            rerank_top_n=_env_int("FUSION_RAG_RERANK_TOP_N", 20, minimum=1),
+            low_ocr_confidence=_env_float("FUSION_RAG_LOW_OCR_CONFIDENCE", 0.85, minimum=0.0, maximum=1.0),
+            embed_local_fallback=_env_bool("FUSION_RAG_EMBED_LOCAL_FALLBACK", True),
+            citation_audit=_env_bool("FUSION_RAG_CITATION_AUDIT", True),
+        )
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+_config: RuntimeConfig | None = None
+
+
+def get_runtime_config() -> RuntimeConfig:
+    global _config
+    if _config is None:
+        _config = RuntimeConfig.from_env()
+        logger.info("RuntimeConfig loaded: %s", _config.to_dict())
+    return _config
+
+
+def reset_runtime_config() -> None:
+    # tests: force the next get_runtime_config() to re-read env.
+    global _config
+    _config = None

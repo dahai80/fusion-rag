@@ -1,0 +1,1185 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+import logging
+import os
+import tempfile
+import uuid
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
+
+from .._validators import ValidationError, validate_identifier, validate_path_under_root
+from ..engine.chunker import Chunker
+from ..engine.contextualizer import Contextualizer
+from ..engine.document import CONTENT_TYPE_MAP, DocumentParser, DocumentType, ParseResult
+from ..engine.llm_errors import LLMUnavailable
+from ..store.metadata_store import MetadataStore
+from ..store.vector_store import VectorStore
+from .access import require_kb_action
+from .app_state import (
+    _persist_watches,
+    _watch_cap,
+    get_embed_client,
+    get_kb_locks,
+    get_kb_manager,
+    get_tasks,
+    get_watches,
+)
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(tags=["documents"])
+
+# _doc_parser is stateless and safe to share across requests.
+_doc_parser = DocumentParser()
+
+# 硬伤1: per-app state (_kb_manager / _embed_client / _tasks / _watches /
+# _kb_locks) now lives on app.state, read per-request via a contextvar. The
+# mutable dicts (tasks/watches/locks) are per-app so a reload rebuilds them
+# fresh instead of carrying stale module globals across app instances.
+_get_kb_manager = get_kb_manager
+_get_embed_client = get_embed_client
+
+
+def _kb_lock(kb_id: str) -> asyncio.Lock:
+    # L12: per-KB lock guarding the read-modify-write of file_count/chunk_count.
+    # Concurrent ingest on the same KB otherwise loses updates (both read N,
+    # both write N+1). Keyed by kb_id; lazily created in app.state.kb_locks.
+    # A-P2-2: the check-then-act on the shared dict is itself a race — two
+    # concurrent ingest paths both see lock=None, both create, one overwrites
+    # the other's lock, so the "mutual exclusion" never actually happens.
+    # Guard the lazy create with kb_locks_lock (a sync threading.Lock — the
+    # create is fast, and asyncio.Lock construction does not await).
+    from .app_state import _state
+
+    locks = get_kb_locks()
+    lock = locks.get(kb_id)
+    if lock is None:
+        with _state().kb_locks_lock:
+            locks = get_kb_locks()
+            lock = locks.get(kb_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                locks[kb_id] = lock
+    return lock
+
+
+def _get_base(kb_id: str):
+    # F12: confine kb_id before any path construction.
+    try:
+        validate_identifier(kb_id, field="kb_id")
+    except ValueError:
+        raise HTTPException(400, f"Invalid kb_id: {kb_id}")
+    # Issue #61: scope by the request's authoritative tenant when isolation is on.
+    from .tenant import tenant_scope
+
+    tenant, require_match = tenant_scope()
+    try:
+        return _get_kb_manager().get(kb_id, tenant=tenant, require_tenant_match=require_match)
+    except KeyError:
+        raise HTTPException(404, f"Knowledge base '{kb_id}' not found")
+
+
+def _check_ingest_root(file_path: str) -> None:
+    """F15: LFI guard — when FUSION_RAG_INGEST_ROOTS is set, confine reads to it.
+
+    Local-first tool: an unset env means no confinement (operator opted into
+    unrestricted local indexing). When set (colon-separated), every ingest path
+    must resolve under one of the configured roots, blocking /etc/passwd etc.
+    """
+    roots_env = os.environ.get("FUSION_RAG_INGEST_ROOTS", "").strip()
+    if not roots_env:
+        return
+    roots = [r.strip() for r in roots_env.split(":") if r.strip()]
+    if not roots:
+        return
+    for root in roots:
+        try:
+            validate_path_under_root(file_path, root=root, field="file_path")
+            return
+        except ValidationError:
+            continue
+    logger.warning("ingest path rejected by root confinement: %s", file_path)
+    raise HTTPException(403, "file_path not under a configured ingest root")
+
+
+def _get_vector_store(kb_id: str) -> VectorStore:
+    kb = _get_base(kb_id)
+    backend_type = os.environ.get("FUSION_RAG_STORE_BACKEND", "local")
+    # 硬伤A: reuse one pooled backend handle per KB (see app_state
+    # get_or_create_vec_store). Prior per-request construction leaked handles.
+    from .app_state import get_or_create_vec_store
+
+    return get_or_create_vec_store(kb.vector_path, backend_type)
+
+
+def _get_meta_store(kb_id: str) -> MetadataStore:
+    kb = _get_base(kb_id)
+    # A-P1-1: reuse the pooled MetadataStore (one sqlite conn per metadata_path)
+    # via app_state. The prior per-request MetadataStore(kb.metadata_path) opened
+    # a fresh sqlite conn each call and never closed it — FD leak across a long
+    # run. The pool closes all conns from the lifespan shutdown.
+    from .app_state import get_meta_store as _pool_meta_store
+
+    return _pool_meta_store(kb.metadata_path)
+
+
+def _check_embed_model(kb_id: str) -> None:
+    # D7: per-KB embedding_model was decorative — server builds ONE
+    # EmbeddingClient from FUSION_RAG_EMBED at startup, and the embed path
+    # never read kb.config.embedding_model. A KB configured with a different
+    # model silently got the service-wide model's vectors (wrong dimension on
+    # a real model switch → mixed-dimension recall corruption). Fail visibly
+    # instead: reject ingest when the KB's configured model differs from the
+    # service-wide client. All KBs share one service-wide embedding model.
+    embed = _get_embed_client()
+    kb = _get_base(kb_id)
+    if kb.config.embedding_model and kb.config.embedding_model != embed.model:
+        logger.error(
+            "ingest rejected: KB %s configured embedding_model=%r but service runs %r",
+            kb_id,
+            kb.config.embedding_model,
+            embed.model,
+        )
+        raise HTTPException(
+            400,
+            (
+                f"embedding_model mismatch: KB '{kb_id}' configured '{kb.config.embedding_model}' "
+                f"but the service runs a single embedding model '{embed.model}'. "
+                f"All KBs share one service-wide model (set FUSION_RAG_EMBED at startup); "
+                f"re-create the KB with embedding_model='{embed.model}' to ingest."
+            ),
+        )
+
+
+async def _write_doc_to_stores(
+    *,
+    vec_store: VectorStore,
+    meta_store: MetadataStore,
+    doc_id: str,
+    doc_path: str,
+    doc_name: str,
+    doc_type: str,
+    file_size: int,
+    metadata: dict,
+    chunks: list,
+    vectors: list,
+    chunk_dicts: list,
+    chars: int,
+    chunk_metadata: dict | None = None,
+    chunk_extra_metas: list[dict] | None = None,
+) -> tuple[bool, str | None, bool]:
+    """P4-1 + 硬伤B: the ONE place that writes a doc's chunks to all stores.
+
+    R1: every sync store call (add_batch / delete_by_doc / add_document /
+    add_chunk / delete_chunks_by_doc / delete_document) runs in a threadpool so
+    a slow LanceDB/jieba/SQLite write never freezes the event loop — aligns the
+    write path with the search path (routes_search already wraps vec_store.search).
+
+    H2: a rollback that ALSO fails is no longer swallowed. The prior code logged
+    rollback exceptions and returned (False, err) with no signal that orphan
+    vectors were left behind — an operator saw a 500, assumed "write failed so
+    nothing landed", while half the vectors were already durable and unowned.
+    Now returns a 3-tuple (ok, err, rollback_failed): callers map
+    rollback_failed=True to 503 + an orphan-data audit warning so it is
+    discoverable and cleanable. A clean rollback keeps rollback_failed=False.
+
+    Returns (True, None, False) on success; (False, err, rb) on failure.
+    """
+    # Issue #77: evidence metadata contract — each chunk carries doc_id +
+    # chunk_index (+ page when the chunker tracked it) inside its metadata so
+    # search rows round-trip stable evidence anchors (envipermit binds
+    # extracted values to doc_id/page/chunk_id). Base is the caller's
+    # per-chunk metadata (inline ingest) or the doc metadata (file ingest).
+    # Issue #86: docs default to status="active" (PATCH can flip it later).
+    # Issue #85: chunk_extra_metas carries per-chunk OCR evidence
+    # (ocr_confidence/ocr_task_id/ocr_slice_id/ocr_slice_url/ocr_bbox) that
+    # overrides the doc-level base on its chunks.
+    metadata = dict(metadata or {})
+    metadata.setdefault("status", "active")
+    base_meta = chunk_metadata if chunk_metadata is not None else metadata
+    if chunk_metadata is not None:
+        base_meta = {**base_meta, "status": metadata["status"]}
+    chunk_metas = []
+    for i, chunk in enumerate(chunks):
+        cm = {**(base_meta or {}), "doc_id": doc_id, "chunk_index": i}
+        page = getattr(chunk, "page", 0)
+        if page:
+            cm["page"] = page
+        if chunk_extra_metas and i < len(chunk_extra_metas):
+            cm.update(chunk_extra_metas[i])
+        chunk_metas.append(cm)
+
+    records = []
+    for i, (chunk, vector, cd) in enumerate(zip(chunks, vectors, chunk_dicts)):
+        chunk_id = f"{doc_id}_{i}"
+        records.append(
+            {
+                "id": chunk_id,
+                "vector": vector,
+                "text": chunk.text,
+                "doc_path": doc_path,
+                "doc_name": doc_name,
+                "doc_type": doc_type,
+                "chunk_index": i,
+                "metadata": chunk_metas[i],
+                "context": cd.get("context", ""),
+            }
+        )
+
+    # 硬伤B: write the hard-undo side (vectors + bm25) FIRST.
+    rollback_failed = False
+    try:
+        # P0-1: add_batch writes vectors AND bm25 in one call (both backends
+        # do the bm25 add inside add_batch). One write, one rollback path.
+        # R1: run in threadpool — add_batch does LanceDB batch insert + jieba
+        # tokenization, both sync and slow on large docs.
+        await run_in_threadpool(vec_store.add_batch, records)
+    except Exception as e:
+        logger.error("_write_doc_to_stores: add_batch (vectors+bm25) failed for doc %s: %s", doc_id, e)
+        try:
+            # Issue #94: roll back by exact chunk ids, not doc_path — the same
+            # doc_path may be shared by another doc's chunks.
+            await run_in_threadpool(
+                vec_store.delete_by_chunk_ids, [r["id"] for r in records], doc_path
+            )
+        except Exception as de:
+            # H2: rollback failed — orphan vectors may be durable. Signal it.
+            rollback_failed = True
+            logger.error(
+                "_write_doc_to_stores: rollback delete_by_doc failed for %s: %s "
+                "(ORPHAN VECTORS LIKELY DURABLE — operator must clean up)",
+                doc_id,
+                de,
+            )
+        return (False, f"index write failed: {e}", rollback_failed)
+
+    # Metadata SECOND — cheap, atomic in SQLite. If this throws, the vectors
+    # are already durable, so roll them back too and return a clean failure
+    # (the caller decides whether to retry). A crash BETWEEN add_batch and
+    # here leaves orphan vectors — recoverable by re-ingest over doc_path, the
+    # strictly better of the two orphan kinds per 硬伤B.
+    try:
+        await run_in_threadpool(
+            meta_store.add_document, doc_id, doc_path, doc_name, doc_type, file_size, metadata=metadata
+        )
+        # P-P1-2: batch all chunk inserts into ONE meta_store.add_chunks call
+        # (executemany, single transaction) instead of N add_chunk round-trips
+        # each acquiring the shared-conn lock + committing. On a 500-chunk doc
+        # this drops 500 lock/commit cycles to 1.
+        chunk_rows = [
+            {
+                "chunk_id": f"{doc_id}_{i}",
+                "doc_id": doc_id,
+                "doc_path": doc_path,
+                "chunk_index": i,
+                "text": chunk.text,
+                "tokens": chunk.tokens,
+                "metadata": chunk_metas[i],
+            }
+            for i, chunk in enumerate(chunks)
+        ]
+        await run_in_threadpool(meta_store.add_chunks, chunk_rows)
+        await run_in_threadpool(meta_store.update_chunk_count, doc_id, len(chunks), chars)
+    except Exception as e:
+        logger.error("_write_doc_to_stores: metadata write failed for doc %s (rolling back vectors): %s", doc_id, e)
+        try:
+            # Issue #94: exact chunk-id rollback (see add_batch failure path).
+            await run_in_threadpool(
+                vec_store.delete_by_chunk_ids, [r["id"] for r in records], doc_path
+            )
+        except Exception as de:
+            rollback_failed = True
+            logger.error(
+                "_write_doc_to_stores: metadata-rollback delete_by_doc failed for %s: %s "
+                "(ORPHAN VECTORS LIKELY DURABLE)",
+                doc_id,
+                de,
+            )
+        try:
+            await run_in_threadpool(meta_store.delete_chunks_by_doc, doc_id)
+            await run_in_threadpool(meta_store.delete_document, doc_id)
+        except Exception as de:
+            # Metadata rollback failure is less severe (cheap, row-atomic) but
+            # still an orphan signal — a doc row may point at deleted vectors.
+            rollback_failed = True
+            logger.error(
+                "_write_doc_to_stores: metadata-rollback meta cleanup failed for %s: %s (ORPHAN META ROW)",
+                doc_id,
+                de,
+            )
+        return (False, f"metadata write failed: {e}", rollback_failed)
+
+    logger.info("_write_doc_to_stores: doc %s indexed, %d chunks", doc_id, len(chunks))
+    return (True, None, False)
+
+
+def _chunks_from_ocr(result: ParseResult) -> tuple[list, list[dict]]:
+    """Issue #84/#85: turn drawing-parser text_chunks into ingest chunks.
+
+    OCR chunks are already slice-sized — they bypass the chunker. Each carries
+    per-chunk OCR evidence metadata (confidence, slice ref, bbox) so search
+    results and /ask citations can flag low-confidence text and link back to
+    the source slice image. drawing-parser pages are 0-based; fusion-rag
+    pages are 1-based (matches _parse_pdf's i+1 spans)."""
+    from ..engine.chunker import Chunk
+
+    ocr_base = os.environ.get("FUSION_RAG_OCR_URL", "").strip().rstrip("/")
+    chunks = []
+    extras = []
+    for oc in result.ocr_chunks:
+        text = (oc.get("text") or "").strip()
+        if not text:
+            continue
+        task_id = oc.get("task_id", "")
+        slice_id = oc.get("slice_id", "")
+        extras.append(
+            {
+                "ocr_confidence": oc.get("ocr_confidence"),
+                "ocr_task_id": task_id,
+                "ocr_slice_id": slice_id,
+                "ocr_slice_url": f"{ocr_base}/v1/tasks/{task_id}/slices/{slice_id}" if task_id and slice_id else "",
+                "ocr_bbox": oc.get("bbox"),
+                "ocr_kind": oc.get("kind"),
+            }
+        )
+        chunks.append(
+            Chunk(
+                text=text,
+                index=len(chunks),
+                doc_path=result.file_path,
+                doc_name=result.file_name,
+                doc_type=result.doc_type.value,
+                page=int(oc.get("page", 0)) + 1,
+            )
+        )
+    logger.info("OCR chunks built for %s: %d chunks", result.file_name, len(chunks))
+    return chunks, extras
+
+
+async def _index_document(kb_id: str, file_path: str, contextualize: bool = True) -> dict:
+    kb = _get_base(kb_id)
+    # D7: reject before any parse/embed work if the KB's configured embedding
+    # model differs from the service-wide client (would persist cross-model
+    # vectors). Returns the dict-error contract this internal helper uses.
+    embed = _get_embed_client()
+    if kb.config.embedding_model and kb.config.embedding_model != embed.model:
+        logger.error(
+            "ingest rejected: KB %s configured embedding_model=%r but service runs %r",
+            kb_id,
+            kb.config.embedding_model,
+            embed.model,
+        )
+        return {
+            "error": (
+                f"embedding_model mismatch: KB '{kb_id}' configured '{kb.config.embedding_model}' "
+                f"but the service runs a single embedding model '{embed.model}'. "
+                f"All KBs share one service-wide model (set FUSION_RAG_EMBED at startup)."
+            ),
+            "status_code": 400,
+        }
+    # F15: LFI guard — reject paths escaping the configured ingest root.
+    _check_ingest_root(file_path)
+
+    # F-P1-1/F-P1-2: ingest dedup. Before this, re-ingesting an already-indexed
+    # file_path created a SECOND doc (new doc_id) over the same path — duplicate
+    # vectors, duplicate chunks, and /documents listed the same file twice. The
+    # watch loop and scan both re-call _index_document on changed files, so the
+    # dup accumulated every poll. Resolve the existing doc by file_path; if one
+    # exists, reuse its doc_id (replace semantics) so the path stays unique.
+    # F-P1-2: also compute the content hash up front and persist it into the
+    # doc metadata, so incremental_sync's get_document_by_metadata can skip a
+    # genuinely-unchanged file without re-parsing it.
+    doc_hash = _file_hash(file_path)
+    meta_store = _get_meta_store(kb_id)
+    existing = await run_in_threadpool(meta_store.get_document_by_path, file_path)
+    doc_id = existing["id"] if existing else uuid.uuid4().hex[:16]
+
+    result = await _doc_parser.parse(file_path)
+    if result.error:
+        return {"error": result.error}
+
+    chunk_extra_metas = None
+    if result.ocr_chunks:
+        # Issue #84: scanned PDF handled by the OCR service. Chunks are already
+        # slice-sized — bypass chunker + contextualizer (the slices carry their
+        # own spatial context), keep per-chunk OCR evidence metadata.
+        chunks, chunk_extra_metas = _chunks_from_ocr(result)
+        if not chunks:
+            return {"error": "OCR produced no text chunks"}
+        chunk_dicts = [{"id": f"tmp_{i}", "text": c.text, "context": ""} for i, c in enumerate(chunks)]
+    else:
+        chunker = Chunker(strategy=kb.config.chunk_strategy, chunk_size=kb.config.chunk_size)
+        chunks = await chunker.chunk(result)
+        if not chunks:
+            return {"error": "no chunks produced"}
+
+        contextualizer = Contextualizer(mlx_url=embed.base_url, enabled=contextualize, api_key=embed.api_key)
+        chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
+        # L1: contextualizer raises LLMUnavailable only when EVERY chunk fails. On
+        # total LLM failure, contextualize=True silently degraded retrieval before.
+        # Decision: log + proceed with empty context (ingest must not fail-closed
+        # on an enhancement); the route surfaces this via the contextualize flag.
+        try:
+            chunk_dicts = await contextualizer.contextualize(chunk_dicts, result.content)
+        except LLMUnavailable as e:
+            logger.warning("index_document: contextualization fully unavailable, ingesting without context: %s", e)
+            for cd in chunk_dicts:
+                cd.setdefault("context", "")
+
+    embed_texts = []
+    for cd, c in zip(chunk_dicts, chunks):
+        ctx = cd.get("context", "")
+        embed_texts.append((ctx + " " + c.text).strip() if ctx else c.text)
+    vectors = await embed.embed_batch(embed_texts)
+
+    vec_store = _get_vector_store(kb_id)
+
+    # F-P1-2: stamp the content hash into the persisted doc metadata so a later
+    # sync/scan can short-circuit an unchanged file by hash without re-parsing.
+    doc_metadata = dict(result.metadata)
+    if doc_hash:
+        doc_metadata["content_hash"] = doc_hash
+    # F-P1-1: re-ingest of an existing path is a REPLACE, not an append. Tear
+    # down the old index (vectors + chunks + doc row) BEFORE writing the new one
+    # so the path keeps a single doc. Mirrors replace_document's swap order.
+    old_chunk_count = 0
+    if existing:
+        old_path = existing.get("file_path", file_path)
+        old_chunks = await run_in_threadpool(meta_store.get_chunks_by_doc, doc_id)
+        old_chunk_count = len(old_chunks)
+        # Issue #94: tear down the old index by exact chunk ids — the same
+        # doc_path can be shared by another doc (identical inline doc_name).
+        old_ids = [c["id"] for c in old_chunks]
+        if old_ids:
+            await run_in_threadpool(vec_store.delete_by_chunk_ids, old_ids, old_path)
+        else:
+            await run_in_threadpool(vec_store.delete_by_doc, old_path)
+        await run_in_threadpool(meta_store.delete_chunks_by_doc, doc_id)
+        await run_in_threadpool(meta_store.delete_document, doc_id)
+    # P4-1 + 硬伤B: single write path. vectors-first ordering (hard-undo side
+    # before cheap metadata) with unified rollback lives in _write_doc_to_stores.
+    ok, err, rollback_failed = await _write_doc_to_stores(
+        vec_store=vec_store,
+        meta_store=meta_store,
+        doc_id=doc_id,
+        doc_path=result.file_path,
+        doc_name=result.file_name,
+        doc_type=result.doc_type.value,
+        file_size=result.metadata.get("size", 0),
+        metadata=doc_metadata,
+        chunks=chunks,
+        vectors=vectors,
+        chunk_dicts=chunk_dicts,
+        chars=result.chars,
+        chunk_extra_metas=chunk_extra_metas,
+    )
+    if not ok:
+        # H2: rollback_failed means orphan vectors/meta may be durable. Signal
+        # 503 (not 500) so ops distinguish "clean retry" from "needs cleanup".
+        code = 503 if rollback_failed else 500
+        msg = err
+        if rollback_failed:
+            msg = f"{err} [ROLLBACK FAILED — orphan data likely durable, grep log for ORPHAN doc_id={doc_id}]"
+        return {"error": msg, "status_code": code, "rollback_failed": rollback_failed}
+
+    # L12: per-KB lock so concurrent ingest can't both read N and write N+1.
+    # F-P1-1: on a re-ingest (existing doc) the file_count does NOT grow — it's
+    # the same file — only chunk_count adjusts by the delta.
+    async with _kb_lock(kb_id):
+        if existing:
+            kb.chunk_count = max(0, kb.chunk_count - old_chunk_count + len(chunks))
+        else:
+            kb.file_count += 1
+            kb.chunk_count += len(chunks)
+        _get_kb_manager().update(kb_id, file_count=kb.file_count, chunk_count=kb.chunk_count)
+
+    return {"doc_id": doc_id, "chunks": len(chunks), "chars": result.chars}
+
+
+@router.post("/bases/{kb_id}/documents", dependencies=[Depends(require_kb_action("write"))])
+async def upload_document(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    file_path = data.get("file_path", "")
+    if not file_path:
+        raise HTTPException(400, "file_path is required")
+    result = await _index_document(kb_id, file_path, contextualize=data.get("contextualize", True))
+    if "error" in result:
+        raise HTTPException(result.get("status_code", 400), result["error"])
+    return result
+
+
+@router.post("/bases/{kb_id}/documents/batch", dependencies=[Depends(require_kb_action("write"))])
+async def batch_upload_documents(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    file_paths = data.get("file_paths", [])
+    if not file_paths:
+        raise HTTPException(400, "file_paths is required")
+    # S-P2-1: unbounded file_paths → a client POSTing 10k paths drives 10k
+    # parse+embed+write cycles in one request (exhausts memory + blocks the
+    # event loop for minutes). Cap at RuntimeConfig.max_batch_files; a caller
+    # over the cap gets 413 + the limit so it can chunk its batch.
+    from ..engine.runtime_config import get_runtime_config
+
+    max_batch = get_runtime_config().max_batch_files
+    if len(file_paths) > max_batch:
+        raise HTTPException(
+            413,
+            f"file_paths length {len(file_paths)} exceeds max_batch_files={max_batch}. "
+            f"Split into smaller batches or raise FUSION_RAG_MAX_BATCH_FILES.",
+        )
+
+    contextualize = data.get("contextualize", True)
+    total_chunks = 0
+    total_chars = 0
+    indexed = []
+    errors = []
+
+    for fp in file_paths:
+        if not os.path.isfile(fp):
+            errors.append({"file": fp, "error": "file not found"})
+            continue
+        try:
+            result = await _index_document(kb_id, fp, contextualize=contextualize)
+            if "error" in result:
+                errors.append(
+                    {
+                        "file": fp,
+                        "error": result["error"],
+                        "rollback_failed": result.get("rollback_failed", False),
+                    }
+                )
+                continue
+            indexed.append({"doc_id": result["doc_id"], "file": fp, "chunks": result["chunks"]})
+            total_chunks += result["chunks"]
+            total_chars += result["chars"]
+        except Exception as e:
+            logger.error("batch upload: failed %s: %s", fp, e)
+            errors.append({"file": fp, "error": str(e)})
+
+    return {
+        "indexed": len(indexed),
+        "total_chunks": total_chunks,
+        "total_chars": total_chars,
+        "documents": indexed,
+        "errors": errors,
+    }
+
+
+# Issue #90: inline `content` for these types is base64-encoded BINARY data,
+# not parseable text. Route them through the real file pipeline.
+BINARY_CONTENT_TYPES = {"pdf", "docx", "epub", "pptx", "xlsx"}
+
+
+async def _ingest_binary_inline(
+    kb_id: str, content: str, content_type: str, doc_name: str, data: dict[str, Any]
+) -> dict[str, Any]:
+    # Issue #90: decode base64 -> temp file -> _index_document, so the payload
+    # goes through DocumentParser (PDF text extraction, EPUB chapters, and the
+    # #84 scanned-PDF OCR path when the pages carry no text).
+    try:
+        payload = base64.b64decode(content, validate=True)
+    except Exception as e:
+        raise HTTPException(
+            400,
+            f"content_type '{content_type}' requires base64-encoded binary data in 'content': {e}",
+        )
+    if not payload:
+        raise HTTPException(400, "content decodes to empty bytes")
+    fd, tmp_path = tempfile.mkstemp(suffix=f".{content_type}", prefix="fusion_rag_inline_")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+        result = await _index_document(kb_id, tmp_path, contextualize=data.get("contextualize", True))
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            logger.warning("failed to clean up inline ingest temp file: %s", tmp_path)
+    if "error" in result:
+        raise HTTPException(result.get("status_code", 400), result["error"])
+    # Surface the caller's doc_name alongside the pipeline's doc_id so the
+    # response stays informative (the doc is stored under the temp path).
+    result["doc_name"] = doc_name
+    logger.info(
+        "ingested inline binary %s (%s, %d bytes) into kb %s via temp file",
+        result.get("doc_id"), content_type, len(payload), kb_id,
+    )
+    return result
+
+
+@router.post("/bases/{kb_id}/documents/ingest", dependencies=[Depends(require_kb_action("write"))])
+async def ingest_content(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    kb = _get_base(kb_id)
+    content = data.get("content", "")
+    if not content:
+        raise HTTPException(400, "content is required")
+    # S-P2-1: unbounded inline content → a client POSTing a 500MB string drives
+    # one giant embed_batch + 100k-chunk write in one request (memory blowout +
+    # event-loop freeze). Cap at RuntimeConfig.max_content_chars; over the cap
+    # is 413 with the limit so the caller can split or upload a file instead.
+    from ..engine.runtime_config import get_runtime_config
+
+    max_content = get_runtime_config().max_content_chars
+    if len(content) > max_content:
+        raise HTTPException(
+            413,
+            f"content length {len(content)} exceeds max_content_chars={max_content}. "
+            f"Split the content or ingest as a file, or raise FUSION_RAG_MAX_CONTENT_CHARS.",
+        )
+    content_type = data.get("content_type", "text")
+    metadata = data.get("metadata", {})
+    doc_name = data.get("doc_name", f"inline_{uuid.uuid4().hex[:8]}.{content_type}")
+    # Issue #90: binary document types (pdf/docx/epub) arrive as base64 in
+    # `content`. Indexing the base64 text itself silently pollutes retrieval
+    # with garbage chunks — decode to a temp file and run the FULL parse
+    # pipeline (DocumentParser, incl. the #84 scanned-PDF OCR path) instead.
+    if content_type in BINARY_CONTENT_TYPES:
+        return await _ingest_binary_inline(kb_id, content, content_type, doc_name, data)
+    doc_path = f"inline://{doc_name}"
+
+    # D5: reuse the single content-type map on document.py instead of a
+    # second divergent copy here (a new type added to EXTENSION_MAP/CONTENT_TYPE_MAP
+    # is now visible at the inline-ingest entry too).
+    doc_type_enum = CONTENT_TYPE_MAP.get(content_type, DocumentType.TXT)
+    parse_result = ParseResult(
+        file_path=doc_path,
+        file_name=doc_name,
+        content=content,
+        chars=len(content),
+        doc_type=doc_type_enum,
+        metadata={},
+    )
+
+    chunker = Chunker(strategy=kb.config.chunk_strategy, chunk_size=kb.config.chunk_size)
+    chunks = await chunker.chunk(parse_result)
+
+    contextualize = data.get("contextualize", True)
+    _check_embed_model(kb_id)
+    embed = _get_embed_client()
+    contextualizer = Contextualizer(mlx_url=embed.base_url, enabled=contextualize, api_key=embed.api_key)
+    chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
+    # F-P2-1: ingest_content was the ONE ingest path that did NOT wrap
+    # contextualize in try/except LLMUnavailable — a total LLM failure here
+    # raised out of the handler as a bare 500 (the file/scan/replace paths all
+    # degrade gracefully to empty context). Inline ingest should match: log +
+    # proceed with empty context rather than fail-closed on an enhancement.
+    try:
+        chunk_dicts = await contextualizer.contextualize(chunk_dicts, content)
+    except LLMUnavailable as e:
+        logger.warning("ingest_content: contextualization unavailable, ingesting without context: %s", e)
+        for cd in chunk_dicts:
+            cd.setdefault("context", "")
+
+    embed_texts = []
+    for cd, c in zip(chunk_dicts, chunks):
+        ctx = cd.get("context", "")
+        embed_texts.append((ctx + " " + c.text).strip() if ctx else c.text)
+    vectors = await embed.embed_batch(embed_texts)
+
+    vec_store = _get_vector_store(kb_id)
+    meta_store = _get_meta_store(kb_id)
+
+    doc_id = uuid.uuid4().hex[:16]
+    # P4-1 + 硬伤B: single write path, vectors-first. chunk_metadata=metadata
+    # so the inline content's user metadata lands on each chunk row too.
+    ok, err, rollback_failed = await _write_doc_to_stores(
+        vec_store=vec_store,
+        meta_store=meta_store,
+        doc_id=doc_id,
+        doc_path=doc_path,
+        doc_name=doc_name,
+        doc_type=content_type,
+        file_size=len(content.encode("utf-8")),
+        metadata=metadata,
+        chunks=chunks,
+        vectors=vectors,
+        chunk_dicts=chunk_dicts,
+        chars=len(content),
+        chunk_metadata=metadata,
+    )
+    if not ok:
+        # H2: 503 on rollback_failed (orphan data durable), else 500.
+        code = 503 if rollback_failed else 500
+        msg = err
+        if rollback_failed:
+            msg = f"{err} [ROLLBACK FAILED — orphan data likely durable, grep log for ORPHAN doc_id={doc_id}]"
+        raise HTTPException(code, msg)
+
+    # L12: per-KB lock around the count read-modify-write.
+    async with _kb_lock(kb_id):
+        kb.file_count += 1
+        kb.chunk_count += len(chunks)
+        _get_kb_manager().update(kb_id, file_count=kb.file_count, chunk_count=kb.chunk_count)
+
+    logger.info("ingested inline content %s into kb %s: %d chunks", doc_id, kb_id, len(chunks))
+    return {"doc_id": doc_id, "chunks": len(chunks), "chars": len(content)}
+
+
+_doc_delete_dep = Depends(require_kb_action("delete", resolve_doc_path=True))
+
+
+@router.delete("/bases/{kb_id}/documents/{doc_id}", dependencies=[_doc_delete_dep])
+async def delete_document(kb_id: str, doc_id: str) -> dict[str, Any]:
+    kb = _get_base(kb_id)
+    meta_store = _get_meta_store(kb_id)
+    vec_store = _get_vector_store(kb_id)
+
+    doc = await run_in_threadpool(meta_store.get_document, doc_id)
+    if not doc:
+        raise HTTPException(404, f"Document '{doc_id}' not found")
+
+    doc_path = doc.get("file_path", "")
+    chunks = await run_in_threadpool(meta_store.get_chunks_by_doc, doc_id)
+    chunk_count = len(chunks)
+
+    # P0-8/P1-1: the three-store delete (vectors → chunks → doc) had no
+    # try/except and no lock. A partial failure left orphan vectors with no
+    # metadata (or vice-versa), and concurrent delete/ingest raced the count
+    # read-modify-write. Now: lock the KB, delete under try/except, and on
+    # failure surface 500 instead of reporting a half-deleted doc as "deleted".
+    # R1: every store call runs in a threadpool — delete_by_doc walks LanceDB +
+    # jieba BM25 synchronously and would freeze the event loop on large docs.
+    async with _kb_lock(kb_id):
+        try:
+            # Issue #94: delete by exact chunk ids so a doc sharing the same
+            # doc_path with another doc (identical inline doc_name / same file
+            # re-ingested under a different doc_id) keeps its own chunks. The
+            # doc_path fallback only runs when the doc has no chunk rows.
+            chunk_ids = [c["id"] for c in chunks]
+            if chunk_ids:
+                await run_in_threadpool(vec_store.delete_by_chunk_ids, chunk_ids, doc_path)
+            else:
+                await run_in_threadpool(vec_store.delete_by_doc, doc_path)
+        except Exception as e:
+            logger.error("delete_document: vector delete_by_doc failed for %s: %s", doc_id, e)
+            raise HTTPException(500, f"vector delete failed: {e}") from e
+        try:
+            await run_in_threadpool(meta_store.delete_chunks_by_doc, doc_id)
+            await run_in_threadpool(meta_store.delete_document, doc_id)
+        except Exception as e:
+            logger.error("delete_document: metadata delete failed for %s: %s", doc_id, e)
+            raise HTTPException(500, f"metadata delete failed: {e}") from e
+
+        kb.file_count = max(0, kb.file_count - 1)
+        kb.chunk_count = max(0, kb.chunk_count - chunk_count)
+        _get_kb_manager().update(kb_id, file_count=kb.file_count, chunk_count=kb.chunk_count)
+
+    logger.info("deleted doc %s from kb %s: %d chunks removed", doc_id, kb_id, chunk_count)
+    return {"doc_id": doc_id, "status": "deleted", "chunks_removed": chunk_count}
+
+
+_doc_write_dep = Depends(require_kb_action("write", resolve_doc_path=True))
+
+
+@router.put("/bases/{kb_id}/documents/{doc_id}", dependencies=[_doc_write_dep])
+async def replace_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    kb = _get_base(kb_id)
+    meta_store = _get_meta_store(kb_id)
+    vec_store = _get_vector_store(kb_id)
+
+    doc = await run_in_threadpool(meta_store.get_document, doc_id)
+    if not doc:
+        raise HTTPException(404, f"Document '{doc_id}' not found")
+
+    new_file_path = data.get("file_path", "")
+    if not new_file_path:
+        raise HTTPException(400, "file_path is required for replacement")
+
+    # L11: parse + chunk + embed the NEW file BEFORE deleting the old index.
+    # Before: delete-then-parse left an orphan doc row with zero chunks (and
+    # zero vectors) if the new file failed to parse — destroying the existing
+    # index irrecoverably. Now a parse/embed failure leaves the old index intact.
+    result = await _doc_parser.parse(new_file_path)
+    if result.error:
+        raise HTTPException(400, result.error)
+
+    chunker = Chunker(strategy=kb.config.chunk_strategy, chunk_size=kb.config.chunk_size)
+    chunks = await chunker.chunk(result)
+    if not chunks:
+        raise HTTPException(400, "replacement file produced no chunks (keeping existing index)")
+
+    contextualize = data.get("contextualize", True)
+    _check_embed_model(kb_id)
+    embed = _get_embed_client()
+    contextualizer = Contextualizer(mlx_url=embed.base_url, enabled=contextualize, api_key=embed.api_key)
+    chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
+    try:
+        chunk_dicts = await contextualizer.contextualize(chunk_dicts, result.content)
+    except LLMUnavailable as e:
+        logger.warning("replace_document: contextualization unavailable, replacing without context: %s", e)
+        for cd in chunk_dicts:
+            cd.setdefault("context", "")
+    embed_texts = []
+    for cd, c in zip(chunk_dicts, chunks):
+        ctx = cd.get("context", "")
+        embed_texts.append((ctx + " " + c.text).strip() if ctx else c.text)
+    vectors = await embed.embed_batch(embed_texts)
+
+    # New content prepared successfully — now swap. Old index is removed, new
+    # index written. On a vector/bm25 write failure the old index is already
+    # gone (unavoidable for a replace); _write_doc_to_stores rolls back the new
+    # write so the KB stays consistent (old gone, new gone, metadata clean).
+    old_path = doc.get("file_path", "")
+    old_chunks = await run_in_threadpool(meta_store.get_chunks_by_doc, doc_id)
+    old_chunk_count = len(old_chunks)
+    # R1: wrap the old-index teardown in a threadpool — delete_by_doc walks
+    # LanceDB + jieba BM25 synchronously. Issue #94: by exact chunk ids.
+    old_ids = [c["id"] for c in old_chunks]
+    if old_ids:
+        await run_in_threadpool(vec_store.delete_by_chunk_ids, old_ids, old_path)
+    else:
+        await run_in_threadpool(vec_store.delete_by_doc, old_path)
+    await run_in_threadpool(meta_store.delete_chunks_by_doc, doc_id)
+    await run_in_threadpool(meta_store.delete_document, doc_id)
+
+    # P4-1 + 硬伤B: single write path, vectors-first. doc_id reused for replace.
+    ok, err, rollback_failed = await _write_doc_to_stores(
+        vec_store=vec_store,
+        meta_store=meta_store,
+        doc_id=doc_id,
+        doc_path=result.file_path,
+        doc_name=result.file_name,
+        doc_type=result.doc_type.value,
+        file_size=result.metadata.get("size", 0),
+        metadata=result.metadata,
+        chunks=chunks,
+        vectors=vectors,
+        chunk_dicts=chunk_dicts,
+        chars=result.chars,
+    )
+    if not ok:
+        # H2: 503 on rollback_failed, else 500. On replace the old index is
+        # already gone, so an orphan here means new vectors landed unowned.
+        code = 503 if rollback_failed else 500
+        msg = err
+        if rollback_failed:
+            msg = f"{err} [ROLLBACK FAILED — orphan data likely durable, grep log for ORPHAN doc_id={doc_id}]"
+        raise HTTPException(code, msg)
+
+    # L12: guard the read-modify-write of chunk_count under the per-KB lock.
+    async with _kb_lock(kb_id):
+        kb.chunk_count = max(0, kb.chunk_count - old_chunk_count + len(chunks))
+        _get_kb_manager().update(kb_id, file_count=kb.file_count, chunk_count=kb.chunk_count)
+
+    logger.info("replaced doc %s in kb %s: %d -> %d chunks", doc_id, kb_id, old_chunk_count, len(chunks))
+    return {
+        "doc_id": doc_id,
+        "status": "replaced",
+        "old_chunks": old_chunk_count,
+        "new_chunks": len(chunks),
+        "chars": result.chars,
+    }
+
+
+VALID_DOC_STATUSES = {"active", "deprecated"}
+
+
+@router.patch("/bases/{kb_id}/documents/{doc_id}", dependencies=[_doc_write_dep])
+async def patch_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    """Issue #86: flip a document's lifecycle status without re-indexing.
+
+    status: "active" | "deprecated". Optional superseded_by: doc_id (or any
+    string reference) of the replacing document. Default search drops
+    deprecated docs (status_filter=active); status_filter=deprecated asks for
+    them explicitly. The status is written to the documents table (the
+    authoritative copy the search-time filter reads) and mirrored onto the
+    SQLite chunk rows for direct chunk consumers."""
+    _get_base(kb_id)
+    meta_store = _get_meta_store(kb_id)
+
+    doc = await run_in_threadpool(meta_store.get_document, doc_id)
+    if not doc:
+        raise HTTPException(404, f"Document '{doc_id}' not found")
+
+    status = data.get("status")
+    if status not in VALID_DOC_STATUSES:
+        raise HTTPException(400, f"status must be one of {sorted(VALID_DOC_STATUSES)}, got: {status!r}")
+    patch = {"status": status}
+    superseded_by = data.get("superseded_by")
+    if superseded_by is not None:
+        if not isinstance(superseded_by, str) or not superseded_by.strip():
+            raise HTTPException(400, "superseded_by must be a non-empty string")
+        patch["superseded_by"] = superseded_by.strip()
+
+    await run_in_threadpool(meta_store.update_document_metadata, doc_id, patch)
+    mirrored = await run_in_threadpool(meta_store.set_chunk_meta_field, doc_id, "status", status)
+    if "superseded_by" in patch:
+        await run_in_threadpool(meta_store.set_chunk_meta_field, doc_id, "superseded_by", patch["superseded_by"])
+
+    logger.info(
+        "patched doc %s in kb %s: status=%s superseded_by=%s (%d chunk rows mirrored)",
+        doc_id, kb_id, status, patch.get("superseded_by"), mirrored,
+    )
+    return {
+        "doc_id": doc_id,
+        "status": status,
+        "superseded_by": patch.get("superseded_by"),
+        "chunks_mirrored": mirrored,
+    }
+
+
+_doc_read_dep = Depends(require_kb_action("read", resolve_doc_path=True))
+
+
+@router.get("/bases/{kb_id}/documents/{doc_id}/status", dependencies=[_doc_read_dep])
+async def document_status(kb_id: str, doc_id: str) -> dict[str, Any]:
+    _get_base(kb_id)
+    meta_store = _get_meta_store(kb_id)
+
+    doc = await run_in_threadpool(meta_store.get_document, doc_id)
+    if not doc:
+        task = get_tasks().get(doc_id)
+        if task and task.get("kb_id") == kb_id:
+            return {
+                "doc_id": doc_id,
+                "status": task.get("status", "unknown"),
+                "progress": task.get("progress"),
+                "error": task.get("error"),
+            }
+        raise HTTPException(404, f"Document '{doc_id}' not found")
+
+    chunks = await run_in_threadpool(meta_store.get_chunks_by_doc, doc_id)
+    return {
+        "doc_id": doc_id,
+        "status": "indexed",
+        "file_path": doc.get("file_path", ""),
+        "file_name": doc.get("file_name", ""),
+        "chunk_count": len(chunks),
+        "chars": doc.get("chars", 0),
+    }
+
+
+@router.get("/bases/{kb_id}/documents", dependencies=[Depends(require_kb_action("read"))])
+async def list_documents(kb_id: str) -> list[dict[str, Any]]:
+    _get_base(kb_id)
+    meta_store = _get_meta_store(kb_id)
+    # R1: list_documents scans the SQLite documents table synchronously — wrap
+    # so a large KB doesn't block the event loop (concurrent search/list queue).
+    return await run_in_threadpool(meta_store.list_documents)
+
+
+@router.post("/bases/{kb_id}/scan", dependencies=[Depends(require_kb_action("write"))])
+async def scan_directory(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    kb = _get_base(kb_id)
+    dir_path = data.get("dir_path", "")
+    if not dir_path:
+        raise HTTPException(400, "dir_path is required")
+    # F15: LFI guard on the scanned directory root.
+    _check_ingest_root(dir_path)
+
+    # D4: scan file cap was hardcoded 1000; RuntimeConfig makes it env-tunable.
+    from ..engine.runtime_config import get_runtime_config
+
+    results = await _doc_parser.parse_directory(dir_path, recursive=True, max_files=get_runtime_config().scan_max_files)
+    _check_embed_model(kb_id)
+    embed = _get_embed_client()
+    vec_store = _get_vector_store(kb_id)
+    meta_store = _get_meta_store(kb_id)
+    contextualize = data.get("contextualize", True)
+    contextualizer = Contextualizer(mlx_url=embed.base_url, enabled=contextualize, api_key=embed.api_key)
+
+    total_chunks = 0
+    total_chars = 0
+    file_count = 0
+    errors = []
+
+    for result in results:
+        if result.error:
+            errors.append({"file": result.file_name, "error": result.error})
+            continue
+
+        chunker = Chunker(strategy=kb.config.chunk_strategy, chunk_size=kb.config.chunk_size)
+        chunks = await chunker.chunk(result)
+        if not chunks:
+            continue
+
+        chunk_dicts = [{"id": f"tmp_{i}", "text": c.text} for i, c in enumerate(chunks)]
+        try:
+            chunk_dicts = await contextualizer.contextualize(chunk_dicts, result.content)
+        except LLMUnavailable as e:
+            logger.warning(
+                "scan: contextualization unavailable for %s, indexing without context: %s",
+                result.file_name,
+                e,
+            )
+            for cd in chunk_dicts:
+                cd.setdefault("context", "")
+
+        embed_texts = []
+        for cd, c in zip(chunk_dicts, chunks):
+            ctx = cd.get("context", "")
+            embed_texts.append((ctx + " " + c.text).strip() if ctx else c.text)
+        vectors = await embed.embed_batch(embed_texts)
+
+        doc_id = uuid.uuid4().hex[:16]
+        # P4-1 + 硬伤B: single write path, vectors-first, unified rollback.
+        # On failure this file is rolled back clean; continue scanning the rest.
+        ok, err, rollback_failed = await _write_doc_to_stores(
+            vec_store=vec_store,
+            meta_store=meta_store,
+            doc_id=doc_id,
+            doc_path=result.file_path,
+            doc_name=result.file_name,
+            doc_type=result.doc_type.value,
+            file_size=result.metadata.get("size", 0),
+            metadata=result.metadata,
+            chunks=chunks,
+            vectors=vectors,
+            chunk_dicts=chunk_dicts,
+            chars=result.chars,
+        )
+        if not ok:
+            errors.append(
+                {
+                    "file": result.file_name,
+                    "error": err,
+                    "rollback_failed": rollback_failed,
+                }
+            )
+            continue
+        total_chunks += len(chunks)
+        total_chars += result.chars
+        file_count += 1
+
+    # L12: per-KB lock around the count read-modify-write.
+    async with _kb_lock(kb_id):
+        kb.file_count += file_count
+        kb.chunk_count += total_chunks
+        _get_kb_manager().update(kb_id, file_count=kb.file_count, chunk_count=kb.chunk_count)
+
+    return {
+        "files_indexed": file_count,
+        "total_chunks": total_chunks,
+        "total_chars": total_chars,
+        "errors": errors,
+    }
+
+
+def _file_hash(path: str) -> str:
+    try:
+        with open(path, "rb") as f:
+            return hashlib.md5(f.read()).hexdigest()
+    except Exception:
+        return ""
+
+
+async def _watch_loop(watch_id: str) -> None:
+    watch = get_watches().get(watch_id)
+    if not watch:
+        return
+    kb_id = watch["kb_id"]
+    file_paths = watch["file_paths"]
+    interval = watch.get("poll_interval", 30)
+    hashes = watch["hashes"]
+    logger.info("watch %s: started, %d files, interval=%ds", watch_id, len(file_paths), interval)
+    while watch.get("active", False):
+        await asyncio.sleep(interval)
+        if not watch.get("active", False):
+            break
+        changed = []
+        for fp in file_paths:
+            current = _file_hash(fp)
+            previous = hashes.get(fp, "")
+            if current and current != previous:
+                changed.append(fp)
+                hashes[fp] = current
+        if changed:
+            logger.info("watch %s: %d files changed, re-indexing", watch_id, len(changed))
+            try:
+                for fp in changed:
+                    result = await _index_document(kb_id, fp)
+                    if "error" in result:
+                        logger.warning("watch %s: re-index failed for %s: %s", watch_id, fp, result["error"])
+                watch["last_reindex"] = uuid.uuid4().hex[:8]
+                watch["changes_detected"] = watch.get("changes_detected", 0) + len(changed)
+                logger.info("watch %s: re-indexed %d files", watch_id, len(changed))
+            except Exception as e:
+                logger.error("watch %s: re-index error: %s", watch_id, e, exc_info=True)
+    logger.info("watch %s: stopped", watch_id)
+
+
+@router.post("/bases/{kb_id}/watch", dependencies=[Depends(require_kb_action("write"))])
+async def watch_files(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    _get_base(kb_id)
+    file_paths = data.get("file_paths", [])
+    poll_interval = max(data.get("poll_interval", 30), 10)
+    if not file_paths:
+        raise HTTPException(400, "file_paths is required")
+    # F15: every watched file must sit under the ingest root (re-index reads it).
+    valid_paths = []
+    for fp in file_paths:
+        if not os.path.isfile(fp):
+            continue
+        _check_ingest_root(fp)
+        valid_paths.append(fp)
+    if not valid_paths:
+        raise HTTPException(400, "No valid file paths provided")
+    hashes = {}
+    for fp in valid_paths:
+        h = _file_hash(fp)
+        if h:
+            hashes[fp] = h
+    # R3: per-KB concurrency cap. Without it a client loop-calling /watch
+    # spawned an unbounded number of _watch_loop polling tasks → FD/CPU
+    # exhaustion. Reject over-cap with 429 (Rate Limit) + the current count so
+    # the caller can back off.
+    cap = _watch_cap()
+    active_for_kb = [w for w in get_watches().values() if w["kb_id"] == kb_id and w.get("active")]
+    if len(active_for_kb) >= cap:
+        raise HTTPException(
+            429,
+            f"watch cap reached for KB '{kb_id}': {len(active_for_kb)}/{cap} active watches. "
+            f"Unwatch one before adding another, or raise FUSION_RAG_WATCH_CAP.",
+        )
+    watch_id = uuid.uuid4().hex[:12]
+    watch = {
+        "watch_id": watch_id,
+        "kb_id": kb_id,
+        "file_paths": valid_paths,
+        "poll_interval": poll_interval,
+        "hashes": hashes,
+        "active": True,
+        "changes_detected": 0,
+    }
+    get_watches()[watch_id] = watch
+    get_watches()[watch_id]["_task"] = asyncio.create_task(_watch_loop(watch_id))
+    # R3: persist the registry so a restart restores watches instead of
+    # silently dropping every monitor.
+    _persist_watches(get_watches())
+    logger.info("watch: created watch_id=%s, %d files", watch_id, len(valid_paths))
+    return {"watch_id": watch_id, "file_count": len(valid_paths), "poll_interval": poll_interval}
+
+
+@router.post("/bases/{kb_id}/unwatch", dependencies=[Depends(require_kb_action("write"))])
+async def unwatch_files(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    watch_id = data.get("watch_id", "")
+    watches = get_watches()
+    watch = watches.get(watch_id)
+    if not watch or watch["kb_id"] != kb_id:
+        raise HTTPException(404, f"Watch not found: {watch_id}")
+    watch["active"] = False
+    changes = watch.get("changes_detected", 0)
+    del watches[watch_id]
+    # R3: re-persist so a restart does not re-spawn a just-unwatched monitor.
+    _persist_watches(watches)
+    return {"stopped": True, "watch_id": watch_id, "changes_detected": changes}
+
+
+@router.get("/bases/{kb_id}/watch/status", dependencies=[Depends(require_kb_action("read"))])
+async def watch_status(kb_id: str) -> dict[str, Any]:
+    active = [w for w in get_watches().values() if w["kb_id"] == kb_id and w.get("active")]
+    return {
+        "active_watches": len(active),
+        "watches": [
+            {
+                "watch_id": w["watch_id"],
+                "file_count": len(w["file_paths"]),
+                "changes_detected": w.get("changes_detected", 0),
+                "last_reindex": w.get("last_reindex"),
+            }
+            for w in active
+        ],
+    }

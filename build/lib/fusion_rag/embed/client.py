@@ -1,0 +1,309 @@
+"""Embedding client — generates text embeddings via fusion-mlx HTTP API.
+
+All vector generation goes through fusion-mlx's /v1/embeddings endpoint.
+Never imports MLX or mlx-lm directly.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+
+import httpx
+from fusion_core.config import client_key
+
+logger = logging.getLogger(__name__)
+
+
+class EmbeddingError(RuntimeError):
+    """Raised when embedding fails after all providers (F7 fail-loud).
+
+    Distinguished from generic errors so callers can surface a clear
+    "embedding unavailable" message instead of persisting zero vectors.
+    """
+
+
+def _map_embed_response(data: dict, expected_count: int) -> list[list[float]]:
+    """P0-2: map an /embeddings response to a positionally-correct vector list.
+
+    OpenAI-spec responses carry `item["index"]` (the input position each
+    embedding corresponds to). The prior code did `if vector: vectors.append(...)`
+    — it (a) DROPPED empty/zero embeddings (shortening the list, misaligning
+    every later vector to the wrong input text), and (b) ignored `index`,
+    so any out-of-order provider silently wrote the wrong vector to the wrong
+    cached text. Now: build by index, require exactly `expected_count` non-zero
+    vectors, raise EmbeddingError on mismatch (fail-loud, no silent truncation).
+    """
+    items = data.get("data", [])
+    by_index: dict[int, list[float]] = {}
+    for item in items:
+        vector = item.get("embedding", [])
+        if not vector or all(x == 0.0 for x in vector):
+            raise EmbeddingError("embedding response contains a zero vector (provider failure)")
+        idx = item.get("index", len(by_index))
+        by_index[idx] = vector
+    if len(by_index) != expected_count:
+        raise EmbeddingError(
+            f"embedding count mismatch: got {len(by_index)}, expected {expected_count}"
+        )
+    return [by_index[i] for i in range(expected_count)]
+
+
+class EmbeddingClient:
+    """Generates text embeddings by calling fusion-mlx's /v1/embeddings.
+
+    All model calls are via HTTP — no direct MLX imports.
+    """
+
+    # callers: routes.py search/ask/upload endpoints
+    # API: embed/embed_batch with cache, schema: cache stores text_hash->vector
+    # user instruction: "按照你的方案和计划落地所有phase阶段的需求"
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:11432/v1",
+        model: str = "BGE-M3",
+        api_key: str = "",
+        timeout: float = 30.0,
+        max_retries: int = 3,
+        batch_size: int = 16,
+        cache_enabled: bool = True,
+        fallback_url: str = "",
+        fallback_api_key: str = "",
+    ):
+        if not api_key:
+            # Issue #96: single-point resolution via fusion_core (config-conventions
+            # §2) — canonical name FUSION_CLIENT_KEY (legacy aliases resolved
+            # inside fusion-core). dev: "" + one-shot warning; prod: RuntimeError.
+            api_key = client_key()
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.api_key = api_key
+        if not self.api_key:
+            logger.warning(
+                "EmbeddingClient started without FUSION_CLIENT_KEY; MLX calls will 401 if gateway auth is on"
+            )
+        else:
+            logger.info("EmbeddingClient api_key resolved via fusion_core client_key() (len=%d)", len(self.api_key))
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.batch_size = batch_size
+        self.cache_enabled = cache_enabled
+        self.fallback_url = fallback_url.rstrip("/") if fallback_url else ""
+        self.fallback_api_key = fallback_api_key
+        self._client: httpx.AsyncClient | None = None
+        self._fallback_client: httpx.AsyncClient | None = None
+        self._semaphore = asyncio.Semaphore(4)
+        self._cache = None
+        if cache_enabled:
+            from ..engine.embedding_cache import EmbeddingCache
+
+            self._cache = EmbeddingCache()
+
+    @property
+    def client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            headers = {}
+            if self.api_key:
+                headers["Authorization"] = f"Bearer {self.api_key}"
+            self._client = httpx.AsyncClient(
+                base_url=self.base_url,
+                timeout=self.timeout,
+                headers=headers,
+            )
+        return self._client
+
+    @property
+    def fallback_client(self) -> httpx.AsyncClient:
+        if self._fallback_client is None:
+            headers = {}
+            if self.fallback_api_key:
+                headers["Authorization"] = f"Bearer {self.fallback_api_key}"
+            self._fallback_client = httpx.AsyncClient(
+                base_url=self.fallback_url,
+                timeout=self.timeout,
+                headers=headers,
+            )
+        return self._fallback_client
+
+    async def close(self) -> None:
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+        if self._fallback_client:
+            await self._fallback_client.aclose()
+            self._fallback_client = None
+
+    async def embed(self, text: str) -> list[float]:
+        """Embed a single text string. Returns a vector of floats.
+
+        Raises EmbeddingError on total failure (never returns a zero vector).
+        """
+        results = await self.embed_batch([text])
+        if not results:
+            raise EmbeddingError("embed_batch returned no vectors")
+        vec = results[0]
+        if not vec or all(v == 0.0 for v in vec):
+            raise EmbeddingError("embedding produced a zero vector (all providers failed)")
+        return vec
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """Embed a batch of texts. Returns a list of vectors.
+
+        Raises EmbeddingError if any provider path yields zero vectors, so
+        callers never persist poison into the cache or vector store (F7).
+        """
+        if not texts:
+            return []
+
+        # Check cache
+        if self._cache:
+            cached = self._cache.get_batch(texts, self.model)
+            # O-P1-6: record cache hit/miss so the hit rate is observable — a
+            # falling hit rate is the earliest signal of cache thrash / eviction.
+            from ..engine.metrics import record_cache
+
+            hits = sum(1 for v in cached if v is not None)
+            for _ in range(hits):
+                record_cache(True)
+            for _ in range(len(cached) - hits):
+                record_cache(False)
+            uncached_indices = [i for i, v in enumerate(cached) if v is None]
+            if not uncached_indices:
+                logger.debug("EmbeddingCache: all %d texts hit cache", len(texts))
+                return cached  # type: ignore
+            if uncached_indices:
+                uncached_texts = [texts[i] for i in uncached_indices]
+            else:
+                uncached_texts = texts
+        else:
+            cached = None
+            uncached_indices = list(range(len(texts)))
+            uncached_texts = texts
+
+        # Call API for uncached texts
+        all_vectors: list[list[float]] = []
+        for i in range(0, len(uncached_texts), self.batch_size):
+            batch = uncached_texts[i : i + self.batch_size]
+            vectors = await self._call_embed_api(batch)
+            # F7: reject zero vectors from failure paths before they reach the cache/store.
+            for v in vectors:
+                if not v or all(x == 0.0 for x in v):
+                    raise EmbeddingError("embedding produced a zero vector (provider failure)")
+            all_vectors.extend(vectors)
+
+        # Cache new results — only non-zero vectors (guard repeated in loop above)
+        if self._cache and all_vectors and all(any(x != 0.0 for x in v) for v in all_vectors):
+            self._cache.set_batch(uncached_texts, all_vectors, self.model)
+
+        # Merge cached + new
+        if cached:
+            result = list(cached)
+            for idx, vec in zip(uncached_indices, all_vectors):
+                result[idx] = vec
+            return result  # type: ignore
+
+        return all_vectors
+
+    async def _call_embed_api(self, texts: list[str]) -> list[list[float]]:
+        for attempt in range(self.max_retries):
+            try:
+                async with self._semaphore:
+                    payload = {
+                        "model": self.model,
+                        "input": texts,
+                    }
+                    resp = await self.client.post("/embeddings", json=payload)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    return _map_embed_response(data, len(texts))
+
+            except httpx.TimeoutException:
+                logger.warning("Embedding timeout (attempt %d/%d)", attempt + 1, self.max_retries)
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(1.0 * (attempt + 1))
+            except EmbeddingError:
+                # P0-2: a count-mismatch / zero-vector is a hard failure from
+                # _map_embed_response — don't retry or fall through to fallback
+                # with a silently-truncated list; propagate immediately.
+                raise
+            except Exception as e:
+                logger.error("Embedding failed: %s", e)
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(1.0)
+                else:
+                    if self.fallback_url:
+                        return await self._call_fallback_api(texts)
+                    return await self._call_local_embed(texts)
+
+        if self.fallback_url:
+            return await self._call_fallback_api(texts)
+        return await self._call_local_embed(texts)
+
+    async def _call_fallback_api(self, texts: list[str]) -> list[list[float]]:
+        logger.info("Falling back to cloud embedding: %s", self.fallback_url)
+        try:
+            payload = {"model": self.model, "input": texts}
+            resp = await self.fallback_client.post("/embeddings", json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            vectors = _map_embed_response(data, len(texts))
+            logger.info("Fallback embedding succeeded: %d vectors", len(vectors))
+            return vectors
+        except EmbeddingError:
+            raise
+        except Exception as e:
+            logger.error("Fallback embedding also failed: %s", e)
+        return await self._call_local_embed(texts)
+
+    async def _call_local_embed(self, texts: list[str]) -> list[list[float]]:
+        # Issue #106: fail-fast mode. Cold-loading the local BGE-M3 takes ~2-4
+        # minutes; an operator who prefers a quick retryable error (caller
+        # retries when fusion-mlx recovers) sets FUSION_RAG_EMBED_LOCAL_FALLBACK=0.
+        from ..engine.runtime_config import get_runtime_config
+
+        if not get_runtime_config().embed_local_fallback:
+            logger.warning(
+                "Local embedding fallback disabled (FUSION_RAG_EMBED_LOCAL_FALLBACK=0); failing fast"
+            )
+            raise EmbeddingError(
+                "all embedding providers failed (MLX + fallback); local fallback disabled "
+                "(FUSION_RAG_EMBED_LOCAL_FALLBACK=0) — retry when fusion-mlx recovers"
+            )
+        logger.info("Falling back to local sentence-transformers embedding")
+        try:
+            from .local import embed_local
+
+            loop = asyncio.get_event_loop()
+            vectors = await loop.run_in_executor(None, embed_local, texts, self.model)
+            if vectors and any(any(v != 0.0 for v in vec) for vec in vectors):
+                logger.info("Local embedding succeeded: %d vectors", len(vectors))
+                return vectors
+            logger.warning("Local embedding returned zero vectors")
+        except Exception as e:
+            logger.error("Local embedding failed: %s", e)
+        # F7: never return zero vectors — raise so callers fail loud instead of
+        # persisting poison into cache + vector store.
+        raise EmbeddingError("all embedding providers failed (MLX + fallback + local)")
+
+    async def health(self) -> bool:
+        """Check if embedding is available (MLX HTTP or local sentence-transformers)."""
+        try:
+            resp = await self.client.get("/models", timeout=2.0)
+            if resp.status_code == 200:
+                return True
+        except Exception:
+            logger.debug("health check /models failed")
+        # Issue #106: with the local fallback disabled (fail-fast mode), local
+        # embeddings are NOT part of the serving path — reporting healthy via a
+        # model no request may use would mask a down fusion-mlx (same class of
+        # false-healthy as the #104 startup probe).
+        from ..engine.runtime_config import get_runtime_config
+
+        if not get_runtime_config().embed_local_fallback:
+            return False
+        try:
+            from .local import get_local_model
+
+            return get_local_model(self.model) is not None
+        except Exception:
+            return False

@@ -1,0 +1,460 @@
+"""RAG Evaluator — automated evaluation framework for RAG pipeline quality.
+
+callers: routes.py eval endpoint, CLI evaluation commands
+API: RAGEvaluator.evaluate(kb_id, test_cases) -> EvaluationResult
+schema: test_cases list[dict(query, expected_answer, expected_docs)],
+        results with faithfulness/relevance/context_recall scores
+user instruction: "按照你的方案和计划落地所有phase阶段的需求"
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import sqlite3
+import time
+from pathlib import Path
+from typing import Any
+
+import httpx
+from fusion_core.http_client import get_async_client, with_retry
+
+from .._data_dir import data_dir
+from .llm_errors import LLMUnavailable
+
+logger = logging.getLogger(__name__)
+
+FAITHFULNESS_PROMPT = (
+    "Given the following context and answer, determine if the answer is "
+    "faithful to the context (i.e., all claims in the answer are supported by the context). "
+    'Output a JSON object: {"faithful": true/false, "reason": "..."}\n\n'
+    "Context: {context}\n\nAnswer: {answer}\n\nJSON:"
+)
+
+RELEVANCE_PROMPT = (
+    "Rate the relevance of the following answer to the question on a scale of 0 to 10. "
+    'Output ONLY a JSON object: {"score": <0-10>, "reason": "..."}\n\n'
+    "Question: {query}\n\nAnswer: {answer}\n\nJSON:"
+)
+
+# R2 (issue #124): citation accuracy is a standard judge criterion alongside
+# factual accuracy (Anthropic multi-agent rubric, Glean) — does the answer's
+# content actually come from the CITED sources, not just any context?
+CITATION_ACCURACY_PROMPT = (
+    "You are grading citation accuracy. Given an answer and the sources it cites, "
+    "score what fraction of the answer's substantive claims are supported by the "
+    "cited sources. Unsupported or invented attributions lower the score. "
+    'Output ONLY a JSON object: {"score": <0.0-1.0>, "reason": "..."}\n\n'
+    "Answer: {answer}\n\nCited sources:\n{citations}\n\nJSON:"
+)
+
+
+class RAGEvaluator:
+    """Evaluates RAG pipeline quality with automated metrics."""
+
+    def __init__(self, mlx_url: str = "http://127.0.0.1:11432/v1", model: str = "qwen3.5-9b", db_path: str = ""):
+        self.mlx_url = mlx_url.rstrip("/")
+        self.model = model
+        if not db_path:
+            db_path = str(data_dir() / "eval.db")
+        self.db_path = db_path
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._init_db()
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        # A8: pool is the single source of truth (dedup + is_closed check).
+        # Drop the self._client check-then-assign cache that could hold a
+        # pool-evicted/closed reference.
+        return get_async_client(self.mlx_url, timeout=60.0)
+
+    async def aclose(self) -> None:
+        # Pool-managed: nothing to close here.
+        return None
+
+    def _get_conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_db(self) -> None:
+        conn = self._get_conn()
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS eval_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kb_id TEXT NOT NULL,
+                query TEXT NOT NULL,
+                expected_answer TEXT DEFAULT '',
+                actual_answer TEXT DEFAULT '',
+                faithfulness REAL DEFAULT 0,
+                relevance REAL DEFAULT 0,
+                context_recall REAL DEFAULT 0,
+                retrieval_count INTEGER DEFAULT 0,
+                latency_ms REAL DEFAULT 0,
+                created_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_eval_kb ON eval_results(kb_id);
+        """)
+        conn.commit()
+        conn.close()
+
+    async def evaluate(self, kb_id: str, test_cases: list[dict[str, str]]) -> dict[str, Any]:
+        """Run evaluation on test cases against a knowledge base."""
+
+        results = []
+        for tc in test_cases:
+            query = tc.get("query", "")
+            expected = tc.get("expected_answer", "")
+            expected_docs = tc.get("expected_docs", [])
+
+            if not query:
+                continue
+
+            start = time.time()
+            try:
+                eval_result = await self._evaluate_single(kb_id, query, expected, expected_docs)
+                eval_result["latency_ms"] = (time.time() - start) * 1000
+            except Exception as e:
+                logger.warning("Evaluation failed for query '%s': %s", query[:50], e)
+                eval_result = {
+                    "query": query,
+                    "error": str(e),
+                    "faithfulness": 0,
+                    "relevance": 0,
+                    "context_recall": 0,
+                    "latency_ms": (time.time() - start) * 1000,
+                }
+
+            results.append(eval_result)
+            self._store_result(kb_id, eval_result)
+
+        if not results:
+            return {"total": 0, "avg_faithfulness": 0, "avg_relevance": 0}
+
+        # L14: averages must exclude errored cases — including them
+        # (faithfulness=0) drags the mean down and masks LLM-side failures as
+        # "low-quality answers". Errors are reported per-case, not averaged.
+        scored = [r for r in results if "error" not in r]
+        if scored:
+            avg_f = sum(r.get("faithfulness", 0) for r in scored) / len(scored)
+            avg_r = sum(r.get("relevance", 0) for r in scored) / len(scored)
+            avg_cr = sum(r.get("context_recall", 0) for r in scored) / len(scored)
+        else:
+            avg_f = avg_r = avg_cr = 0.0
+        # R2: citation accuracy averaged only over cases that were scored
+        # for it (cases without citations don't drag the mean).
+        cited = [r for r in scored if "citation_accuracy" in r]
+        avg_ca = sum(r["citation_accuracy"] for r in cited) / len(cited) if cited else 0.0
+
+        out = {
+            "total": len(results),
+            "scored": len(scored),
+            "errors": len(results) - len(scored),
+            "avg_faithfulness": round(avg_f, 3),
+            "avg_relevance": round(avg_r, 3),
+            "avg_context_recall": round(avg_cr, 3),
+            "results": results,
+        }
+        if cited:
+            out["avg_citation_accuracy"] = round(avg_ca, 3)
+            out["citation_scored"] = len(cited)
+        return out
+
+    async def _evaluate_single(self, kb_id: str, query: str, expected: str, expected_docs: list[str]) -> dict[str, Any]:
+        """Evaluate a single query."""
+        from ..embed.client import EmbeddingClient
+        from ..engine.knowledge_base import KnowledgeBaseManager
+        from ..store.vector_store import VectorStore
+
+        try:
+            kbm = KnowledgeBaseManager()
+            kb = kbm.get(kb_id)
+        except KeyError:
+            return {
+                "query": query,
+                "error": f"KB '{kb_id}' not found",
+                "faithfulness": 0,
+                "relevance": 0,
+                "context_recall": 0,
+            }
+
+        embed = EmbeddingClient()
+        vec_store = VectorStore(kb.vector_path)
+
+        query_vector = await embed.embed(query)
+        if not query_vector or all(v == 0.0 for v in query_vector):
+            return {"query": query, "error": "Embedding failed", "faithfulness": 0, "relevance": 0, "context_recall": 0}
+
+        chunks = vec_store.search(query_vector, top_k=kb.config.max_results)
+        context = "\n\n".join(f"[{c['doc_name']}] {c['text'][:2000]}" for c in chunks)
+        answer_result = await self._generate_answer(query, context, chunks)
+        actual_answer = answer_result.get("answer", "")
+
+        # Compute metrics
+        faithfulness = await self._score_faithfulness(context, actual_answer)
+        relevance = await self._score_relevance(query, actual_answer)
+        context_recall = self._compute_context_recall(chunks, expected_docs)
+
+        result = {
+            "query": query,
+            "expected_answer": expected[:200],
+            "actual_answer": actual_answer[:200],
+            "retrieval_count": len(chunks),
+            "faithfulness": faithfulness,
+            "relevance": relevance,
+            "context_recall": context_recall,
+        }
+
+        # R2 (issue #124): citation accuracy — only scored when the answer
+        # carries citations. Absent field (no citations) is NOT a 0.
+        answer_citations = answer_result.get("citations") or []
+        if answer_citations:
+            result["citation_accuracy"] = await self._score_citation_accuracy(
+                actual_answer, answer_citations
+            )
+        return result
+
+    async def _score_citation_accuracy(self, answer: str, citations: list[dict]) -> float:
+        if not answer or not citations:
+            return 0.0
+        cited_text = "\n".join(
+            f"- [{c.get('doc_name', '')}] {c.get('snippet', '')}" for c in citations
+        )
+        prompt = CITATION_ACCURACY_PROMPT.format(answer=answer[:1000], citations=cited_text[:3000])
+        try:
+            client = await self._get_client()
+            resp = await with_retry(
+                lambda: client.post(
+                    f"{self.mlx_url}/chat/completions",
+                    json={
+                        "model": self.model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 200,
+                        "temperature": 0.0,
+                    },
+                ),
+                retries=2,
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"].strip()
+            if not content:
+                logger.warning("citation accuracy empty content")
+                raise ValueError("empty_content")
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if not match:
+                raise ValueError("no JSON in judge response")
+            score = float(json.loads(match.group(0)).get("score", 0.0))
+            return max(0.0, min(1.0, score))
+        except Exception as e:
+            logger.warning("citation accuracy scoring failed: %s", e)
+            return 0.0
+
+    async def _generate_answer(self, question: str, context: str, chunks: list[dict]) -> dict[str, Any]:
+        import os
+
+        system_prompt = os.environ.get(
+            "FUSION_RAG_SYSTEM_PROMPT",
+            "You are a knowledge base assistant. Answer the user's question based "
+            "on the provided context. If the context doesn't contain the answer, "
+            "say so. Always cite the source document names.",
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"},
+        ]
+        try:
+            client = await self._get_client()
+            resp = await with_retry(
+                lambda: client.post(
+                    f"{self.mlx_url}/chat/completions",
+                    json={
+                        "model": self.model,
+                        "messages": messages,
+                        "max_tokens": 4096,
+                        "temperature": 0.3,
+                    },
+                ),
+                retries=2,
+            )
+            resp.raise_for_status()
+            answer_text = resp.json()["choices"][0]["message"]["content"]
+            if not answer_text or not answer_text.strip():
+                logger.warning("eval RAG empty content, question=%s", question[:50])
+                raise ValueError("empty_content")
+        except Exception as e:
+            # L1 residual: do NOT return "Failed to generate answer: {e}" as a
+            # real answer — that string got scored by _score_faithfulness as if
+            # it were the model's output, polluting the metrics. Propagate so
+            # _evaluate_case's outer except records this case as an error
+            # (excluded from the L14 averages), not a 0-score "answer".
+            logger.error("eval RAG answer generation failed (propagating): %s", e)
+            raise LLMUnavailable("eval answer generation failed") from e
+
+        seen = set()
+        sources = []
+        for c in chunks:
+            doc_name = c.get("doc_name", "unknown")
+            if doc_name not in seen:
+                seen.add(doc_name)
+                sources.append(
+                    {
+                        "doc_name": doc_name,
+                        "doc_path": c.get("doc_path", ""),
+                        "score": c.get("score", 0),
+                        "snippet": c.get("text", "")[:200],
+                    }
+                )
+        # R2 (issue #124): per-chunk citations so the judge can score
+        # citation accuracy (answer claims vs cited evidence).
+        citations = [
+            {
+                "doc_name": c.get("doc_name", "unknown"),
+                "chunk_id": c.get("chunk_id", ""),
+                "snippet": c.get("text", "")[:200],
+            }
+            for c in chunks
+        ]
+        return {"answer": answer_text, "sources": sources, "citations": citations}
+
+    async def _score_faithfulness(self, context: str, answer: str) -> float:
+        if not answer or not context:
+            return 0.0
+        prompt = FAITHFULNESS_PROMPT.format(context=context[:3000], answer=answer[:1000])
+        try:
+            client = await self._get_client()
+            resp = await with_retry(
+                lambda: client.post(
+                    f"{self.mlx_url}/chat/completions",
+                    json={
+                        "model": self.model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 200,
+                        "temperature": 0.0,
+                    },
+                ),
+                retries=2,
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"].strip()
+            if not content:
+                logger.warning("Faithfulness empty content, answer=%s", answer[:50])
+                raise ValueError("empty_content")
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if not match:
+                logger.warning("Faithfulness no JSON in content: %s", content[:80])
+                raise ValueError("no_json")
+            data = json.loads(match.group())
+            return 1.0 if data.get("faithful", False) else 0.0
+        except Exception as e:
+            # L1: do not return 0.5 — a magic midpoint makes a failed LLM
+            # score look like a real mediocre faithfulness. Propagate so the
+            # per-test catch in evaluate() records it as an error, not a score.
+            logger.warning("Faithfulness scoring failed (propagating): %s", e)
+            raise LLMUnavailable("faithfulness scoring failed") from e
+
+    async def _score_relevance(self, query: str, answer: str) -> float:
+        if not answer:
+            return 0.0
+        prompt = RELEVANCE_PROMPT.format(query=query, answer=answer[:1000])
+        try:
+            client = await self._get_client()
+            resp = await with_retry(
+                lambda: client.post(
+                    f"{self.mlx_url}/chat/completions",
+                    json={
+                        "model": self.model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 200,
+                        "temperature": 0.0,
+                    },
+                ),
+                retries=2,
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"].strip()
+            if not content:
+                logger.warning("Relevance empty content, query=%s", query[:50])
+                raise ValueError("empty_content")
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if not match:
+                logger.warning("Relevance no JSON in content: %s", content[:80])
+                raise ValueError("no_json")
+            data = json.loads(match.group())
+            return min(data.get("score", 0) / 10.0, 1.0)
+        except Exception as e:
+            # L1: do not return 0.5 — magic midpoint masks failed scoring.
+            logger.warning("Relevance scoring failed (propagating): %s", e)
+            raise LLMUnavailable("relevance scoring failed") from e
+
+    @staticmethod
+    def _compute_context_recall(retrieved: list[dict], expected_docs: list[str]) -> float:
+        if not expected_docs:
+            return 1.0
+        if not retrieved:
+            return 0.0
+        retrieved_names = {r.get("doc_name", "") for r in retrieved}
+        hits = sum(1 for d in expected_docs if d in retrieved_names)
+        return hits / len(expected_docs)
+
+    def _store_result(self, kb_id: str, result: dict) -> None:
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                """INSERT INTO eval_results
+                   (kb_id, query, expected_answer, actual_answer,
+                    faithfulness, relevance, context_recall,
+                    retrieval_count, latency_ms, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    kb_id,
+                    result.get("query", ""),
+                    result.get("expected_answer", ""),
+                    result.get("actual_answer", ""),
+                    result.get("faithfulness", 0),
+                    result.get("relevance", 0),
+                    result.get("context_recall", 0),
+                    result.get("retrieval_count", 0),
+                    result.get("latency_ms", 0),
+                    time.time(),
+                ),
+            )
+            conn.commit()
+        except Exception as e:
+            logger.warning("Failed to store eval result: %s", e)
+        finally:
+            conn.close()
+
+    def get_history(self, kb_id: str = "", limit: int = 50) -> list[dict]:
+        conn = self._get_conn()
+        try:
+            if kb_id:
+                rows = conn.execute(
+                    "SELECT * FROM eval_results WHERE kb_id = ? ORDER BY created_at DESC LIMIT ?",
+                    (kb_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM eval_results ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+
+def citation_accuracy_from_trace(
+    answer_citations: list[dict], trace_chunk_ids: list[str]
+) -> float:
+    """R2 (issue #124): citation-accuracy proxy from a citation-audit trace.
+
+    Fraction of an /ask response's citations whose chunk_id appears in the
+    retrieval trace's citation set — i.e. the answer cites evidence the
+    retrieval actually returned. 1.0 when every cited chunk is grounded in
+    the trace; 0.0 when nothing matches or either side is empty."""
+    if not answer_citations or not trace_chunk_ids:
+        return 0.0
+    trace = set(trace_chunk_ids)
+    hits = sum(
+        1 for c in answer_citations if c.get("chunk_id", "") in trace
+    )
+    return round(hits / len(answer_citations), 4)

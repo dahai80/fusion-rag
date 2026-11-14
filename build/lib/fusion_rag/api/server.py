@@ -1,0 +1,485 @@
+"""Fusion-RAG FastAPI server — wires together all routes and services."""
+
+from __future__ import annotations
+
+import logging
+import os
+from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_v
+
+import uvicorn
+from fastapi import Depends, FastAPI
+from fastapi.responses import JSONResponse
+
+from ..embed.client import EmbeddingClient
+from ..engine.knowledge_base import KnowledgeBaseManager
+from .app_state import bind_app_state, init_app_state
+from .auth import verify_api_key
+from .mcp_server import router as mcp_router
+from .routes import router as kb_router
+from .routes_auth import router as auth_router
+from .routes_bnup import router as bnup_router
+
+logger = logging.getLogger(__name__)
+
+
+def _pkg_version() -> str:
+    # O-P1-4: prior `version="0.6.0"` was a hardcoded string that drifted from
+    # pyproject.toml — by audit the app advertised 0.6.0 while the package was
+    # 0.7.2. Read the installed package metadata (importlib.metadata is stdlib,
+    # works whether installed editable or from a wheel) so /health/openapi never
+    # lie about the running version. Fall back only if the package is not
+    # importable (running from source without install).
+    try:
+        return _pkg_v("fusion-rag")
+    except PackageNotFoundError:
+        return "0.0.0+unknown"
+
+
+def create_app(
+    kb_storage_dir: str = "",
+    mlx_base_url: str = "http://127.0.0.1:11432/v1",
+    embedding_model: str = "BGE-M3",
+    mlx_api_key: str = "",
+    fallback_url: str = "",
+    fallback_api_key: str = "",
+) -> FastAPI:
+    kb_manager = KnowledgeBaseManager(storage_dir=kb_storage_dir)
+    embed_client = EmbeddingClient(
+        base_url=mlx_base_url,
+        model=embedding_model,
+        api_key=mlx_api_key,
+        fallback_url=fallback_url,
+        fallback_api_key=fallback_api_key,
+    )
+
+    # A1/A6: own the resource lifecycle. Without a lifespan the pooled
+    # httpx clients (fusion_core.http_client) and EmbeddingClient's own
+    # clients are never aclose'd on shutdown/reload — FDs leak across reloads
+    # and the LRU pool's eviction tasks never run if the loop is exiting.
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # 硬伤1: populate per-app state on app.state (shared services + the
+        # per-app mutable dicts tasks/watches/kb_locks/project_kb_map). The
+        # contextvar-binding middleware is registered on the app below (must
+        # happen before the middleware stack is built, not inside lifespan).
+        init_app_state(app, kb_manager, embed_client)
+        logger.info("lifespan: startup complete, kb_manager=%d bases", kb_manager.count)
+        try:
+            yield
+        finally:
+            logger.info("lifespan: shutdown — closing clients and pooled connections")
+            # P1-9: cancel every watch task so a reload doesn't orphan background
+            # loops holding KB handles. Previously the tasks dict was dropped on
+            # shutdown while the asyncio.create_task loops kept running.
+            try:
+                from .app_state import get_watches
+
+                for watch in get_watches().values():
+                    watch["active"] = False
+                    task = watch.get("_task")
+                    if task is not None and not task.done():
+                        task.cancel()
+                get_watches().clear()
+            except Exception as e:
+                logger.warning("lifespan: watch cancel failed: %s", e)
+            try:
+                await embed_client.close()
+            except Exception as e:
+                logger.warning("lifespan: embed_client close failed: %s", e)
+            # 硬伤A/P0-3: close every pooled VectorStore backend handle (LanceDB
+            # table refs / fusion_store lmdb envs) so no FD/env leaks across
+            # reload.
+            try:
+                from .app_state import close_vec_store_pool
+
+                await close_vec_store_pool()
+            except Exception as e:
+                logger.warning("lifespan: vec_store pool close failed: %s", e)
+            # P2-8: close every pooled admin manager's sqlite conn (VersionManager
+            # / SearchTemplateManager / PermissionManager / AuditLogger / BenchRunner)
+            # so no FD/lock leaks across reload.
+            try:
+                from .app_state import close_admin_pool
+
+                await close_admin_pool()
+            except Exception as e:
+                logger.warning("lifespan: admin pool close failed: %s", e)
+            # A-P1-1: close every pooled MetadataStore conn (one sqlite conn per
+            # KB metadata.db, opened lazily by get_meta_store). A-P2-1: flush the
+            # TrajectoryWriter singleton. Both were constructed-per-request before
+            # and never closed — FD leak across a long run / reload.
+            try:
+                from .app_state import close_meta_pool, close_trajectory_writer
+
+                await close_meta_pool()
+                await close_trajectory_writer()
+            except Exception as e:
+                logger.warning("lifespan: meta/trajectory close failed: %s", e)
+            try:
+                from fusion_core.http_client import close_all
+
+                await close_all()
+            except Exception as e:
+                logger.warning("lifespan: fusion_core close_all failed: %s", e)
+            # Issue #68: drop the identity client cache. The pooled httpx client
+            # is closed by close_all() above; this just clears the verify cache.
+            try:
+                from .identity import close_identity_client
+
+                await close_identity_client(app)
+            except Exception as e:
+                logger.warning("lifespan: identity client close failed: %s", e)
+
+    app = FastAPI(
+        title="Fusion-RAG",
+        description="Apple Silicon native offline vector knowledge base backend",
+        version=_pkg_version(),
+        lifespan=lifespan,
+    )
+
+    # Issue #68: fusion-identity integration. When FUSION_RAG_REQUIRE_IDENTITY=1,
+    # build the identity client up front and stash it on app.state so the tenant
+    # middleware can call /verify authoritatively. OFF by default (None).
+    from .identity import IdentityClient, identity_enabled, identity_url
+
+    if identity_enabled():
+        app.state.identity_client = IdentityClient()
+        logger.info("identity integration ON: verifying JWTs via %s", identity_url())
+    else:
+        app.state.identity_client = None
+        logger.debug("identity integration OFF (FUSION_RAG_REQUIRE_IDENTITY unset)")
+
+    # 硬伤1: bind each request's app.state to a contextvar so the no-arg
+    # accessors (get_kb_manager / get_embed_client / ...) resolve the current
+    # request's app without a Request parameter. Registered on the app object,
+    # not in the lifespan — middleware cannot be added after the stack starts.
+    app.middleware("http")(bind_app_state)
+
+    # O-P2-2: request-id correlation. Registered after bind_app_state so it runs
+    # innermost — the id is set BEFORE the route handler logs, and the metrics
+    # middleware (registered next, outermost) can read the id from the
+    # contextvar if it needs to tag a RED metric. Echoes X-Request-ID on the
+    # response so a client/gateway can trace a call end-to-end.
+    from .logging_setup import request_id_middleware
+
+    app.middleware("http")(request_id_middleware)
+
+    # R5: RED metrics — record request count / latency / errors per
+    # endpoint+kb_id. Registered after bind_app_state (order matters: this runs
+    # last in the stack, so route params + final status are available).
+    from ..engine.metrics import get_metrics, metrics_middleware
+
+    app.middleware("http")(metrics_middleware)
+
+    # Issue #61: gateway-origin + tenant scoping. Binds the authoritative
+    # tenant (X-Fusion-Tenant) for the request and, when
+    # FUSION_RAG_REQUIRE_GATEWAY is on, rejects /kb/* requests that did not
+    # transit the gateway (missing X-Fusion-Route). Registered outermost so the
+    # tenant contextvar is set before any route handler reads it.
+    from .tenant import tenant_middleware
+
+    app.middleware("http")(tenant_middleware)
+
+    app.include_router(kb_router)
+    app.include_router(mcp_router)
+    app.include_router(auth_router)
+    app.include_router(bnup_router)
+
+    # Issue #106: map EmbeddingError to a clean 503 instead of a bare 500
+    # "Internal Server Error". EmbeddingError means every provider (MLX +
+    # cloud fallback + local) is down or fail-fast disabled — a retryable
+    # service-dependency state, so 503 (not 500) tells callers to back off
+    # and retry rather than treat it as a bug. One app-wide handler covers
+    # every embed call site (/search, /ask, ingest, /similar, bnup).
+    from ..embed.client import EmbeddingError
+
+    @app.exception_handler(EmbeddingError)
+    async def _embedding_error_handler(request, exc: EmbeddingError) -> JSONResponse:
+        logger.warning("EmbeddingError -> 503: %s", exc)
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+    # Console UI: single static page served at /shell/fusion-rag/ — the same
+    # path convention every web-shell module uses, so a gateway proxy of
+    # /shell/fusion-rag/ -> :11436 maps 1:1 with zero rewrite. The page calls
+    # the /kb API with PAGE-relative urls (issue #109), so the /kb router is
+    # ALSO mounted under this subpath — and it must be registered BEFORE the
+    # StaticFiles mount: Starlette matches routes in registration order, and
+    # the mount would otherwise swallow /shell/fusion-rag/kb/* as 404s.
+    app.include_router(kb_router, prefix="/shell/fusion-rag")
+    # Issue #113: the admin console surface calls /kb/auth/keys (API-key
+    # management) via page-relative paths; the auth router is mounted
+    # separately from the kb router at root level, so it needs its own
+    # subpath inclusion or those calls 404 behind the gateway.
+    app.include_router(auth_router, prefix="/shell/fusion-rag")
+
+    @app.get("/shell/fusion-rag/health", include_in_schema=False)
+    async def health_subpath():
+        # Issue #109: the console's /health pill uses page-relative paths too,
+        # so the liveness payload must exist under the console subpath.
+        # Registered BEFORE the StaticFiles mount (route order = match order;
+        # the mount would otherwise swallow this path). `health` is defined
+        # later in create_app but resolves at request time.
+        return await health()
+
+    from importlib import resources as _resources
+
+    from fastapi.responses import RedirectResponse
+    from starlette.staticfiles import StaticFiles
+
+    try:
+        _console_dir = str(_resources.files("fusion_rag") / "console")
+        app.mount(
+            "/shell/fusion-rag",
+            StaticFiles(directory=_console_dir, html=True),
+            name="console",
+        )
+    except Exception as e:
+        logger.warning("console UI unavailable (missing package data?): %s", e)
+
+    @app.get("/console", include_in_schema=False)
+    async def _console_redirect():
+        return RedirectResponse(url="/shell/fusion-rag/", status_code=307)
+
+    @app.get("/health")
+    async def health():
+        # O-P1-1: /health is LIVENESS only — a cheap "the process is up and the
+        # event loop turns" probe. It must NOT check downstream deps (embed
+        # health, store writability) or a transient MLX hiccup evicts the pod
+        # from a load balancer and cascades restarts. Deps live on /ready.
+        # Issue #93: llm_auth is an INFORMATIONAL cached field (ok/rejected/
+        # unknown, updated by the startup probe and each generation call) — it
+        # never gates the liveness status itself.
+        from ..engine.llm_auth_state import get_llm_auth_status
+
+        return {
+            "status": "ok",
+            "service": "fusion-rag",
+            "version": _pkg_version(),
+            "llm_auth": get_llm_auth_status(),
+        }
+
+    @app.get("/ready")
+    async def ready():
+        # O-P1-1: /ready is READINESS — is the service actually able to serve a
+        # real request right now? Checks the embedding backend (fusion-mlx
+        # reachable + model loadable) and the per-KB store root writability.
+        # A scrape/k8s readinessProbe points here so a not-yet-ready instance
+        # is pulled from rotation WITHOUT being killed (liveness stays /health).
+        # Failures surface as 503 + a `ready: false` body with the failing check.
+        from .app_state import get_kb_manager
+
+        checks: dict[str, str] = {}
+        ready = True
+        try:
+            # health() is async — await it, else the coroutine is never
+            # awaited and the check silently reports "ok" even when MLX is
+            # down (defeating the readiness probe).
+            # Issue #106: the RETURN VALUE matters too — health() returns
+            # False (no exception) when MLX is down and the local fallback is
+            # disabled; treating that as "ok" was a false-ready.
+            if await embed_client.health():
+                checks["embedding"] = "ok"
+            else:
+                ready = False
+                checks["embedding"] = "unavailable: embedding backend down"
+        except Exception as e:
+            ready = False
+            checks["embedding"] = f"unavailable: {e}"
+        try:
+            import os as _os
+            import tempfile
+
+            stores_dir = get_kb_manager().storage_dir
+            _os.makedirs(stores_dir, exist_ok=True)
+            with tempfile.TemporaryFile(dir=stores_dir):
+                pass
+            checks["store"] = "ok"
+        except Exception as e:
+            ready = False
+            checks["store"] = f"not writable: {e}"
+        # O-P2-3: surface whether the startup health gate passed. run_server
+        # calls EmbeddingClient.health() before serving; if MLX was down at
+        # boot the gate logs + the operator sees it here too.
+        status_code = 200 if ready else 503
+        return JSONResponse(
+            {"ready": ready, "checks": checks, "service": "fusion-rag", "version": _pkg_version()},
+            status_code=status_code,
+        )
+
+    @app.get("/metrics", dependencies=[Depends(verify_api_key)])
+    async def metrics() -> str:
+        # R5: Prometheus text exposition. S-P2-2: auth — /metrics exposes
+        # aggregate counters (no per-user PII), but on an authenticated instance
+        # an unauthenticated scrape leaks volume/latency signal. Depends(
+        # verify_api_key) gates it the same way write endpoints are: NoAuth
+        # backend (no admin key) -> verify returns None -> open (local-first
+        # single-user box); ApiKey backend -> missing/wrong key -> 401. No
+        # separate env flag — the auth backend itself is the switch.
+        from starlette.responses import PlainTextResponse
+
+        return PlainTextResponse(
+            get_metrics().render_prometheus(),
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
+
+    return app
+
+
+def _apply_process_title(port: int) -> None:
+    # Issue #92: rename the process so `ps`/Activity Monitor show the product
+    # name instead of a bare homebrew "Python". Soft dependency — a missing
+    # setproctitle only means the title stays default, never a startup failure.
+    # start.sh stops by PID file, so the rename cannot break lifecycle control.
+    try:
+        import setproctitle
+
+        setproctitle.setproctitle(f"fusion-rag serve :{port}")
+        logger.info("process title set: fusion-rag serve :%d", port)
+    except Exception as e:
+        logger.debug("setproctitle unavailable, keeping default process title: %s", e)
+
+
+def run_server(
+    host: str = "127.0.0.1",
+    port: int = 11436,
+    kb_storage_dir: str = "",
+    mlx_base_url: str = "http://127.0.0.1:11432/v1",
+    embedding_model: str = "BGE-M3",
+    mlx_api_key: str = "",
+    log_level: str = "INFO",
+) -> None:
+    # O-P1-2 + O-P2-2: structured logging — RotatingFileHandler (10MB x 5) so a
+    # long run no longer fills the disk, optional JSON formatter
+    # (FUSION_RAG_LOG_FORMAT=json) for an aggregator, and a request-id contextvar
+    # the middleware below tags every log line with. Replaces the prior
+    # basicConfig (single unbounded StreamHandler).
+    from .logging_setup import configure_logging
+
+    configure_logging(log_level)
+    fallback_url = os.environ.get("FUSION_RAG_FALLBACK_URL", "")
+    fallback_api_key = os.environ.get("FUSION_RAG_FALLBACK_API_KEY", "")
+    app = create_app(
+        kb_storage_dir=kb_storage_dir,
+        mlx_base_url=mlx_base_url,
+        embedding_model=embedding_model,
+        mlx_api_key=mlx_api_key,
+        fallback_url=fallback_url,
+        fallback_api_key=fallback_api_key,
+    )
+    # O-P1-5: graceful drain. Default uvicorn timeout_graceful_shutdown is ~5s
+    # (or 0 = immediate). A fusion-rag request may hold an in-flight LLM call
+    # (rerank/contextualize/RAG generation) whose retry deadline can run tens
+    # of seconds. A SIGTERM during one cut it off mid-response. Give in-flight
+    # requests 30s to drain before the loop hard-stops, matching the LLM retry
+    # deadline so a deploy/restart finishes pending work instead of aborting.
+    # O-P1-3: silence uvicorn's per-request access log — it logs the full query
+    # string (PII: the search query) at INFO. Keep app logs (which we control
+    # and have already downgraded PII fields to DEBUG); drop uvicorn.access so
+    # the raw request line never hits the log sink.
+    _apply_process_title(port)
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level=log_level.lower(),
+        timeout_graceful_shutdown=30,
+        access_log=False,
+    )
+
+
+def _run_startup_probe(mlx_url: str, embed_model: str, mlx_api_key: str) -> None:
+    # Issue #104: the O-P2-3 startup gate used to call EmbeddingClient.health()
+    # bare — an async def, so it only created a coroutine (never awaited, never
+    # ran) and the probe passed unconditionally. Extracted so the gate is unit-
+    # testable. Probes fusion-mlx /models DIRECTLY rather than via health():
+    # health() also accepts the local sentence-transformers fallback, which
+    # would mask a down fusion-mlx on boxes where the local model is installed
+    # — the gate's contract (issue #104 acceptance) is MLX reachability.
+    import asyncio
+
+    probe = EmbeddingClient(base_url=mlx_url, model=embed_model, api_key=mlx_api_key)
+
+    async def _mlx_reachable() -> bool:
+        resp = await probe.client.get("/models", timeout=2.0)
+        return resp.status_code == 200
+
+    if not asyncio.run(_mlx_reachable()):
+        raise RuntimeError("fusion-mlx /models returned non-200")
+    logger.info("startup probe: fusion-mlx embedding backend reachable at %s", mlx_url)
+
+
+if __name__ == "__main__":
+    from fusion_core.config import client_key, resolve_api_key, service_port
+
+    host = os.environ.get("FUSION_RAG_HOST", "127.0.0.1")
+    # Issue #96: single-point resolution via fusion_core (config-conventions §2)
+    # — FUSION_RAG_PORT (registered in port-registry.yaml), then the canonical
+    # client key FUSION_CLIENT_KEY (legacy aliases resolved inside fusion-core)
+    # with the local-first ~/.fusion-mlx/settings.json fallback. All resolvers
+    # live in fusion-core; this repo keeps one-line call sites only.
+    port = service_port("rag", default=11436)
+    mlx_url = os.environ.get("FUSION_MLX_URL", "http://127.0.0.1:11432/v1")
+    embed_model = os.environ.get("FUSION_RAG_EMBED", "BGE-M3")
+    mlx_api_key = client_key() or resolve_api_key()
+    log_level = os.environ.get("FUSION_RAG_LOG_LEVEL", "INFO")
+    # Issue #104: configure a console handler BEFORE the startup probe —
+    # configure_logging() only runs inside run_server(), so the probe's log
+    # lines were dropped at boot (no root handler; lastResort prints WARNING+
+    # only, which is why a FAILED boot was visible but a PASSING boot was not).
+    # configure_logging() later reuses this console handler (it skips adding
+    # its own when a non-owned StreamHandler exists) and adds the file sink.
+    logging.basicConfig(
+        level=getattr(logging, log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    # O-P2-3: startup health gate. CLAUDE.md states "fusion-mlx must be running"
+    # but nothing enforced it — a fusion-rag started before fusion-mlx served
+    # /health=ok while every embed call 401'd until MLX came up (false healthy).
+    # Probe the embedding backend once at boot; if unreachable, log loudly and
+    # exit non-zero so a supervisor/process manager does not route traffic to a
+    # service that cannot answer a real request. FUSION_RAG_SKIP_STARTUP_PROBE=1
+    # opts out (e.g. MLX is known to come up later on a constrained box).
+    if os.environ.get("FUSION_RAG_SKIP_STARTUP_PROBE", "").strip() not in ("1", "true", "yes"):
+        import sys
+
+        try:
+            _run_startup_probe(mlx_url, embed_model, mlx_api_key)
+        except Exception as e:
+            logger.error(
+                "startup probe FAILED: fusion-mlx not reachable at %s (%s). "
+                "Start fusion-mlx first, or set FUSION_RAG_SKIP_STARTUP_PROBE=1 to bypass. Exiting.",
+                mlx_url,
+                e,
+            )
+            sys.exit(1)
+        # Issue #93: a stale FUSION_CLIENT_KEY breaks EVERY /ask generation
+        # but left /search working, so the degradation went unnoticed until a
+        # failed acceptance run. Probe the LLM credential with a cheap /models
+        # call and flag a rejection loudly at boot. Do NOT exit — retrieval
+        # (embed) already passed and search keeps working; the operator sees
+        # the error + /health llm_auth=rejected and rotates the key.
+        from ..engine.llm_auth_state import key_hash_prefix, probe_llm_auth_sync
+
+        llm_auth = probe_llm_auth_sync(mlx_url, mlx_api_key)
+        if llm_auth == "rejected":
+            logger.error(
+                "startup probe: LLM credential REJECTED by %s (key_hash_prefix=%s) — "
+                "/ask will fail with 'LLM credential rejected' until FUSION_CLIENT_KEY "
+                "is rotated (legacy aliases owned by fusion-core). /search is unaffected. "
+                "/health reports llm_auth=rejected.",
+                mlx_url,
+                key_hash_prefix(mlx_api_key),
+            )
+        elif llm_auth == "ok":
+            logger.info("startup probe: LLM credential accepted by %s", mlx_url)
+
+    run_server(
+        host=host,
+        port=port,
+        mlx_base_url=mlx_url,
+        embedding_model=embed_model,
+        mlx_api_key=mlx_api_key,
+        log_level=log_level,
+    )

@@ -57,6 +57,16 @@ Fusion-MLX 生态的统一本地向量知识库服务——默认离线，数据
 
 ### 安装
 
+从 PyPI 安装（首个 tagged 版本发布后）：
+
+```bash
+pip install fusion-rag
+# 可选扩展：
+pip install "fusion-rag[qdrant]"   # Qdrant 向量后端
+```
+
+从源码安装（开发）：
+
 ```bash
 git clone https://github.com/dahai80/fusion-rag.git
 cd fusion-rag

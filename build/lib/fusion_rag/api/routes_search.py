@@ -1,0 +1,619 @@
+from __future__ import annotations
+
+import logging
+import time
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
+
+from ..engine.llm_errors import LLMAuthRejected, LLMUnavailable
+from ..engine.query_rewriter import QueryRewriter
+from ..engine.reranker import HybridSearch
+from ..engine.runtime_config import get_runtime_config
+from .access import require_kb_action
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(tags=["search"])
+
+VALID_STATUS_FILTERS = {"active", "deprecated", "all"}
+
+
+def _read_status_filter(data: dict[str, Any]) -> str:
+    # Issue #86: "active" is the default — deprecated docs drop out of normal
+    # search/ask without re-indexing (PATCH flips the status in place).
+    sf = data.get("status_filter", "active")
+    if sf not in VALID_STATUS_FILTERS:
+        raise HTTPException(400, f"status_filter must be one of {sorted(VALID_STATUS_FILTERS)}, got: {sf!r}")
+    return sf
+
+
+def _read_source_weights(data: dict[str, Any]) -> dict[str, float]:
+    # R12 (issue #134): per-source trust weights (Glean pattern — source
+    # weighting is an explicit, measured production lever). Keyed by
+    # doc_type ("md", "pdf", "code", ...); each matching result's score is
+    # multiplied by its weight before ranking. Unknown/invalid entries are
+    # ignored with a warning, never a 400 — a bad weight must not break
+    # retrieval.
+    raw = data.get("source_weights")
+    if not raw:
+        return {}
+    if not isinstance(raw, dict):
+        raise HTTPException(400, "source_weights must be an object of {doc_type: weight}")
+    weights: dict[str, float] = {}
+    for key, val in raw.items():
+        try:
+            w = float(val)
+        except (TypeError, ValueError):
+            logger.warning("source_weights: non-numeric weight %r for %r ignored", val, key)
+            continue
+        if not 0.0 <= w <= 10.0:
+            logger.warning("source_weights: weight %s for %r outside [0, 10] ignored", w, key)
+            continue
+        weights[str(key)] = w
+    return weights
+
+
+def _apply_source_weights(results: list[dict], weights: dict[str, float]) -> list[dict]:
+    # R12 (issue #134): deterministic post-fusion re-ranking — multiply each
+    # result's score by its doc_type weight, re-sort descending. Applied
+    # BEFORE rerank so a configured reranker sees the re-ordered pool.
+    if not weights:
+        return results
+    for r in results:
+        w = weights.get(str(r.get("doc_type", "")))
+        if w is not None:
+            r["score"] = r.get("score", 0) * w
+            r["source_weight"] = w
+    return sorted(results, key=lambda x: x.get("score", 0), reverse=True)
+
+
+def _audit_and_trajectory(
+    kb_id: str,
+    query: str,
+    caller: str,
+    results: list[dict],
+    latency_ms: float,
+    metadata: dict | None = None,
+) -> None:
+    from .routes import _get_kb_storage_path
+
+    top_sources = [
+        {"doc_name": r.get("doc_name", ""), "score": r.get("score", 0.0), "id": r.get("id", "")} for r in results[:5]
+    ]
+    try:
+        # A-P1-2: reuse the pooled AuditLogger (app_state admin pool) instead of
+        # constructing one per call — each prior AuditLogger(...) opened a fresh
+        # sqlite conn + ran _init_db on every search. One per storage path,
+        # reused; closed from the lifespan shutdown.
+        from .app_state import get_audit_logger
+
+        al = get_audit_logger(f"{_get_kb_storage_path(kb_id)}/audit.db")
+        al.log_search(kb_id, query, caller, len(results), top_sources, latency_ms, metadata)
+    except Exception as e:
+        logger.warning("audit log_search failed: %s", e)
+    try:
+        # A-P2-1: reuse the process-singleton TrajectoryWriter (app_state) —
+        # each prior TrajectoryWriter() re-read env + reopened the JSONL file
+        # per search, and _maybe_rotate ran unguarded. One writer per process.
+        from .app_state import get_trajectory_writer
+
+        tw = get_trajectory_writer()
+        if tw is not None:
+            tw.write(kb_id, query, caller, len(results), top_sources, latency_ms, metadata)
+    except Exception as e:
+        logger.warning("trajectory write failed: %s", e)
+
+
+async def _citation_audit_async(
+    kb_id: str,
+    original_query: str,
+    rewrites: list[str],
+    results: list[dict[str, Any]],
+) -> None:
+    """Issue #117: queryable citation audit trail (FUSION_RAG_CITATION_AUDIT=1).
+
+    Writes the query chain (original + rewrite steps) and the retrieved chunks
+    (with similarity + rank) to citation_audit.db so an answer's citations can
+    be reconstructed from the DB alone. Off by default; a write failure logs
+    and never affects the search response."""
+    if not get_runtime_config().citation_audit:
+        return
+
+    def _write():
+        from ..engine.citation_audit import CitationAuditStore
+        from .routes import _get_kb_storage_path
+
+        store = CitationAuditStore(f"{_get_kb_storage_path(kb_id)}/citation_audit.db")
+        store.record_retrieval(kb_id, original_query, rewrites, results)
+
+    try:
+        await run_in_threadpool(_write)
+    except Exception as e:
+        logger.warning("citation audit write failed: %s", e)
+
+
+async def _audit_and_trajectory_async(
+    kb_id: str,
+    query: str,
+    caller: str,
+    results: list[dict],
+    latency_ms: float,
+    metadata: dict | None = None,
+) -> None:
+    # P8/硬伤8: audit/trajectory do sync sqlite writes; running them inline in
+    # the async handler blocks the event loop for the write duration. Push the
+    # fire-and-forget logging off the loop thread.
+    await run_in_threadpool(_audit_and_trajectory, kb_id, query, caller, results, latency_ms, metadata)
+
+
+@router.post("/bases/{kb_id}/search")
+async def search(
+    kb_id: str,
+    data: dict[str, Any],
+    subject: str | None = Depends(require_kb_action("search")),
+) -> list[dict[str, Any]]:
+    from .routes import (
+        _apply_search_filters,
+        _apply_status_filter,
+        _do_rerank,
+        _get_base,
+        _get_embed_client,
+        _get_vector_store,
+        _normalize_evidence,
+    )
+
+    kb = _get_base(kb_id)
+    query = data.get("query", "")
+    if not query:
+        raise HTTPException(400, "query is required")
+    orig_query = query
+    rewrite_steps: list[str] = []
+    status_filter = _read_status_filter(data)
+
+    top_k = data.get("top_k", kb.config.max_results)
+    threshold = data.get("threshold", kb.config.similarity_threshold)
+    folder_prefix = data.get("folder_prefix")
+    use_hybrid = data.get("hybrid", False)
+    # Issue #70: rerank default-ON when a rerank model is configured (env
+    # FUSION_RAG_RERANK_MODEL), else off — preserves the prior default for
+    # callers that don't opt in (backward compat, acceptance 4).
+    _cfg = get_runtime_config()
+    use_rerank = data.get("rerank", bool(_cfg.rerank_model))
+    rerank_top_n = data.get("rerank_top_n", _cfg.rerank_top_n)
+    rerank_model = data.get("rerank_model", _cfg.rerank_model)
+    rerank_backend = data.get("rerank_backend", _cfg.rerank_backend)
+    hybrid_alpha = data.get("hybrid_alpha", 0.7)
+    hybrid_method = data.get("hybrid_method", "rrf")
+    metadata_filter = data.get("filter")
+    template = data.get("template")
+    source_weights = _read_source_weights(data)
+
+    if template:
+        # A-P1-2: reuse the pooled SearchTemplateManager (app_state admin pool)
+        # instead of constructing one per request — each prior
+        # SearchTemplateManager(...) opened a fresh sqlite conn + re-seeded
+        # builtins every search.
+        from .app_state import get_template_manager
+        from .routes import _get_kb_storage_path
+
+        # P8/硬伤8: SearchTemplateManager opens + queries sqlite synchronously.
+        tpl_mgr = get_template_manager(f"{_get_kb_storage_path(kb_id)}/templates.db")
+        tpl = await run_in_threadpool(tpl_mgr.get_template, kb_id, template)
+        if tpl:
+            top_k = tpl.get("top_k", top_k)
+            threshold = tpl.get("threshold", threshold)
+            hybrid_alpha = tpl.get("alpha", hybrid_alpha)
+            use_rerank = tpl.get("rerank", use_rerank)
+            rewrite_mode = tpl.get("rewrite_mode", data.get("rewrite_mode"))
+            doc_type_filter = tpl.get("doc_type_filter", [])
+        else:
+            rewrite_mode = data.get("rewrite_mode")
+            doc_type_filter = []
+    else:
+        rewrite_mode = data.get("rewrite_mode")
+        doc_type_filter = []
+
+    embed = _get_embed_client()
+    vec_store = _get_vector_store(kb_id)
+    _start = time.time()
+
+    if rewrite_mode:
+        rewriter = QueryRewriter(mlx_url=embed.base_url, enabled=True, api_key=embed.api_key)
+        try:
+            rewritten = await rewriter.rewrite(query, mode=rewrite_mode)
+        except LLMUnavailable as e:
+            # L1/L15: rewrite is an enhancement — fall back to the original
+            # query (logged), do NOT 503. The user still gets retrieval; they
+            # just lose the query-expansion lift.
+            logger.warning("search rewrite LLM unavailable, using original query: %s", e)
+            rewritten = query
+        if isinstance(rewritten, list):
+            # L15: the rewrite-list path previously ran plain vec_store.search
+            # per sub-query, silently dropping hybrid when the client asked for
+            # hybrid=True + rewrite_mode=... (behavior fork vs the non-rewrite
+            # path). Honor use_hybrid per sub-query, and over-fetch so the
+            # post-fusion _apply_search_filters (L10) doesn't truncate below
+            # top_k when many rows are filtered out. F-P2-2: widen fetch_k when
+            # doc_type_filter is set too — filtering doc_type AFTER the top_k
+            # truncation shrinks the result set below top_k when many rows are
+            # of a different type; over-fetch like folder_prefix/metadata_filter.
+            fetch_k = max(top_k * 4, top_k)
+            if doc_type_filter:
+                fetch_k = max(fetch_k, top_k * get_runtime_config().search_fetch_k_multiplier)
+            # P-P1-4: the per-sub-query loop did embed.embed(q) + search
+            # sequentially — N rewrites = N serial LLM embed round-trips + N
+            # serial searches, latency = sum not max. Batch all rewrites into one
+            # embed_batch (single round-trip), then fan the searches out with
+            # asyncio.gather behind a semaphore so the LanceDB/BM25 backends (sync,
+            # run_in_threadpool) don't exhaust the threadpool.
+            import asyncio as _asyncio
+
+            valid_rewrites = [q for q in rewritten if q]
+            vectors = await embed.embed_batch(valid_rewrites)
+            sem = _asyncio.Semaphore(4)
+
+            async def _one_search(q, qv):
+                if not qv or all(v == 0.0 for v in qv):
+                    return []
+                async with sem:
+                    if use_hybrid:
+                        hs = HybridSearch(vec_store, alpha=hybrid_alpha, method=hybrid_method)
+                        sub_filters = {}
+                        if folder_prefix:
+                            sub_filters["folder_prefix"] = folder_prefix
+                        return await hs.search(
+                            qv,
+                            q,
+                            top_k=fetch_k,
+                            threshold=threshold,
+                            filters=sub_filters if sub_filters else None,
+                        )
+                    # P8/硬伤8: vec_store.search is sync LanceDB+BM25; push off-loop.
+                    sub = await run_in_threadpool(vec_store.search, qv, top_k=fetch_k, threshold=threshold)
+                    return await run_in_threadpool(_apply_search_filters, sub, folder_prefix, metadata_filter)
+
+            sub_lists = await _asyncio.gather(*[_one_search(q, qv) for q, qv in zip(valid_rewrites, vectors)])
+            all_results = [r for sub in sub_lists for r in sub]
+            seen = {}
+            for r in all_results:
+                rid = r.get("id", "")
+                if rid not in seen or r.get("score", 0) > seen[rid].get("score", 0):
+                    seen[rid] = r
+            results = sorted(seen.values(), key=lambda x: x.get("score", 0), reverse=True)[:top_k]
+            # F-P2-2: doc_type_filter applied after fusion+truncation above is
+            # now safe because fetch_k was widened to compensate — same pattern
+            # as folder_prefix/metadata_filter over-fetch.
+            if doc_type_filter:
+                results = [r for r in results if r.get("doc_type", "") in doc_type_filter]
+            # Issue #77: stamp chunk_id / doc_id / page evidence anchors before
+            # the status filter — it resolves status by the stamped doc_id.
+            results = _normalize_evidence(results)
+            # Issue #86: doc-status filter (authoritative from documents table).
+            results, _ = await _apply_status_filter(kb_id, results, status_filter)
+            results = _apply_source_weights(results, source_weights)
+            if use_rerank:
+                results = await _do_rerank(query, results, top_k, backend=rerank_backend, model=rerank_model)
+            else:
+                results = results[:top_k]
+            await _audit_and_trajectory_async(kb_id, query, "search", results, (time.time() - _start) * 1000)
+            await _citation_audit_async(kb_id, orig_query, valid_rewrites, results)
+            return results
+        query = rewritten
+        if rewritten and rewritten != orig_query:
+            rewrite_steps = [rewritten]
+
+    query_vector = await embed.embed(query)
+    if not query_vector or all(v == 0.0 for v in query_vector):
+        raise HTTPException(500, "Embedding failed")
+
+    # Issue #70: when reranking, fetch a wider candidate pool (rerank_top_n)
+    # so the cross-encoder re-scores more than the final top_k — recall lift
+    # without changing the returned count. The pool is truncated to top_k
+    # after rerank.
+    pool_k = max(rerank_top_n, top_k) if use_rerank else top_k
+
+    if use_hybrid:
+        hs = HybridSearch(vec_store, alpha=hybrid_alpha, method=hybrid_method)
+        filters = {}
+        if folder_prefix:
+            filters["folder_prefix"] = folder_prefix
+        results = await hs.search(
+            query_vector,
+            query,
+            top_k=pool_k,
+            threshold=threshold,
+            filters=filters if filters else None,
+        )
+    else:
+        # L10: fetch wider than top_k so _apply_search_filters (folder_prefix /
+        # metadata_filter, applied client-side AFTER the top_k truncation) does
+        # not silently shrink the result set below top_k when many rows are
+        # filtered out. Matching rows may sit just past top_k. F-P2-2: include
+        # doc_type_filter in the over-fetch trigger — it is also a post-fetch
+        # client-side filter, so widening fetch_k keeps top_k intact after it.
+        fetch_mult = get_runtime_config().search_fetch_k_multiplier
+        fetch_k = pool_k
+        if folder_prefix or metadata_filter or doc_type_filter:
+            fetch_k = max(fetch_k, top_k * fetch_mult)
+        # P8/硬伤8: sync LanceDB search + per-row json.loads filter block the
+        # event loop if run inline in an async handler.
+        results = await run_in_threadpool(vec_store.search, query_vector, top_k=fetch_k, threshold=threshold)
+        results = await run_in_threadpool(_apply_search_filters, results, folder_prefix, metadata_filter)
+        results = results[:pool_k]
+
+    if doc_type_filter:
+        results = [r for r in results if r.get("doc_type", "") in doc_type_filter]
+
+    # Issue #77: stamp chunk_id / doc_id / page evidence anchors before the
+    # status filter — it resolves status by the stamped doc_id.
+    results = _normalize_evidence(results)
+    # Issue #86: doc-status filter (authoritative from documents table).
+    results, _ = await _apply_status_filter(kb_id, results, status_filter)
+    # R12 (issue #134): per-source trust weights — re-rank by doc_type weight
+    # before the rerank stage (or final return).
+    results = _apply_source_weights(results, source_weights)
+
+    if use_rerank:
+        results = await _do_rerank(query, results, top_k, backend=rerank_backend, model=rerank_model)
+
+    await _audit_and_trajectory_async(kb_id, query, "search", results, (time.time() - _start) * 1000)
+    await _citation_audit_async(kb_id, orig_query, rewrite_steps, results)
+    return results
+
+
+@router.post("/bases/{kb_id}/ask")
+async def ask(
+    kb_id: str,
+    data: dict[str, Any],
+    subject: str | None = Depends(require_kb_action("search")),
+) -> dict[str, Any]:
+    from .routes import (
+        _apply_search_filters,
+        _apply_status_filter,
+        _do_rerank,
+        _generate_answer,
+        _get_base,
+        _get_embed_client,
+        _get_vector_store,
+        _normalize_evidence,
+    )
+
+    kb = _get_base(kb_id)
+    question = data.get("question", "")
+    if not question:
+        raise HTTPException(400, "question is required")
+    orig_question = question
+    rewrite_steps_ask: list[str] = []
+    status_filter = _read_status_filter(data)
+
+    top_k = data.get("top_k", kb.config.max_results)
+    model = data.get("model", "qwen3.5-9b")
+    max_tokens = data.get("max_tokens", 4096)
+    temperature = data.get("temperature", 0.3)
+    system_prompt = data.get("system_prompt", "")
+    use_hybrid = data.get("hybrid", False)
+    _cfg = get_runtime_config()
+    use_rerank = data.get("rerank", bool(_cfg.rerank_model))
+    rerank_top_n = data.get("rerank_top_n", _cfg.rerank_top_n)
+    rerank_model = data.get("rerank_model", _cfg.rerank_model)
+    rerank_backend = data.get("rerank_backend", _cfg.rerank_backend)
+    folder_prefix = data.get("folder_prefix")
+    metadata_filter = data.get("filter")
+
+    embed = _get_embed_client()
+    vec_store = _get_vector_store(kb_id)
+    _start = time.time()
+
+    rewrite_mode = data.get("rewrite_mode")
+    history = data.get("history")
+    if rewrite_mode or history:
+        rewriter = QueryRewriter(mlx_url=embed.base_url, enabled=True, api_key=embed.api_key)
+        mode = rewrite_mode or ("condense" if history else "hyde")
+        try:
+            rewritten = await rewriter.rewrite(question, history=history, mode=mode)
+            if isinstance(rewritten, str) and rewritten:
+                if rewritten != orig_question:
+                    rewrite_steps_ask = [rewritten]
+                question = rewritten
+        except LLMUnavailable as e:
+            # L1: rewrite is an enhancement; condense failure on multi-turn
+            # means we lose history context — keep original question, log it.
+            logger.warning("ask rewrite LLM unavailable, using original question: %s", e)
+
+    query_vector = await embed.embed(question)
+    if not query_vector or all(v == 0.0 for v in query_vector):
+        raise HTTPException(500, "Embedding failed")
+
+    # Issue #70: rerank candidate pool (see /search).
+    pool_k = max(rerank_top_n, top_k) if use_rerank else top_k
+
+    if use_hybrid:
+        hs = HybridSearch(vec_store)
+        filters = {}
+        if folder_prefix:
+            filters["folder_prefix"] = folder_prefix
+        chunks = await hs.search(
+            query_vector,
+            question,
+            top_k=pool_k,
+            threshold=kb.config.similarity_threshold,
+            filters=filters if filters else None,
+        )
+    else:
+        fetch_mult = get_runtime_config().search_fetch_k_multiplier
+        fetch_k = pool_k
+        if folder_prefix or metadata_filter:
+            fetch_k = max(fetch_k, top_k * fetch_mult)
+        # P8/硬伤8: sync LanceDB search + filter block the event loop.
+        chunks = await run_in_threadpool(
+            vec_store.search, query_vector, top_k=fetch_k, threshold=kb.config.similarity_threshold
+        )
+        chunks = await run_in_threadpool(_apply_search_filters, chunks, folder_prefix, metadata_filter)
+        chunks = chunks[:pool_k]
+
+    # Issue #77: stamp chunk_id / doc_id / page so /ask sources carry the
+    # same evidence anchors as /search results. Stamped BEFORE the status
+    # filter — it resolves status by the stamped doc_id.
+    chunks = _normalize_evidence(chunks)
+    # Issue #86: doc-status filter (authoritative from documents table).
+    chunks, _status_map = await _apply_status_filter(kb_id, chunks, status_filter)
+
+    if not chunks:
+        await _audit_and_trajectory_async(kb_id, question, "ask", [], (time.time() - _start) * 1000)
+        await _citation_audit_async(kb_id, orig_question, rewrite_steps_ask, [])
+        return {"answer": "No relevant documents found.", "sources": [], "citations": [], "has_low_confidence": False}
+
+    if use_rerank:
+        chunks = await _do_rerank(question, chunks, top_k, backend=rerank_backend, model=rerank_model)
+
+    # Issue #86: deprecated chunks are still usable when explicitly requested
+    # (status_filter=deprecated/all) but the model must know they are stale —
+    # mark them in the context label so it does not cite them as current truth.
+    context = "\n\n".join(
+        f"[{'[已作废版本] ' if c.get('status') == 'deprecated' else ''}{c['doc_name']}] {c['text'][:2000]}"
+        for c in chunks
+    )
+
+    try:
+        answer = await _generate_answer(
+            question,
+            context,
+            chunks,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system_prompt=system_prompt,
+        )
+    except LLMAuthRejected as e:
+        # Issue #93: credential rejected is a CONFIG error, not an outage —
+        # distinct message so orchestrators alert correctly (retry after key
+        # rotation, no incident).
+        raise HTTPException(502, "Answer generation failed (LLM credential rejected — check FUSION_CLIENT_KEY)") from e
+    except LLMUnavailable as e:
+        # L9: fusion-mlx down → no fabricated 200 answer. Surface as 502 so
+        # the caller knows generation failed, not "answered with no info".
+        raise HTTPException(502, "Answer generation failed (upstream LLM unavailable)") from e
+    await _audit_and_trajectory_async(
+        kb_id,
+        question,
+        "ask",
+        chunks,
+        (time.time() - _start) * 1000,
+        {"model": model, "has_answer": bool(answer.get("answer"))},
+    )
+    await _citation_audit_async(kb_id, orig_question, rewrite_steps_ask, chunks)
+    return answer
+
+
+@router.post("/bases/{kb_id}/similar")
+async def similar(
+    kb_id: str,
+    data: dict[str, Any],
+    subject: str | None = Depends(require_kb_action("search")),
+) -> dict[str, Any]:
+    """Issue #83: find near-duplicate chunks — semantic dedup / version drift.
+
+    Input: text (embedded with the SAME service-wide model as ingest, so
+    scores are directly comparable) or a raw embedding vector. Output:
+    matches above the cosine threshold with doc/chunk evidence anchors.
+    exclude_doc_id drops a doc's own chunks (dedup-within-corpus use case)."""
+    from .routes import _get_base, _get_embed_client, _get_vector_store, _normalize_evidence
+
+    kb = _get_base(kb_id)
+    text = data.get("text", "")
+    embedding = data.get("embedding")
+    if not text and not embedding:
+        raise HTTPException(400, "text or embedding is required")
+    if isinstance(embedding, list) and not all(isinstance(v, (int, float)) for v in embedding):
+        raise HTTPException(400, "embedding must be a list of numbers")
+
+    top_k = data.get("top_k", 10)
+    if not isinstance(top_k, int) or top_k < 1 or top_k > 100:
+        raise HTTPException(400, "top_k must be an int in [1, 100]")
+    threshold = data.get("threshold", kb.config.similarity_threshold)
+    if not isinstance(threshold, (int, float)) or not 0.0 <= threshold <= 1.0:
+        raise HTTPException(400, "threshold must be a number in [0.0, 1.0]")
+    exclude_doc_id = data.get("exclude_doc_id") or ""
+    snippet_chars = data.get("snippet_chars", 200)
+    if not isinstance(snippet_chars, int) or snippet_chars < 1 or snippet_chars > 2000:
+        raise HTTPException(400, "snippet_chars must be an int in [1, 2000]")
+    status_filter = _read_status_filter(data)
+
+    embed = _get_embed_client()
+    if embedding:
+        query_vector = embedding
+    else:
+        query_vector = await embed.embed(text)
+    if not query_vector or all(v == 0.0 for v in query_vector):
+        raise HTTPException(500, "Embedding failed")
+
+    vec_store = _get_vector_store(kb_id)
+    # Over-fetch when excluding so the post-filter result still fills top_k.
+    fetch_k = top_k * get_runtime_config().search_fetch_k_multiplier if exclude_doc_id else top_k
+    _start = time.time()
+    results = await run_in_threadpool(vec_store.search, query_vector, top_k=fetch_k, threshold=threshold)
+    results = _normalize_evidence(results)
+    from .routes import _apply_status_filter
+
+    results, _ = await _apply_status_filter(kb_id, results, status_filter)
+    if exclude_doc_id:
+        results = [r for r in results if r.get("doc_id", "") != exclude_doc_id]
+    results = results[:top_k]
+
+    matches = [
+        {
+            "doc_id": r.get("doc_id", ""),
+            "doc_name": r.get("doc_name", ""),
+            "chunk_id": r.get("chunk_id", ""),
+            "score": r.get("score", 0.0),
+            "snippet": r.get("text", "")[:snippet_chars],
+            "page": r.get("page", 0),
+            "status": r.get("status", "active"),
+            "metadata": r.get("metadata", {}),
+        }
+        for r in results
+    ]
+    await _audit_and_trajectory_async(
+        kb_id, text[:200] or "(embedding)", "similar", results, (time.time() - _start) * 1000
+    )
+    await _citation_audit_async(kb_id, text[:200] or "(embedding)", [], results)
+    return {"matches": matches, "count": len(matches), "threshold": threshold}
+
+
+@router.get("/bases/{kb_id}/citations/traces")
+async def list_citation_traces(
+    kb_id: str,
+    limit: int = 50,
+    offset: int = 0,
+    subject: str | None = Depends(require_kb_action("read")),
+) -> dict[str, Any]:
+    """Issue #117: list citation-audit retrieval roots (newest first)."""
+    from ..engine.citation_audit import CitationAuditStore
+    from .routes import _get_kb_storage_path
+
+    if limit < 1 or limit > 200:
+        raise HTTPException(400, "limit must be an int in [1, 200]")
+    if offset < 0:
+        raise HTTPException(400, "offset must be >= 0")
+    store = CitationAuditStore(f"{_get_kb_storage_path(kb_id)}/citation_audit.db")
+    traces = await run_in_threadpool(store.list_traces, kb_id, limit, offset)
+    return {"traces": traces, "count": len(traces), "limit": limit, "offset": offset}
+
+
+@router.get("/bases/{kb_id}/citations/traces/{query_id}")
+async def get_citation_trace(
+    kb_id: str,
+    query_id: int,
+    subject: str | None = Depends(require_kb_action("read")),
+) -> dict[str, Any]:
+    """Issue #117: reconstruct one retrieval trace (query chain + citations) from the DB alone."""
+    from ..engine.citation_audit import CitationAuditStore
+    from .routes import _get_kb_storage_path
+
+    store = CitationAuditStore(f"{_get_kb_storage_path(kb_id)}/citation_audit.db")
+    trace = await run_in_threadpool(store.get_trace, kb_id, query_id)
+    if trace is None:
+        raise HTTPException(404, f"trace {query_id} not found in kb {kb_id}")
+    return trace
