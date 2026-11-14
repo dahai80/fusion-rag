@@ -676,6 +676,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.37
+
+- **Rule-based query complexity routing (R6, issue #128)** — opt-in (`FUSION_RAG_ROUTER=auto` or per-request `route`): simple queries run single-path retrieval (no hybrid/rerank/retry), standard get hybrid + rerank, complex get the full pipeline + 2 CRAG retry rounds; session history forces complex. Decision logged per query and echoed as `route` on `/ask`. Measured A/B (`docs/benchmarks/router-ablation.json`): routed recall@10 −0.003 vs always-full (inside gate tolerance), simple-bucket latency −32%. Default off.
+
 ## What's New in v0.8.36
 
 - **Bounded CRAG retry loop (R5, issue #127)** — `/ask` gains an opt-in grade → rewrite → re-retrieve loop (`crag_rounds` param / `FUSION_RAG_CRAG_ROUNDS`, default 0 = off): a strict LLM grader scores the retrieved chunks; below the relevance threshold the question is rewritten (QueryRewriter) and re-retrieved, results merged with dedupe, every LLM failure degrades to the current result. Per-round trace returned as `crag` on the answer; rewrites chain into the citation audit. Measured A/B (`docs/benchmarks/README.md`): retry rate 0.00 on the single-hop bench corpus (top-10 always grader-sufficient) — loop target case is weak first retrieval on multi-hop queries; re-run there before quoting lift.

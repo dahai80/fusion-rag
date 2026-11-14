@@ -250,6 +250,10 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.37
+
+- **规则化查询复杂度路由（R6，issue #128）** — 可选开启（`FUSION_RAG_ROUTER=auto` 或请求级 `route` 参数）：simple 查询单路检索（跳过混合/重排/重试），standard 走混合+重排，complex 走全流水线 + 2 轮 CRAG 重试；多轮会话强制 complex。判定逐查询记日志并经 `/ask` 响应 `route` 字段回显。实测 A/B（`docs/benchmarks/router-ablation.json`）：路由后 recall@10 较全流水线 −0.003（门限内），simple 桶延迟 −32%。默认关闭。
+
 ### v0.8.36
 
 - **有界 CRAG 重试循环（R5，issue #127）** — `/ask` 新增可选的"评分 → 改写 → 重检索"循环（`crag_rounds` 参数 / `FUSION_RAG_CRAG_ROUNDS`，默认 0 = 关闭）：严格 LLM 评判器给检索块打分，相关块不足时改写问题并重检索，结果去重合并，LLM 失败一律降级为当前结果。每轮轨迹通过 `crag` 字段返回，改写链写入引用审计。实测 A/B（`docs/benchmarks/README.md`）：单跳基准语料上触发率 0.00（top-10 恒满足评判器）——该循环针对多跳/弱首检场景，需在多跳标注集上复测才有提升数据。
