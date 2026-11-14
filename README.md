@@ -676,6 +676,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.38
+
+- **PPR graph retrieval layer (R7, issue #129)** — `GraphRAG.search_ppr`: personalized PageRank over the extracted entity graph (query-token seeds, chunks inherit summed entity mass, `ppr_score`). Additive-only: fused with the vector path via RRF in the ablation; BFS path untouched; NOT wired into any route until a real multi-hop corpus validation. Ablation (`docs/benchmarks/ppr-ablation.json`): PPR fusion beats vector-only and vector+BFS on simple-fact (1.0 vs 0.9182) and multi-hop (0.5119 vs 0.4702) subsets; HippoRAG-2 regression check (PPR >= vector-only on simple facts) passing.
+
 ## What's New in v0.8.37
 
 - **Rule-based query complexity routing (R6, issue #128)** — opt-in (`FUSION_RAG_ROUTER=auto` or per-request `route`): simple queries run single-path retrieval (no hybrid/rerank/retry), standard get hybrid + rerank, complex get the full pipeline + 2 CRAG retry rounds; session history forces complex. Decision logged per query and echoed as `route` on `/ask`. Measured A/B (`docs/benchmarks/router-ablation.json`): routed recall@10 −0.003 vs always-full (inside gate tolerance), simple-bucket latency −32%. Default off.

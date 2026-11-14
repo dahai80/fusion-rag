@@ -250,6 +250,10 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.38
+
+- **PPR 图检索层（R7，issue #129）** — `GraphRAG.search_ppr`：在抽取的实体图上做个性化 PageRank（查询词元命中实体作种子，块继承实体质量，返回 `ppr_score`）。仅作叠加层：消融中经 RRF 与向量路径融合；BFS 路径不动；未接入任何路由（需真实多跳语料验证后才可开启）。消融结果（`docs/benchmarks/ppr-ablation.json`）：PPR 融合在 simple-fact（1.0 vs 0.9182）与 multi-hop（0.5119 vs 0.4702）子集上均优于 vector-only 与 vector+BFS；HippoRAG-2 回归检查通过。
+
 ### v0.8.37
 
 - **规则化查询复杂度路由（R6，issue #128）** — 可选开启（`FUSION_RAG_ROUTER=auto` 或请求级 `route` 参数）：simple 查询单路检索（跳过混合/重排/重试），standard 走混合+重排，complex 走全流水线 + 2 轮 CRAG 重试；多轮会话强制 complex。判定逐查询记日志并经 `/ask` 响应 `route` 字段回显。实测 A/B（`docs/benchmarks/router-ablation.json`）：路由后 recall@10 较全流水线 −0.003（门限内），simple 桶延迟 −32%。默认关闭。

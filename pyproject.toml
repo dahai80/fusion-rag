@@ -1,6 +1,6 @@
 [project]
 name = "fusion-rag"
-version = "0.8.37"
+version = "0.8.38"
 description = "Fusion-RAG — Apple Silicon native offline vector knowledge base backend"
 readme = "README.md"
 license = "Apache-2.0"
