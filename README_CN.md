@@ -250,6 +250,10 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.39
+
+- **按知识库选择的基准派生分块档案（R8，issue #130）** — 此前 chunk size/overlap 是对所有文档类型一视同仁的魔法常数。新增标注语料分块尺寸消融（真实 BGE-M3 + BM25，`docs/benchmarks/chunk-size-ablation.json`）：512 字符 @ 12.5% overlap 同时拿下 recall@10 与 map@10（768 两项皆差，1024 recall 崩至 0.5394 —— 主题文档被合并、证据被稀释），默认值从此有基准背书。`Chunker.CHUNK_PROFILES`（markdown/prose 512/64，code 384/48，table 256/32）可在建 KB 时用 `chunk_profile` 选择（显式 `chunk_size`/`chunk_overlap` 覆盖档案；未知档案返回 400）。另修复：KB 级 `chunk_overlap` 一直存在于配置上，但 4 处入库 Chunker 调用点全部丢掉它 —— 每个 KB 都在静默用 64 默认值；现已透传。Late-chunking 试验被上游阻塞：fusion-mlx `/v1/embeddings` 只返回池化向量（dahai80/fusion-mlx#1624）。
+
 ### v0.8.38
 
 - **PPR 图检索层（R7，issue #129）** — `GraphRAG.search_ppr`：在抽取的实体图上做个性化 PageRank（查询词元命中实体作种子，块继承实体质量，返回 `ppr_score`）。仅作叠加层：消融中经 RRF 与向量路径融合；BFS 路径不动；未接入任何路由（需真实多跳语料验证后才可开启）。消融结果（`docs/benchmarks/ppr-ablation.json`）：PPR 融合在 simple-fact（1.0 vs 0.9182）与 multi-hop（0.5119 vs 0.4702）子集上均优于 vector-only 与 vector+BFS；HippoRAG-2 回归检查通过。

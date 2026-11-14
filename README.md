@@ -676,6 +676,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.39
+
+- **Bench-derived chunking profiles per KB (R8, issue #130)** — chunk size/overlap were magic constants applied identically to every document type. New chunk-size ablation over the labeled corpus with real BGE-M3 + BM25 (`docs/benchmarks/chunk-size-ablation.json`): 512 chars @ 12.5% overlap wins recall@10 AND map@10 (768 worse on both, 1024 collapses recall to 0.5394 — topic docs merge, evidence diluted), so the default is now bench-validated. `Chunker.CHUNK_PROFILES` (markdown/prose 512/64, code 384/48, table 256/32) selectable per KB via `chunk_profile` at KB create (explicit `chunk_size`/`chunk_overlap` override; unknown profile = 400). Also fixed: KB-level `chunk_overlap` existed on the config but all 4 ingest Chunker call sites dropped it — every KB silently used the 64 default; now passed through. Late-chunking spike BLOCKED upstream: fusion-mlx `/v1/embeddings` returns pooled vectors only (dahai80/fusion-mlx#1624).
+
 ## What's New in v0.8.38
 
 - **PPR graph retrieval layer (R7, issue #129)** — `GraphRAG.search_ppr`: personalized PageRank over the extracted entity graph (query-token seeds, chunks inherit summed entity mass, `ppr_score`). Additive-only: fused with the vector path via RRF in the ablation; BFS path untouched; NOT wired into any route until a real multi-hop corpus validation. Ablation (`docs/benchmarks/ppr-ablation.json`): PPR fusion beats vector-only and vector+BFS on simple-fact (1.0 vs 0.9182) and multi-hop (0.5119 vs 0.4702) subsets; HippoRAG-2 regression check (PPR >= vector-only on simple facts) passing.
