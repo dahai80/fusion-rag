@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import math
 import random
@@ -495,3 +496,72 @@ async def run_rerank_pool_ablation(
         }
     logger.info("rerank pool ablation done: queries=%d pools=%s", evaluated, list(pools))
     return out
+
+
+async def run_contextual_bm25_ablation(
+    embed: Any,
+    docs: list[dict[str, Any]],
+    queries: list[tuple[str, str]],
+    *,
+    workdir: str,
+) -> dict[str, Any]:
+    # R4 (issue #126): measure the BM25-side gain from the contextual prefix
+    # (Anthropic contextual-retrieval recipe). The production path ALREADY
+    # feeds chunk.context into the BM25 index (bm25_index.add_documents
+    # prepends context to the indexed text); this ablation quantifies the
+    # delta on a labeled corpus. context_mode:
+    #   "none"   — chunk text only (baseline)
+    #   "prefix" — deterministic doc-level context sentence prepended to the
+    #              BM25 text (template proxy: first 240 chars of the parent
+    #              doc, the same anchor an LLM contextualizer would describe).
+    # Dense vectors are IDENTICAL in both arms — only the BM25 side changes.
+    import os
+
+    from ..store.vector_store import VectorStore
+    from .bm25_index import BM25Index
+
+    records, doc_to_chunks = await build_chunk_records(docs)
+    doc_text = {d["doc_id"]: d["text"] for d in docs}
+    vectors = await embed.embed_batch([r["text"] for r in records])
+    for r, v in zip(records, vectors):
+        r["vector"] = v
+
+    vpath = os.path.join(workdir, "vectors")
+    vs = VectorStore(vector_path=vpath, dimension=len(vectors[0]), backend_type="local")
+    vs.add_batch(records)
+
+    arms: dict[str, list[dict[str, Any]]] = {"none": [], "prefix": []}
+    for r in records:
+        meta = r.get("metadata") or json.loads(r.get("metadata_json") or "{}")
+        doc_id = meta["doc_id"]
+        arms["none"].append({**r, "context": ""})
+        anchor = doc_text.get(doc_id, "")[:240]
+        ctx = f"Context: this chunk is from document {doc_id}. Document opening: {anchor}"
+        arms["prefix"].append({**r, "context": ctx})
+
+    results: dict[str, Any] = {}
+    for mode, rows in arms.items():
+        bm25 = BM25Index(store_path=os.path.join(workdir, f"bm25-{mode}.db"))
+        bm25.add_documents(rows)
+        m = {k: [] for k in ("recall@5", "recall@10", "mrr@10", "ndcg@10", "map@10")}
+        for query, doc_id in queries:
+            truth = set(doc_to_chunks.get(doc_id, []))
+            if not truth:
+                continue
+            ids = [r["id"] for r in bm25.search(query, top_k=10)]
+            m["recall@5"].append(_recall_at_k(ids, truth, 5))
+            m["recall@10"].append(_recall_at_k(ids, truth, 10))
+            m["mrr@10"].append(_mrr_at_k(ids, truth, 10))
+            m["ndcg@10"].append(_ndcg_at_k(ids, truth, 10))
+            m["map@10"].append(_map_at_k(ids, truth, 10))
+        bm25._close_conn()
+        results[mode] = {k: round(sum(v) / len(v), 4) if v else 0.0 for k, v in m.items()}
+
+    vs.close()
+    results["mode"] = "real"
+    results["note"] = (
+        "context is a template proxy (doc-id + doc opening), not LLM-generated; "
+        "dense channel identical in both arms"
+    )
+    logger.info("contextual BM25 ablation done: %s", {k: results[k] for k in ("none", "prefix")})
+    return results
