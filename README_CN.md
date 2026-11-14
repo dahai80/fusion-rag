@@ -394,6 +394,7 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 | `FUSION_RAG_OCR_TIMEOUT` | 300 | 单个 OCR 任务的轮询总预算（秒，issue #84） |
 | `FUSION_RAG_OCR_TENANT_ID` | (空) | OCR 调用 `X-Tenant-Id` 兜底值：请求上下文无租户时使用（后台目录监听入库、单租户部署）。OCR 服务端中间件无条件要求该头（issue #88）；请求内调用会自动透传当前租户 |
 | `FUSION_RAG_LOW_OCR_CONFIDENCE` | 0.85 | OCR 片段置信度低于该值时，检索结果与 `/ask` 引用标记 `low_confidence: true`（issue #85） |
+| `FUSION_RAG_CRAG_ROUNDS` | 0 | 有界 CRAG 重试循环（issue #127）：检索后由 LLM 评判器给块打分，相关块不足时改写问题并重检索，最多额外执行该轮数。每轮轨迹通过 `/ask` 响应的 `crag` 字段返回，改写链写入引用审计。`0` = 关闭（默认）。请求级覆盖参数：`crag_rounds`。 |
 | `FUSION_RAG_CITATION_AUDIT` | 1 | 写入可查询的引用审计链路（issue #117，R2/#124 起默认开启）：每次检索调用的查询链 + 检索 chunk 落库 `citation_audit.db`，经 `GET /kb/bases/{kb_id}/citations/traces` 重建。设 `0` 关闭 |
 
 ### 使用 start.sh

@@ -91,3 +91,29 @@ pushes recall@10/ndcg/map to 1.0 on this corpus. The production LLM-generated
 context (Contextualizer) is strictly richer, so enabling it is strictly
 non-regressive for the BM25 channel. Caveat: synthetic keyword-heavy corpus;
 re-run on real corpora before quoting absolute numbers.
+
+## CRAG retry-loop A/B — 2026-11-14 (`crag-ablation.json`, `crag-ablation-min3.json`, mode=real, issue #127)
+
+Bounded grade → rewrite → re-retrieve loop (`engine/crag.py`, opt-in via
+`crag_rounds` / `FUSION_RAG_CRAG_ROUNDS`) A/B'd against single-shot retrieval
+on the deterministic corpus (55 queries, real BGE-M3 + real qwen grader via
+fusion-mlx). Grader prompt is strict (off-topic queries grade 0 relevant —
+verified live); loop fires only when the graded-relevant count falls below
+`min_relevant`.
+
+| config | retry rate | recall@10 delta | crag latency p50 |
+|--------|-----------|-----------------|------------------|
+| min_relevant=1 | 0.00 | 0.000 | 45.9 ms |
+| min_relevant=3 | 0.00 | 0.000 | 11.0 ms |
+| min_relevant=6 | 0.00 | 0.000 | 12.0 ms |
+
+Verdict: on this corpus the loop NEVER fires — the fused top-10 always
+contains enough grader-relevant chunks, so metrics are bit-identical to
+single-shot and the only cost is one grading call (sub-100 ms cached; ~0.6 s
+uncached). The retry path itself is verified working (unit tests cover
+rewrite → re-retrieve → dedupe, degrade-on-grader-failure, round bounds; live
+trace shows `sufficient` / `rewrite_noop` actions). The benchmark corpus is
+single-hop and keyword-heavy by construction — the loop's target case (weak
+first retrieval on multi-hop/paraphrased queries) does not occur here. Re-run
+on a multi-hop labeled set before quoting any recall lift. Default
+`FUSION_RAG_CRAG_ROUNDS=0` (off) unchanged.

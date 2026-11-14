@@ -89,6 +89,12 @@ class RuntimeConfig:
     # each request for minutes with no way to opt out.
     embed_local_fallback: bool = True
     citation_audit: bool = True
+    # Issue #127 (R5): bounded CRAG retry loop. 0 = off (single-shot retrieval,
+    # default). >0 = after the first retrieval, an LLM grader scores the chunks;
+    # if fewer than min_relevant are relevant, the question is rewritten and
+    # re-retrieved, up to this many extra rounds. Results merge (dedupe by
+    # chunk id, best score kept). Latency cost: one grader call per round.
+    crag_rounds: int = 0
 
     @classmethod
     def from_env(cls) -> RuntimeConfig:
@@ -115,6 +121,7 @@ class RuntimeConfig:
             low_ocr_confidence=_env_float("FUSION_RAG_LOW_OCR_CONFIDENCE", 0.85, minimum=0.0, maximum=1.0),
             embed_local_fallback=_env_bool("FUSION_RAG_EMBED_LOCAL_FALLBACK", True),
             citation_audit=_env_bool("FUSION_RAG_CITATION_AUDIT", True),
+            crag_rounds=_env_int("FUSION_RAG_CRAG_ROUNDS", 0, minimum=0),
         )
 
     def to_dict(self) -> dict:
