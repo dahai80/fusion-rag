@@ -7,14 +7,17 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Issue #72: activate the monorepo venv before launching — bare python3 outside
-# an activated venv fails with ModuleNotFoundError: No module named 'fusion_core'.
-# The monorepo venv lives at ../.venv (~/fusion/.venv); fall back to finding it
-# up the tree. If no venv is found, warn but keep going (operator may have their
-# own env).
+# Issue #72: activate a venv before launching — bare python3 outside an
+# activated venv fails with ModuleNotFoundError: No module named 'fusion_core'.
+# Issue #137: discovery order is a contract, not a coincidence —
+#   1. already-activated VIRTUAL_ENV (caller manages their own env)
+#   2. .venv adjacent to the project root ($SCRIPT_DIR/../.venv) — covers
+#      standalone installs (e.g. ~/.fusion-console/fusion-rag/.venv)
+#   3. $HOME/fusion/.venv — monorepo fallback, in-tree dev convenience only
+# If no venv is found, warn but keep going (operator may have their own env).
 _VENV=""
-for _candidate in "$SCRIPT_DIR/../.venv" "$HOME/fusion/.venv"; do
-    if [ -f "$_candidate/bin/activate" ]; then
+for _candidate in "${VIRTUAL_ENV:-}" "$SCRIPT_DIR/../.venv" "$HOME/fusion/.venv"; do
+    if [ -n "$_candidate" ] && [ -f "$_candidate/bin/activate" ]; then
         _VENV="$_candidate"
         break
     fi
@@ -24,7 +27,15 @@ if [ -n "$_VENV" ]; then
     source "$_VENV/bin/activate"
     echo "Activated venv: $_VENV"
 else
-    echo "WARNING: no monorepo .venv found — relying on current PATH python3 (may miss fusion_core)" >&2
+    echo "WARNING: no .venv found — relying on current PATH python3 (may miss fusion_core)" >&2
+fi
+
+# Issue #137: fail loudly BEFORE starting uvicorn into a guaranteed crash —
+# fusion_rag must be importable in the chosen interpreter.
+if ! python3 -c "import fusion_rag" 2>/dev/null; then
+    echo "ERROR: fusion_rag is not importable with $(command -v python3)" >&2
+    echo "Install it first: pip install -e \"$SCRIPT_DIR\" (inside the venv)" >&2
+    exit 1
 fi
 
 # Config
