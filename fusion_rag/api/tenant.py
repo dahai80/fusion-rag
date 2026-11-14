@@ -57,6 +57,9 @@ def _extract_bearer(raw: str | None) -> str | None:
 # off). Set by tenant_middleware; read by get_request_tenant.
 _request_tenant: ContextVar[str | None] = ContextVar("_request_tenant", default=None)
 
+# Issue #133 (R11): caller user id for the current request (X-Fusion-User).
+_request_user: ContextVar[str | None] = ContextVar("_request_user", default=None)
+
 # The gateway origin-signal header. Present => the request transited the
 # gateway (which derived + stamped the tenant). Absent => direct-port access.
 ROUTE_HEADER = "X-Fusion-Route"
@@ -64,6 +67,11 @@ GATEWAY_ROUTE_VALUE = "gateway-decision"
 
 # Authoritative tenant header (gateway-derived from key->team binding).
 TENANT_HEADER = "X-Fusion-Tenant"
+
+# Issue #133 (R11): caller user id, same trust tier as the tenant header
+# (gateway/identity-stamped). Non-authoritative on its own — used only by the
+# doc-ACL filter (private visibility allow-list).
+USER_HEADER = "X-Fusion-User"
 
 # Non-authoritative passthrough header — ignored for scoping (documented only).
 SPACE_ID_HEADER = "X-Space-Id"
@@ -189,12 +197,16 @@ async def tenant_middleware(request: Request, call_next):
                 content={"detail": "Tenant header does not match token"},
             )
         _request_tenant.set(jwt_tenant)
+        # Issue #133 (R11): caller user id (gateway-stamped) for doc ACLs.
+        _request_user.set(_normalize_user(request.headers.get(USER_HEADER)))
         logger.debug("identity mode: resolved tenant=%s for /kb%s", jwt_tenant, path)
         return await call_next(request)
 
     # --- Gateway mode (#61, unchanged when identity off) -------------------
     tenant = _normalize_tenant(request.headers.get(TENANT_HEADER))
     _request_tenant.set(tenant)
+    # Issue #133 (R11): capture the caller user id for the doc-ACL filter.
+    _request_user.set(_normalize_user(request.headers.get(USER_HEADER)))
     # Gateway-origin enforcement only applies to the KB surface (/kb/*). The
     # health/readiness/metrics/MCP/auth routes are intentionally exempt so the
     # service stays observable + manageable when the gateway is down.
@@ -232,6 +244,28 @@ def get_request_tenant() -> str | None:
     return _request_tenant.get()
 
 
+def _normalize_user(raw: str | None) -> str | None:
+    """Validate + return the caller user id, or None if absent/invalid."""
+    if not raw:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    if not _TENANT_RE.match(raw):
+        logger.warning("user header value rejected (invalid charset): %r", raw[:32])
+        return None
+    return raw
+
+
+def get_request_user() -> str | None:
+    """The caller user id for the current request (X-Fusion-User), or None.
+
+    Issue #133 (R11): consumed by the doc-ACL filter (private allow-list).
+    None = identity-less caller — sees public documents only.
+    """
+    return _request_user.get()
+
+
 def tenant_scope() -> tuple[str | None, bool]:
     """Return (tenant, require_tenant_match) for KB list/get scoping.
 
@@ -254,5 +288,6 @@ def tenant_scope() -> tuple[str | None, bool]:
 
 
 def reset_request_tenant() -> None:
-    """Test helper — clear the contextvar between test cases."""
+    """Test helper — clear the request identity contextvars between test cases."""
     _request_tenant.set(None)
+    _request_user.set(None)

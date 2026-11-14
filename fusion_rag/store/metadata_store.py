@@ -252,6 +252,31 @@ class MetadataStore:
             out[r["id"]] = meta.get("status", "active")
         return out
 
+    def get_document_acl_map(self, doc_ids: list[str]) -> dict[str, dict | None]:
+        # Issue #133 (R11): batch doc_id -> acl lookup for the search-time ACL
+        # filter. Authoritative source: documents.metadata.acl (PATCH can
+        # revoke after ingest — no reindex). Missing/empty acl => None
+        # (public). An invalid stored acl is treated as public-but-logged —
+        # the validator gates writes, so corruption is the only path here.
+        ids = [d for d in dict.fromkeys(doc_ids) if d]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        with self._read_cursor() as conn:
+            rows = conn.execute(
+                f"SELECT id, metadata FROM documents WHERE id IN ({placeholders})",
+                ids,
+            ).fetchall()
+        out: dict[str, dict | None] = {}
+        for r in rows:
+            try:
+                meta = json.loads(r["metadata"] or "{}")
+            except Exception:
+                meta = {}
+            acl = meta.get("acl")
+            out[r["id"]] = acl if isinstance(acl, dict) and acl else None
+        return out
+
     def add_chunk(
         self,
         chunk_id: str,

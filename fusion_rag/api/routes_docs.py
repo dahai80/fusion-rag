@@ -15,6 +15,7 @@ from fastapi.concurrency import run_in_threadpool
 from .._validators import ValidationError, validate_identifier, validate_path_under_root
 from ..engine.chunker import Chunker
 from ..engine.contextualizer import Contextualizer
+from ..engine.doc_acl import validate_acl
 from ..engine.document import CONTENT_TYPE_MAP, DocumentParser, DocumentType, ParseResult
 from ..engine.llm_errors import LLMUnavailable
 from ..store.metadata_store import MetadataStore
@@ -361,7 +362,9 @@ def _chunks_from_ocr(result: ParseResult) -> tuple[list, list[dict]]:
     return chunks, extras
 
 
-async def _index_document(kb_id: str, file_path: str, contextualize: bool = True) -> dict:
+async def _index_document(
+    kb_id: str, file_path: str, contextualize: bool = True, acl: dict | None = None
+) -> dict:
     kb = _get_base(kb_id)
     # D7: reject before any parse/embed work if the KB's configured embedding
     # model differs from the service-wide client (would persist cross-model
@@ -448,6 +451,10 @@ async def _index_document(kb_id: str, file_path: str, contextualize: bool = True
     doc_metadata = dict(result.metadata)
     if doc_hash:
         doc_metadata["content_hash"] = doc_hash
+    # Issue #133 (R11): capture the per-document ACL at ingest (validated by
+    # the route before this call). Query-time filter reads the documents table.
+    if acl:
+        doc_metadata["acl"] = acl
     # F-P1-1: re-ingest of an existing path is a REPLACE, not an append. Tear
     # down the old index (vectors + chunks + doc row) BEFORE writing the new one
     # so the path keeps a single doc. Mirrors replace_document's swap order.
@@ -510,7 +517,14 @@ async def upload_document(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     file_path = data.get("file_path", "")
     if not file_path:
         raise HTTPException(400, "file_path is required")
-    result = await _index_document(kb_id, file_path, contextualize=data.get("contextualize", True))
+    # Issue #133 (R11): optional per-document ACL captured at ingest.
+    try:
+        acl = validate_acl(data.get("acl"))
+    except ValueError as e:
+        raise HTTPException(400, f"invalid acl: {e}")
+    result = await _index_document(
+        kb_id, file_path, contextualize=data.get("contextualize", True), acl=acl
+    )
     if "error" in result:
         raise HTTPException(result.get("status_code", 400), result["error"])
     return result
@@ -635,6 +649,13 @@ async def ingest_content(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
         )
     content_type = data.get("content_type", "text")
     metadata = data.get("metadata", {})
+    # Issue #133 (R11): optional per-document ACL captured at ingest.
+    try:
+        acl = validate_acl(data.get("acl"))
+    except ValueError as e:
+        raise HTTPException(400, f"invalid acl: {e}")
+    if acl:
+        metadata = {**(metadata or {}), "acl": acl}
     doc_name = data.get("doc_name", f"inline_{uuid.uuid4().hex[:8]}.{content_type}")
     # Issue #90: binary document types (pdf/docx/epub) arrive as base64 in
     # `content`. Indexing the base64 text itself silently pollutes retrieval
@@ -915,11 +936,24 @@ async def patch_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dict[
         if not isinstance(superseded_by, str) or not superseded_by.strip():
             raise HTTPException(400, "superseded_by must be a non-empty string")
         patch["superseded_by"] = superseded_by.strip()
+    # Issue #133 (R11): ACL patch — revocation propagates to search results on
+    # the next query (the filter reads the documents table), no reindex.
+    # Revoke = {"visibility": "public"} (merge-patch cannot delete keys).
+    if "acl" in data:
+        try:
+            acl = validate_acl(data.get("acl"))
+        except ValueError as e:
+            raise HTTPException(400, f"invalid acl: {e}")
+        if acl is None:
+            raise HTTPException(400, "acl must be an object; revoke with {\"visibility\": \"public\"}")
+        patch["acl"] = acl
 
     await run_in_threadpool(meta_store.update_document_metadata, doc_id, patch)
     mirrored = await run_in_threadpool(meta_store.set_chunk_meta_field, doc_id, "status", status)
     if "superseded_by" in patch:
         await run_in_threadpool(meta_store.set_chunk_meta_field, doc_id, "superseded_by", patch["superseded_by"])
+    if "acl" in patch:
+        await run_in_threadpool(meta_store.set_chunk_meta_field, doc_id, "acl", patch["acl"])
 
     logger.info(
         "patched doc %s in kb %s: status=%s superseded_by=%s (%d chunk rows mirrored)",

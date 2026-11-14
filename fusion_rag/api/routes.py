@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException
 from fusion_core.http_client import get_async_client, with_retry
 
 from .._validators import validate_identifier
+from ..engine.doc_acl import acl_allows
 from ..engine.llm_auth_state import key_hash_prefix, set_llm_auth_status
 from ..engine.llm_errors import LLMAuthRejected, LLMUnavailable
 from ..engine.reranker import Reranker
@@ -173,6 +174,49 @@ async def _apply_status_filter(
         if isinstance(r, dict):
             r["status"] = status_map.get(r.get("doc_id", ""), "active")
     return kept, status_map
+
+
+async def _apply_acl_filter(kb_id: str, results: list[dict]) -> list[dict]:
+    """Issue #133 (R11): drop retrieved chunks whose document ACL denies the caller.
+
+    Runs on EVERY search path (unlike status_filter there is no opt-out — an
+    unauthorized caller must never see restricted chunks). The authoritative
+    acl is read from the documents table (a PATCH/revocation propagates to
+    results without reindexing). Docs without acl are public (backward compat:
+    ACL-less KBs behave exactly as before). Caller identity = the resolved
+    request tenant contextvar (#61/#68) + the X-Fusion-User header.
+    """
+    from fastapi.concurrency import run_in_threadpool
+
+    from .tenant import get_request_tenant, get_request_user
+
+    doc_ids = [r.get("doc_id", "") for r in results if isinstance(r, dict)]
+    acl_map = await run_in_threadpool(_get_meta_store(kb_id).get_document_acl_map, doc_ids)
+    restricted = {k for k, v in acl_map.items() if v}
+    if not restricted:
+        return results
+    caller_tenant = get_request_tenant()
+    caller_user = get_request_user()
+    kept = []
+    denied = 0
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        acl = acl_map.get(r.get("doc_id", ""))
+        if acl and not acl_allows(acl, caller_tenant, caller_user):
+            denied += 1
+            continue
+        kept.append(r)
+    if denied:
+        logger.info(
+            "acl filter kb=%s: dropped %d/%d chunks for caller tenant=%r user=%r",
+            kb_id,
+            denied,
+            len(results),
+            caller_tenant,
+            caller_user,
+        )
+    return kept
 
 
 async def _do_rerank(
