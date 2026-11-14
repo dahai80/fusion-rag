@@ -429,36 +429,63 @@ async def ask(
     # Issue #70: rerank candidate pool (see /search).
     pool_k = max(rerank_top_n, top_k) if use_rerank else top_k
 
-    if use_hybrid:
-        hs = HybridSearch(vec_store)
-        filters = {}
-        if folder_prefix:
-            filters["folder_prefix"] = folder_prefix
-        chunks = await hs.search(
-            query_vector,
-            question,
-            top_k=pool_k,
-            threshold=kb.config.similarity_threshold,
-            filters=filters if filters else None,
-        )
-    else:
-        fetch_mult = get_runtime_config().search_fetch_k_multiplier
-        fetch_k = pool_k
-        if folder_prefix or metadata_filter:
-            fetch_k = max(fetch_k, top_k * fetch_mult)
-        # P8/硬伤8: sync LanceDB search + filter block the event loop.
-        chunks = await run_in_threadpool(
-            vec_store.search, query_vector, top_k=fetch_k, threshold=kb.config.similarity_threshold
-        )
-        chunks = await run_in_threadpool(_apply_search_filters, chunks, folder_prefix, metadata_filter)
-        chunks = chunks[:pool_k]
+    # Issue #127 (R5): retrieval as a callable so the CRAG loop can re-run it
+    # with a rewritten query. Round 0 is exactly the previous single-shot path.
+    async def _retrieve(q: str) -> list[dict[str, Any]]:
+        qv = await embed.embed(q)
+        if not qv or all(v == 0.0 for v in qv):
+            raise HTTPException(500, "Embedding failed")
+        if use_hybrid:
+            hs = HybridSearch(vec_store)
+            filters = {}
+            if folder_prefix:
+                filters["folder_prefix"] = folder_prefix
+            found = await hs.search(
+                qv,
+                q,
+                top_k=pool_k,
+                threshold=kb.config.similarity_threshold,
+                filters=filters if filters else None,
+            )
+        else:
+            fetch_mult = get_runtime_config().search_fetch_k_multiplier
+            fetch_k = pool_k
+            if folder_prefix or metadata_filter:
+                fetch_k = max(fetch_k, top_k * fetch_mult)
+            # P8/硬伤8: sync LanceDB search + filter block the event loop.
+            found = await run_in_threadpool(
+                vec_store.search, qv, top_k=fetch_k, threshold=kb.config.similarity_threshold
+            )
+            found = await run_in_threadpool(_apply_search_filters, found, folder_prefix, metadata_filter)
+            found = found[:pool_k]
 
-    # Issue #77: stamp chunk_id / doc_id / page so /ask sources carry the
-    # same evidence anchors as /search results. Stamped BEFORE the status
-    # filter — it resolves status by the stamped doc_id.
-    chunks = _normalize_evidence(chunks)
-    # Issue #86: doc-status filter (authoritative from documents table).
-    chunks, _status_map = await _apply_status_filter(kb_id, chunks, status_filter)
+        # Issue #77: stamp chunk_id / doc_id / page so /ask sources carry the
+        # same evidence anchors as /search results. Stamped BEFORE the status
+        # filter — it resolves status by the stamped doc_id.
+        found = _normalize_evidence(found)
+        # Issue #86: doc-status filter (authoritative from documents table).
+        found, _status_map = await _apply_status_filter(kb_id, found, status_filter)
+        return found
+
+    chunks = await _retrieve(question)
+
+    # Issue #127 (R5): bounded CRAG retry loop (opt-in). Grader judges the
+    # merged chunks; insufficient rounds rewrite + re-retrieve, capped at
+    # crag_rounds extra rounds. Every LLM failure degrades to current results.
+    crag_trace: list[dict[str, Any]] = []
+    crag_rounds = data.get("crag_rounds", _cfg.crag_rounds)
+    if isinstance(crag_rounds, int) and crag_rounds > 0:
+        from ..engine.crag import CorrectiveRAG, RetrievalGrader
+
+        grader = RetrievalGrader(mlx_url=embed.base_url, api_key=embed.api_key)
+        rewriter = QueryRewriter(mlx_url=embed.base_url, enabled=True, api_key=embed.api_key)
+        crag = CorrectiveRAG(grader=grader, rewriter=rewriter, max_rounds=crag_rounds)
+        chunks, crag_trace = await crag.run(question, _retrieve)
+        # Rewritten queries join the citation-audit rewrite chain (parent_id
+        # linked), so every retry round is reconstructable from the trace.
+        for t in crag_trace:
+            if t.get("action") == "retried" and t.get("query"):
+                rewrite_steps_ask.append(t["query"])
 
     if not chunks:
         await _audit_and_trajectory_async(kb_id, question, "ask", [], (time.time() - _start) * 1000)
@@ -504,6 +531,9 @@ async def ask(
         {"model": model, "has_answer": bool(answer.get("answer"))},
     )
     await _citation_audit_async(kb_id, orig_question, rewrite_steps_ask, chunks)
+    # Issue #127 (R5): per-round observability — only present when the loop ran.
+    if crag_trace:
+        answer["crag"] = crag_trace
     return answer
 
 

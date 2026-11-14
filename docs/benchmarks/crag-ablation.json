@@ -1,0 +1,25 @@
+{
+  "generated_at": "2026-11-14",
+  "queries": 55,
+  "crag_rounds": 2,
+  "min_relevant": 1,
+  "crag_retry_rate": 0.0,
+  "single_shot": {
+    "recall@5": 0.7909,
+    "recall@10": 0.9212,
+    "mrr@10": 1.0,
+    "ndcg@10": 0.946,
+    "map@10": 0.919
+  },
+  "crag": {
+    "recall@5": 0.7909,
+    "recall@10": 0.9212,
+    "mrr@10": 1.0,
+    "ndcg@10": 0.946,
+    "map@10": 0.919
+  },
+  "latency_ms_p50": {
+    "single_shot": 4.3,
+    "crag": 45.9
+  }
+}
