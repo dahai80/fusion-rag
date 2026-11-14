@@ -674,6 +674,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.35
+
+- **Contextual BM25 ablation — context prefix lifts BM25 (R4, issue #126)** — verified the production path already feeds `chunk.context` into the BM25 index (`BM25Index.add_documents` indexes `context + text`); new `recall_bench.run_contextual_bm25_ablation` + `scripts/contextual_bm25_ablation.py` measure the delta on the deterministic labeled corpus with the dense channel shared by both arms. Live BGE-M3 run (`docs/benchmarks/contextual-bm25-ablation.json`): even a crude template context (doc-id + doc opening) lifts recall@5 0.7939 → 0.8333, recall@10 0.9212 → 1.0, ndcg@10/map@10 → 1.0 — the production LLM-generated Contextualizer context is strictly richer, so enabling it is non-regressive for BM25.
+
 ## What's New in v0.8.34
 
 - **Rerank pool A/B — 20 saturates (R3, issue #125)** — `recall_bench.run_rerank_pool_ablation` + `scripts/rerank_pool_ablation.py` (RRF candidates per pool → cross-encoder → top-10, R12 metrics + rerank latency p50/p95). Live bge-reranker-v2-m3 run recorded (`docs/benchmarks/rerank-pool-ablation.json`): metrics identical at pool 20/50/100/150, latency 114 ms → 1298 ms p50 — `rerank_top_n=20` default stays, re-run on a real labeled set before concluding for production traffic.

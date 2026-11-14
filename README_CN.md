@@ -250,6 +250,10 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.35
+
+- **上下文 BM25 消融 — 上下文前缀提升 BM25（R4，issue #126）** — 已验证生产路径本就将 `chunk.context` 送入 BM25 索引（`BM25Index.add_documents` 索引 `context + text`）；新增 `recall_bench.run_contextual_bm25_ablation` + `scripts/contextual_bm25_ablation.py`，在确定性标注语料上量化差值（双臂共享稠密向量）。BGE-M3 实跑结果（`docs/benchmarks/contextual-bm25-ablation.json`）：即使只用模板上下文（doc-id + 文档开头），recall@5 0.7939 → 0.8333、recall@10 0.9212 → 1.0、ndcg@10/map@10 → 1.0 — 生产环境 LLM 生成的 Contextualizer 上下文只会更丰富，开启对 BM25 无回归风险。
+
 ### v0.8.34
 
 - **Rerank 候选池 A/B——20 已饱和（R3，issue #125）** — 新增 `recall_bench.run_rerank_pool_ablation` 与 `scripts/rerank_pool_ablation.py`（各池 RRF 候选 → 交叉编码器重排 → top-10，R12 指标 + 重排延迟 p50/p95）。真实 bge-reranker-v2-m3 实测已记录（`docs/benchmarks/rerank-pool-ablation.json`）：四档池指标完全一致，延迟 114 ms → 1298 ms p50——`rerank_top_n=20` 默认不变；上线真实流量前请在真实标注集上重跑。
