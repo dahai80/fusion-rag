@@ -15,9 +15,12 @@ logger = logging.getLogger(__name__)
 
 
 class GitLoader:
-    def __init__(self, work_dir: str = ""):
+    def __init__(self, work_dir: str = "", acl: dict | None = None):
         self.work_dir = work_dir or tempfile.mkdtemp(prefix="fusion_git_")
         self._owns_work_dir = not bool(work_dir)
+        # Issue #133 (R11): repo-level ACL captured at crawl time and stamped
+        # on every indexed document (validated by the caller before ingest).
+        self.acl = acl
 
     def clone(self, repo_url: str, branch: str = "main", depth: int = 1) -> str:
         # F3 fix: validate scheme + reject ext:: (RCE via git transport/hook).
@@ -92,6 +95,7 @@ class GitLoader:
                             if hasattr(parsed.doc_type, "value")
                             else str(parsed.doc_type),
                             "chars": parsed.chars,
+                            "metadata": {"acl": self.acl} if self.acl else {},
                         }
                     )
                 except Exception as e:

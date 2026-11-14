@@ -155,6 +155,7 @@ async def search(
     subject: str | None = Depends(require_kb_action("search")),
 ) -> list[dict[str, Any]]:
     from .routes import (
+        _apply_acl_filter,
         _apply_search_filters,
         _apply_status_filter,
         _do_rerank,
@@ -292,6 +293,8 @@ async def search(
             results = _normalize_evidence(results)
             # Issue #86: doc-status filter (authoritative from documents table).
             results, _ = await _apply_status_filter(kb_id, results, status_filter)
+            # Issue #133 (R11): ACL filter (always on; no caller opt-out).
+            results = await _apply_acl_filter(kb_id, results)
             results = _apply_source_weights(results, source_weights)
             if use_rerank:
                 results = await _do_rerank(query, results, top_k, backend=rerank_backend, model=rerank_model)
@@ -351,6 +354,8 @@ async def search(
     results = _normalize_evidence(results)
     # Issue #86: doc-status filter (authoritative from documents table).
     results, _ = await _apply_status_filter(kb_id, results, status_filter)
+    # Issue #133 (R11): ACL filter (always on; no caller opt-out).
+    results = await _apply_acl_filter(kb_id, results)
     # R12 (issue #134): per-source trust weights — re-rank by doc_type weight
     # before the rerank stage (or final return).
     results = _apply_source_weights(results, source_weights)
@@ -370,6 +375,7 @@ async def ask(
     subject: str | None = Depends(require_kb_action("search")),
 ) -> dict[str, Any]:
     from .routes import (
+        _apply_acl_filter,
         _apply_search_filters,
         _apply_status_filter,
         _do_rerank,
@@ -497,6 +503,8 @@ async def ask(
         found = _normalize_evidence(found)
         # Issue #86: doc-status filter (authoritative from documents table).
         found, _status_map = await _apply_status_filter(kb_id, found, status_filter)
+        # Issue #133 (R11): ACL filter (always on; no caller opt-out).
+        found = await _apply_acl_filter(kb_id, found)
         return found
 
     chunks = await _retrieve(question)
