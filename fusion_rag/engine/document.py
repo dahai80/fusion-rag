@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 class DocumentType(str, Enum):
     PDF = "pdf"
     DOCX = "docx"
+    PPTX = "pptx"
+    XLSX = "xlsx"
     MARKDOWN = "markdown"
     TXT = "txt"
     HTML = "html"
@@ -37,6 +39,8 @@ class DocumentType(str, Enum):
 EXTENSION_MAP: dict[str, DocumentType] = {
     ".pdf": DocumentType.PDF,
     ".docx": DocumentType.DOCX,
+    ".pptx": DocumentType.PPTX,
+    ".xlsx": DocumentType.XLSX,
     ".md": DocumentType.MARKDOWN,
     ".markdown": DocumentType.MARKDOWN,
     ".txt": DocumentType.TXT,
@@ -80,6 +84,8 @@ CONTENT_TYPE_MAP: dict[str, DocumentType] = {
     "csv": DocumentType.TXT,
     "text": DocumentType.TXT,
     "epub": DocumentType.EPUB,
+    "pptx": DocumentType.PPTX,
+    "xlsx": DocumentType.XLSX,
 }
 
 
@@ -154,6 +160,10 @@ class DocumentParser:
                     result.ocr_chunks = await self._ocr_scanned_pdf(path, result)
             elif doc_type == DocumentType.DOCX:
                 result.content = self._parse_docx(path)
+            elif doc_type == DocumentType.PPTX:
+                result.content = self._parse_pptx(path)
+            elif doc_type == DocumentType.XLSX:
+                result.content = self._parse_xlsx(path)
             elif doc_type == DocumentType.MARKDOWN or doc_type == DocumentType.TXT:
                 result.content = path.read_text(encoding="utf-8", errors="replace")
             elif doc_type == DocumentType.HTML:
@@ -204,6 +214,61 @@ class DocumentParser:
         doc = Document(str(path))
         paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
         return "\n".join(paragraphs)
+
+    def _parse_pptx(self, path: Path) -> str:
+        """Extract text from PPTX: one '## Slide N' section per slide.
+
+        Text frames in reading order + speaker notes; empty slides skipped
+        so a deck of images-only slides does not produce empty content."""
+        from pptx import Presentation
+
+        prs = Presentation(str(path))
+        parts: list[str] = []
+        for idx, slide in enumerate(prs.slides, start=1):
+            texts: list[str] = []
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    for para in shape.text_frame.paragraphs:
+                        line = "".join(run.text for run in para.runs).strip()
+                        if line:
+                            texts.append(line)
+                # Grouped shapes recurse one level (common in real decks).
+                if getattr(shape, "shape_type", None) is not None and hasattr(shape, "shapes"):
+                    for sub in shape.shapes:  # type: ignore[attr-defined]
+                        if sub.has_text_frame:
+                            line = sub.text_frame.text.strip()
+                            if line:
+                                texts.append(line)
+            if slide.has_notes_slide:
+                notes = slide.notes_slide.notes_text_frame.text.strip()
+                if notes:
+                    texts.append(f"[notes] {notes}")
+            if texts:
+                parts.append(f"## Slide {idx}\n" + "\n".join(texts))
+        return "\n\n".join(parts)
+
+    def _parse_xlsx(self, path: Path) -> str:
+        """Extract text from XLSX: one '## Sheet: name' section per sheet.
+
+        Rows render as ' | '-joined cells — line-oriented text that survives
+        the semantic chunker and keeps cell context together. Empty trailing
+        cells trimmed; formula cells contribute their cached value."""
+        from openpyxl import load_workbook
+
+        wb = load_workbook(str(path), read_only=True, data_only=True)
+        parts: list[str] = []
+        for ws in wb.worksheets:
+            lines: list[str] = []
+            for row in ws.iter_rows(values_only=True):
+                cells = ["" if v is None else str(v).strip() for v in row]
+                while cells and cells[-1] == "":
+                    cells.pop()
+                if cells:
+                    lines.append(" | ".join(cells))
+            if lines:
+                parts.append(f"## Sheet: {ws.title}\n" + "\n".join(lines))
+        wb.close()
+        return "\n\n".join(parts)
 
     def _parse_html(self, path: Path) -> str:
         """Extract text from HTML."""
