@@ -96,9 +96,30 @@ class ContextCompressionRetriever:
 
 
 class FusionRetriever:
-    """Combines multiple retrievers with weighted scoring."""
+    """Combines multiple retrievers with weighted scoring.
+
+    .. deprecated:: v0.8.30 (R1, issue #123)
+        EXPERIMENTAL — weighted raw-score fusion is no longer the supported
+        fusion path. Raw scores from different channels are not comparable
+        (BM25 magnitude shifts per query while cosine stays bounded in [0,1]),
+        so fixed weights silently favor whichever channel runs hot. The
+        single supported fusion story is ``HybridSearch(method="rrf")``
+        (engine/reranker.py), which fuses by rank and discards magnitude
+        (Cormack et al., SIGIR 2009). This class still works for callers
+        that need it, but emits a DeprecationWarning on construction and is
+        excluded from default configuration paths.
+    """
 
     def __init__(self, retrievers: list[tuple[str, Any, float]]):
+        import warnings
+
+        warnings.warn(
+            "FusionRetriever weighted-score fusion is deprecated (R1/issue #123): "
+            "use HybridSearch(method='rrf') — the single supported fusion path. "
+            "Weighted raw-score fusion is experimental-only.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.retrievers = retrievers  # [(name, retriever, weight), ...]
 
     async def search(self, query_vector: list[float], query_text: str = "", top_k: int = 10) -> list[dict[str, Any]]:

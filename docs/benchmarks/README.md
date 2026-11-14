@@ -21,7 +21,20 @@ Retrieval-quality evidence for issue #79. Corpus: 505 chunks / 90 docs
 seed 20261025), 55 ground-truth queries. Run with
 `scripts/recall_benchmark.py --mode real` against live fusion-mlx BGE-M3.
 
-## Latest run — 2026-10-25 (`recall-2026-10-25.json`, mode=real)
+## Latest run — 2026-11-14 (`recall-2026-11-14.json`, mode=real)
+
+| mode | recall@5 | recall@10 | mrr@10 |
+|------|----------|-----------|--------|
+| BM25-only (jieba) | 0.7939 | 0.9212 | 1.0000 |
+| Vector-only (BGE-M3) | 0.7909 | 0.9182 | 1.0000 |
+| RRF fusion | 0.7939 | **0.9212** | 1.0000 |
+
+Re-run with the R1 fusion consolidation (issue #123): RRF remains the single
+supported fusion path; the weighted-score `FusionRetriever` is deprecated
+(experimental only). Numbers confirm the 2026-10-25 baseline — rrf >= max(single)
+on recall@10 holds.
+
+## Previous run — 2026-10-25 (`recall-2026-10-25.json`, mode=real)
 
 | mode | recall@5 | recall@10 | mrr@10 |
 |------|----------|-----------|--------|
