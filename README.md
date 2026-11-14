@@ -674,6 +674,12 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.33
+
+- **PyPI packaging** — `pyproject.toml` PyPI-ready (readme/classifiers/urls, `fusion-core>=0.12.1` resolves from PyPI); `.github/workflows/pypi.yml` publishes via Trusted Publishing (OIDC) on `v*` tags; sdist + wheel verified (console assets included). `pip install fusion-rag` once the first tag publishes.
+- **MCP `kb_id` optional (#136)** — `kb_search` / `kb_ask` fall back to the single existing KB (tenant-scoped) or the most recently created; `tools/list` documents the default; the ACL gate resolves the same id so the default path cannot skip it. Typed `-32602` outside app state.
+- **`start.sh` venv contract (#137)** — already-activated `VIRTUAL_ENV` first, project-adjacent `.venv` second, monorepo fallback last; fails loudly when `fusion_rag` is not importable instead of starting uvicorn into a crash.
+
 ## What's New in v0.8.32
 
 - **Eval completeness (R12, issue #134)** — NDCG@K + MAP@K added alongside recall/MRR in `recall_bench` (all three modes) and the offline eval harness; `scripts/eval_baseline.json` re-baselined with `ndcg@10` 0.9469 / `map@10` 0.9212, CI gate fails on regression. Retune checklist (`docs/retrieval-retune-checklist.md`) + printed on gate failure: any embedding-model / chunking / fusion-parameter change requires a re-run against the fixed labeled sample. `POST /search` accepts `source_weights` (per-`doc_type` trust multipliers, [0,10], invalid entries ignored with a warning) — deterministic post-fusion re-rank applied before the rerank stage; scored rows carry `source_weight` for audit.

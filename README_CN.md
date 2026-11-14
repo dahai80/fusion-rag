@@ -250,6 +250,12 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.33
+
+- **PyPI 打包** — `pyproject.toml` 达到发布标准（readme/classifiers/urls，`fusion-core>=0.12.1` 可从 PyPI 解析）；`.github/workflows/pypi.yml` 通过 Trusted Publishing（OIDC）在 `v*` tag 推送时发布；sdist + wheel 已验证（含控制台资产）。首个 tag 发布后即可 `pip install fusion-rag`。
+- **MCP `kb_id` 可选（#136）** — `kb_search` / `kb_ask` 缺省回退到唯一 KB（租户作用域）或最近创建的 KB；`tools/list` 描述写明默认行为；ACL 门禁解析同一 id，默认路径不会绕过权限。无 app state 时抛类型化 `-32602`。
+- **`start.sh` venv 探测契约（#137）** — 已激活的 `VIRTUAL_ENV` 优先，项目相邻 `.venv` 次之，monorepo 回退最后；`fusion_rag` 不可导入时响亮失败，不再带着必崩的启动进 uvicorn。
+
 ### v0.8.32
 
 - **评估完备性（R12，issue #134）** — `recall_bench` 三通道与离线评估全部新增 NDCG@K + MAP@K（位置感知指标，奖励每个相关命中而非只看首个）；`scripts/eval_baseline.json` 重新基线化（`ndcg@10` 0.9469 / `map@10` 0.9212），CI 门禁对回归失败。新增调参清单（`docs/retrieval-retune-checklist.md`，门禁失败时打印）：换 embedding 模型 / 分块 / 融合参数必须对固定标注样本重跑。`POST /search` 新增 `source_weights`（按 `doc_type` 的信任权重乘数，范围 [0,10]，非法项告警忽略）——融合后、重排前的确定性重排序，命中行带 `source_weight` 可审计。
