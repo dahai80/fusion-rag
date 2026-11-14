@@ -29,6 +29,46 @@ def _read_status_filter(data: dict[str, Any]) -> str:
     return sf
 
 
+def _read_source_weights(data: dict[str, Any]) -> dict[str, float]:
+    # R12 (issue #134): per-source trust weights (Glean pattern — source
+    # weighting is an explicit, measured production lever). Keyed by
+    # doc_type ("md", "pdf", "code", ...); each matching result's score is
+    # multiplied by its weight before ranking. Unknown/invalid entries are
+    # ignored with a warning, never a 400 — a bad weight must not break
+    # retrieval.
+    raw = data.get("source_weights")
+    if not raw:
+        return {}
+    if not isinstance(raw, dict):
+        raise HTTPException(400, "source_weights must be an object of {doc_type: weight}")
+    weights: dict[str, float] = {}
+    for key, val in raw.items():
+        try:
+            w = float(val)
+        except (TypeError, ValueError):
+            logger.warning("source_weights: non-numeric weight %r for %r ignored", val, key)
+            continue
+        if not 0.0 <= w <= 10.0:
+            logger.warning("source_weights: weight %s for %r outside [0, 10] ignored", w, key)
+            continue
+        weights[str(key)] = w
+    return weights
+
+
+def _apply_source_weights(results: list[dict], weights: dict[str, float]) -> list[dict]:
+    # R12 (issue #134): deterministic post-fusion re-ranking — multiply each
+    # result's score by its doc_type weight, re-sort descending. Applied
+    # BEFORE rerank so a configured reranker sees the re-ordered pool.
+    if not weights:
+        return results
+    for r in results:
+        w = weights.get(str(r.get("doc_type", "")))
+        if w is not None:
+            r["score"] = r.get("score", 0) * w
+            r["source_weight"] = w
+    return sorted(results, key=lambda x: x.get("score", 0), reverse=True)
+
+
 def _audit_and_trajectory(
     kb_id: str,
     query: str,
@@ -148,6 +188,7 @@ async def search(
     hybrid_method = data.get("hybrid_method", "rrf")
     metadata_filter = data.get("filter")
     template = data.get("template")
+    source_weights = _read_source_weights(data)
 
     if template:
         # A-P1-2: reuse the pooled SearchTemplateManager (app_state admin pool)
@@ -251,8 +292,11 @@ async def search(
             results = _normalize_evidence(results)
             # Issue #86: doc-status filter (authoritative from documents table).
             results, _ = await _apply_status_filter(kb_id, results, status_filter)
+            results = _apply_source_weights(results, source_weights)
             if use_rerank:
                 results = await _do_rerank(query, results, top_k, backend=rerank_backend, model=rerank_model)
+            else:
+                results = results[:top_k]
             await _audit_and_trajectory_async(kb_id, query, "search", results, (time.time() - _start) * 1000)
             await _citation_audit_async(kb_id, orig_query, valid_rewrites, results)
             return results
@@ -307,6 +351,9 @@ async def search(
     results = _normalize_evidence(results)
     # Issue #86: doc-status filter (authoritative from documents table).
     results, _ = await _apply_status_filter(kb_id, results, status_filter)
+    # R12 (issue #134): per-source trust weights — re-rank by doc_type weight
+    # before the rerank stage (or final return).
+    results = _apply_source_weights(results, source_weights)
 
     if use_rerank:
         results = await _do_rerank(query, results, top_k, backend=rerank_backend, model=rerank_model)

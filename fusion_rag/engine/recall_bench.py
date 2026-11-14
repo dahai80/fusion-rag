@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import random
 import re
 from typing import Any
@@ -286,8 +287,39 @@ def _mrr_at_k(retrieved: list[str], truth: set[str], k: int) -> float:
     return 0.0
 
 
+def _ndcg_at_k(retrieved: list[str], truth: set[str], k: int) -> float:
+    # R12 (issue #134): binary-relevance NDCG@k — graded extension of MRR
+    # that credits EVERY relevant hit, position-discounted (log2 rank+1).
+    if not truth:
+        return 0.0
+    dcg = sum(
+        1.0 / math.log2(rank + 1)
+        for rank, rid in enumerate(retrieved[:k], start=1)
+        if rid in truth
+    )
+    ideal = sum(1.0 / math.log2(rank + 1) for rank in range(1, min(len(truth), k) + 1))
+    return dcg / ideal if ideal else 0.0
+
+
+def _map_at_k(retrieved: list[str], truth: set[str], k: int) -> float:
+    # R12 (issue #134): MAP@k — mean of precision@rank over relevant hits.
+    if not truth:
+        return 0.0
+    hits = 0
+    precision_sum = 0.0
+    for rank, rid in enumerate(retrieved[:k], start=1):
+        if rid in truth:
+            hits += 1
+            precision_sum += hits / rank
+    return precision_sum / min(len(truth), k) if hits else 0.0
+
+
 def _empty_metrics(k_values: tuple[int, ...]) -> dict[str, Any]:
-    return {f"recall@{k}": [] for k in k_values} | {"mrr@10": []}
+    per_k: dict[str, list[float]] = {}
+    for k in k_values:
+        per_k[f"recall@{k}"] = []
+        per_k[f"ndcg@{k}"] = []
+    return per_k | {"mrr@10": [], "map@10": []}
 
 
 def _finalize(mode_name: str, per_query: dict[str, list[float]]) -> dict[str, Any]:
@@ -344,9 +376,15 @@ async def run_benchmark(
             bm25_m[f"recall@{k}"].append(_recall_at_k(bm25_ids, truth, k))
             vec_m[f"recall@{k}"].append(_recall_at_k(vec_ids, truth, k))
             rrf_m[f"recall@{k}"].append(_recall_at_k(rrf_ids, truth, k))
+            bm25_m[f"ndcg@{k}"].append(_ndcg_at_k(bm25_ids, truth, k))
+            vec_m[f"ndcg@{k}"].append(_ndcg_at_k(vec_ids, truth, k))
+            rrf_m[f"ndcg@{k}"].append(_ndcg_at_k(rrf_ids, truth, k))
         bm25_m["mrr@10"].append(_mrr_at_k(bm25_ids, truth, 10))
         vec_m["mrr@10"].append(_mrr_at_k(vec_ids, truth, 10))
         rrf_m["mrr@10"].append(_mrr_at_k(rrf_ids, truth, 10))
+        bm25_m["map@10"].append(_map_at_k(bm25_ids, truth, 10))
+        vec_m["map@10"].append(_map_at_k(vec_ids, truth, 10))
+        rrf_m["map@10"].append(_map_at_k(rrf_ids, truth, 10))
 
     vs.close()
 

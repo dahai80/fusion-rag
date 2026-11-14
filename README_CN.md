@@ -240,6 +240,10 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.32
+
+- **评估完备性（R12，issue #134）** — `recall_bench` 三通道与离线评估全部新增 NDCG@K + MAP@K（位置感知指标，奖励每个相关命中而非只看首个）；`scripts/eval_baseline.json` 重新基线化（`ndcg@10` 0.9469 / `map@10` 0.9212），CI 门禁对回归失败。新增调参清单（`docs/retrieval-retune-checklist.md`，门禁失败时打印）：换 embedding 模型 / 分块 / 融合参数必须对固定标注样本重跑。`POST /search` 新增 `source_weights`（按 `doc_type` 的信任权重乘数，范围 [0,10]，非法项告警忽略）——融合后、重排前的确定性重排序，命中行带 `source_weight` 可审计。
+
 ### v0.8.31
 
 - **引用审计默认开启（R2，issue #124）** — `FUSION_RAG_CITATION_AUDIT` 默认值改为 `1`（设 `0` 可关闭）。实测开销约 0.11 ms/次检索写入（10 chunk + 1 重写，SQLite WAL 批量），相对检索延迟可忽略。评估器（`RAGEvaluator`）新增引用准确性评审（`CITATION_ACCURACY_PROMPT`：答案的论点有多大比例被**被引用**来源支撑——Anthropic/Glean 生产评审标准），逐用例输出 `citation_accuracy`、聚合输出 `avg_citation_accuracy`（仅对带引用的用例取平均）；新增 `citation_accuracy_from_trace()` 将 /ask 响应引用与审计链路做 chunk-id 重叠打分。
