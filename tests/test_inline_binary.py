@@ -142,6 +142,59 @@ class TestInlineBinaryIngest:
         ).json()
         assert rows, "expected EPUB chapter text to be searchable"
 
+    def test_base64_xlsx_parsed(self, client):
+        from io import BytesIO
+
+        from openpyxl import Workbook
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sales"
+        ws.append(["Region", "Amount"])
+        ws.append(["North", 120])
+        buf = BytesIO()
+        wb.save(buf)
+        payload = base64.b64encode(buf.getvalue()).decode()
+        kb_id = client.post("/kb/bases", json={"name": "bin-xlsx-kb"}).json()["id"]
+
+        resp = client.post(
+            f"/kb/bases/{kb_id}/documents/ingest",
+            json={"content": payload, "content_type": "xlsx", "doc_name": "book.xlsx",
+                  "contextualize": False},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["chunks"] >= 1
+        rows = client.post(
+            f"/kb/bases/{kb_id}/search", json={"query": "North Amount", "top_k": 5}
+        ).json()
+        assert rows, "expected XLSX sheet text to be searchable"
+
+    def test_base64_pptx_parsed(self, client):
+        from io import BytesIO
+
+        from pptx import Presentation
+
+        prs = Presentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        slide.shapes.title.text = "Quarterly Review"
+        slide.placeholders[1].text = "Revenue up 20 percent"
+        buf = BytesIO()
+        prs.save(buf)
+        payload = base64.b64encode(buf.getvalue()).decode()
+        kb_id = client.post("/kb/bases", json={"name": "bin-pptx-kb"}).json()["id"]
+
+        resp = client.post(
+            f"/kb/bases/{kb_id}/documents/ingest",
+            json={"content": payload, "content_type": "pptx", "doc_name": "deck.pptx",
+                  "contextualize": False},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["chunks"] >= 1
+        rows = client.post(
+            f"/kb/bases/{kb_id}/search", json={"query": "Quarterly Revenue", "top_k": 5}
+        ).json()
+        assert rows, "expected PPTX slide text to be searchable"
+
     def test_invalid_base64_rejected_400(self, client):
         kb_id = client.post("/kb/bases", json={"name": "bin-val-kb"}).json()["id"]
         resp = client.post(

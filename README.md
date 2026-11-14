@@ -664,6 +664,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.29
+
+- **Office format ingest: PPTX + XLSX** — server-side parsers (`python-pptx`, `openpyxl`): PPTX renders one `## Slide N` section per slide (text frames in reading order + speaker notes; image-only slides skipped), XLSX renders one `## Sheet: name` section per sheet with ` | `-joined cell rows (cached formula values, empty trailing cells trimmed, empty sheets skipped). Both types added to the #90 inline binary ingest set and the console file picker (`accept` updated). Legacy binary formats (.doc/.xls/.ppt) remain unsupported — they need a converter, not a parser; re-save as docx/xlsx/pptx. New deps: `python-pptx>=1.0.0`, `openpyxl>=3.1.0`.
+
 ## What's New in v0.8.28
 
 - **UI: file-picker ingest in Docs / Search tab** — "选择文件入库 / Pick a file" button: pick a `txt/md/markdown/html/htm/csv` (text) or `pdf/docx/epub` (binary, #90 base64 inline path → full parse pipeline incl. scanned-PDF OCR) file; doc name = filename. The paste-text path stays as a secondary row.

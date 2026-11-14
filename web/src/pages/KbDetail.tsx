@@ -260,7 +260,7 @@ function DocsPanel({ kbId }: { kbId: string }) {
                 <input
                     ref={fileRef}
                     type="file"
-                    accept=".txt,.md,.markdown,.html,.htm,.csv,.pdf,.docx,.epub"
+                    accept=".txt,.md,.markdown,.html,.htm,.csv,.pdf,.docx,.epub,.pptx,.xlsx"
                     className="hidden"
                     onChange={(e) => onPickFile(e.target.files?.[0])}
                 />
@@ -275,7 +275,10 @@ function DocsPanel({ kbId }: { kbId: string }) {
                         : t("选择文件入库", "Pick a file")}
                 </button>
                 <span className="self-center text-[10px] text-text-muted">
-                    {t("支持 txt/md/html/csv/pdf/docx/epub", "txt/md/html/csv/pdf/docx/epub")}
+                    {t(
+                        "支持 txt/md/html/csv/pdf/docx/epub/pptx/xlsx",
+                        "txt/md/html/csv/pdf/docx/epub/pptx/xlsx",
+                    )}
                 </span>
             </div>
             <div className="flex gap-2 border-t border-border px-3 py-2">

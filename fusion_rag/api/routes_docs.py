@@ -570,7 +570,7 @@ async def batch_upload_documents(kb_id: str, data: dict[str, Any]) -> dict[str, 
 
 # Issue #90: inline `content` for these types is base64-encoded BINARY data,
 # not parseable text. Route them through the real file pipeline.
-BINARY_CONTENT_TYPES = {"pdf", "docx", "epub"}
+BINARY_CONTENT_TYPES = {"pdf", "docx", "epub", "pptx", "xlsx"}
 
 
 async def _ingest_binary_inline(

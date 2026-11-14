@@ -107,6 +107,8 @@ const BINARY_EXTS: Record<string, string> = {
     pdf: "pdf",
     docx: "docx",
     epub: "epub",
+    pptx: "pptx",
+    xlsx: "xlsx",
 };
 
 export function contentTypeForFile(name: string): string | null {
@@ -118,7 +120,9 @@ export function ingestFile(kbId: string, file: File): Promise<{ chunks?: number 
     const ct = contentTypeForFile(file.name);
     if (!ct) {
         return Promise.reject(
-            new Error(`unsupported file type: .${file.name.split(".").pop()} (txt/md/html/csv/pdf/docx/epub)`),
+            new Error(
+                `unsupported file type: .${file.name.split(".").pop()} (txt/md/html/csv/pdf/docx/epub/pptx/xlsx)`,
+            ),
         );
     }
     if (ct in BINARY_EXTS) {
