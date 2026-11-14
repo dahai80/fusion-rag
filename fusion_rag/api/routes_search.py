@@ -11,6 +11,7 @@ from ..engine.llm_errors import LLMAuthRejected, LLMUnavailable
 from ..engine.query_rewriter import QueryRewriter
 from ..engine.reranker import HybridSearch
 from ..engine.runtime_config import get_runtime_config
+from ..engine.sparse_index import get_sparse_index
 from .access import require_kb_action
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,25 @@ def _apply_source_weights(results: list[dict], weights: dict[str, float]) -> lis
             r["score"] = r.get("score", 0) * w
             r["source_weight"] = w
     return sorted(results, key=lambda x: x.get("score", 0), reverse=True)
+
+
+async def _sparse_channel_for(kb_id: str, embed: Any, query: str) -> tuple[dict[str, float] | None, Any]:
+    # Issue #132 (R10): query-side sparse weights + chunk-weight lookup for the
+    # third RRF channel. Feature-flagged (FUSION_RAG_SPARSE_CHANNEL, default
+    # off); any failure degrades to (None, None) = plain 2-channel fusion.
+    if not get_runtime_config().sparse_channel:
+        return None, None
+    try:
+        _, sparse = await embed.embed_batch_sparse([query])
+        q_sparse = sparse[0] if sparse else None
+    except Exception as e:
+        logger.warning("sparse channel: query sparse embed failed, degrading: %s", e)
+        return None, None
+    if not q_sparse:
+        return None, None
+    from .routes import _get_kb_storage_path
+
+    return q_sparse, get_sparse_index(f"{_get_kb_storage_path(kb_id)}/sparse.db").get_map
 
 
 def _audit_and_trajectory(
@@ -252,10 +272,17 @@ async def search(
             import asyncio as _asyncio
 
             valid_rewrites = [q for q in rewritten if q]
-            vectors = await embed.embed_batch(valid_rewrites)
+            # Issue #132 (R10): one combined dense+sparse call per rewrite
+            # batch (zero extra model passes) — only when the flag is on;
+            # flag off keeps the cached dense embed_batch path unchanged.
+            sparse_list: list = [None] * len(valid_rewrites)
+            if get_runtime_config().sparse_channel:
+                vectors, sparse_list = await embed.embed_batch_sparse(valid_rewrites)
+            else:
+                vectors = await embed.embed_batch(valid_rewrites)
             sem = _asyncio.Semaphore(4)
 
-            async def _one_search(q, qv):
+            async def _one_search(q, qv, q_sparse=None):
                 if not qv or all(v == 0.0 for v in qv):
                     return []
                 async with sem:
@@ -264,18 +291,34 @@ async def search(
                         sub_filters = {}
                         if folder_prefix:
                             sub_filters["folder_prefix"] = folder_prefix
+                        sub_sparse = None
+                        sub_lookup = None
+                        if q_sparse:
+                            from .routes import _get_kb_storage_path
+
+                            sub_sparse = q_sparse
+                            sub_lookup = get_sparse_index(
+                                f"{_get_kb_storage_path(kb_id)}/sparse.db"
+                            ).get_map
                         return await hs.search(
                             qv,
                             q,
                             top_k=fetch_k,
                             threshold=threshold,
                             filters=sub_filters if sub_filters else None,
+                            query_sparse=sub_sparse,
+                            sparse_lookup=sub_lookup,
                         )
                     # P8/硬伤8: vec_store.search is sync LanceDB+BM25; push off-loop.
                     sub = await run_in_threadpool(vec_store.search, qv, top_k=fetch_k, threshold=threshold)
                     return await run_in_threadpool(_apply_search_filters, sub, folder_prefix, metadata_filter)
 
-            sub_lists = await _asyncio.gather(*[_one_search(q, qv) for q, qv in zip(valid_rewrites, vectors)])
+            sub_lists = await _asyncio.gather(
+                *[
+                    _one_search(q, qv, sparse_list[i])
+                    for i, (q, qv) in enumerate(zip(valid_rewrites, vectors))
+                ]
+            )
             all_results = [r for sub in sub_lists for r in sub]
             seen = {}
             for r in all_results:
@@ -322,12 +365,17 @@ async def search(
         filters = {}
         if folder_prefix:
             filters["folder_prefix"] = folder_prefix
+        # Issue #132 (R10): query-side sparse weights + chunk lookup for the
+        # third RRF channel (feature-flagged; (None, None) when off/unavailable).
+        sparse_query, sparse_lookup = await _sparse_channel_for(kb_id, embed, query)
         results = await hs.search(
             query_vector,
             query,
             top_k=pool_k,
             threshold=threshold,
             filters=filters if filters else None,
+            query_sparse=sparse_query,
+            sparse_lookup=sparse_lookup,
         )
     else:
         # L10: fetch wider than top_k so _apply_search_filters (folder_prefix /
@@ -478,12 +526,16 @@ async def ask(
             filters = {}
             if folder_prefix:
                 filters["folder_prefix"] = folder_prefix
+            # Issue #132 (R10): per-round sparse weights (CRAG rounds rewrite q).
+            sparse_query, sparse_lookup = await _sparse_channel_for(kb_id, embed, q)
             found = await hs.search(
                 qv,
                 q,
                 top_k=pool_k,
                 threshold=kb.config.similarity_threshold,
                 filters=filters if filters else None,
+                query_sparse=sparse_query,
+                sparse_lookup=sparse_lookup,
             )
         else:
             fetch_mult = get_runtime_config().search_fetch_k_multiplier

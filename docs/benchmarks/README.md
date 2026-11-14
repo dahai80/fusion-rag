@@ -217,3 +217,35 @@ Consequence: `pdf_backend` selectable per KB ("legacy" default / "docling")
 or globally via `FUSION_RAG_PDF_BACKEND`; any docling failure falls back to
 legacy (logged, never fails ingest). Scanned PDFs keep the #84 OCR-service
 path (docling OCR stays off — no confidence metadata).
+
+## Native sparse-channel ablation — 2026-11-14 (`sparse-ablation.json`, mode=real, issue #132, R10)
+
+Upstream unblock: fusion-mlx#1621 CLOSED (shipped in fusion-mlx PR #1627) —
+`POST /v1/embeddings` accepts `"return_sparse": true` and returns BGE-M3's
+lexical weights per input (`{"token_id": weight}`, relu + max-pool per
+FlagEmbedding `encode_sparse`; sparse head lazy-loaded). fusion-rag requests
+dense + sparse in ONE call at ingest (zero extra model passes), persists
+per-chunk weights to `{storage_path}/sparse.db`, and at query time
+dot-products the query's sparse weights against the candidate pool (union of
+vector + BM25 results) as a THIRD RRF channel. Flag: `FUSION_RAG_SPARSE_CHANNEL=1`
+(default off); models without the sparse head degrade to BM25 (400 / missing
+field = one-shot downgrade).
+
+Deterministic recall_bench corpus (55 queries, 505 chunks, live BGE-M3):
+
+| arm | recall@5 | recall@10 | ndcg@10 | mrr@10 | map@10 |
+|-----|----------|-----------|---------|--------|--------|
+| bm25_only | 0.7939 | **0.9212** | 0.9469 | 1.0 | 0.9212 |
+| vector_only | 0.7848 | 0.9182 | 0.9430 | 1.0 | 0.9147 |
+| rrf2 (dense+bm25, default) | 0.7909 | **0.9212** | 0.9460 | 1.0 | 0.919 |
+| rrf3 (dense+bm25+sparse) | 0.7576 | 0.9182 | 0.9327 | 1.0 | 0.8907 |
+
+**Verdict: no lift — flag stays default OFF.** rrf3 is −0.003 recall@10 and
+−0.0133 ndcg@10 vs rrf2. The corpus queries are exact term triples, the regime
+where BM25 already saturates; BGE-M3's learned lexical weights are near-redundant
+with Okapi BM25 there, and their third RRF vote can displace a BM25 hit (map@10
+0.919 → 0.8907). The sparse channel remains available as an opt-in
+(`FUSION_RAG_SPARSE_CHANNEL=1`) for corpora with lexical gaps BM25 misses
+(morphological variants, CJK/EN mixing at the token level); expected benefit
+requires a corpus with exact-term-unfriendly queries. Ingest cost is ~zero
+(same single embeddings call); query cost is one extra sparse-embed call.

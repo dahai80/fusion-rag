@@ -200,6 +200,8 @@ class HybridSearch:
         top_k: int = 10,
         threshold: float = 0.0,
         filters: dict | None = None,
+        query_sparse: dict[str, float] | None = None,
+        sparse_lookup: Any = None,
     ) -> list[dict[str, Any]]:
         # P-P1-1: vector_store.search / keyword_search are sync (LanceDB + BM25).
         # Calling them inline in an async handler blocks the event loop for the
@@ -214,8 +216,34 @@ class HybridSearch:
             vector_results = self._apply_filters(vector_results, filters)
             keyword_results = self._apply_filters(keyword_results, filters)
 
+        # Issue #132 (R10): third fusion channel — sparse lexical weights over
+        # the candidate pool (union of vector + keyword results). Scored with
+        # the same-model ingest-time weights via a batched SQLite lookup, so no
+        # full-corpus scan. Unavailable (no query weights / empty index /
+        # alpha method) = plain 2-channel fusion, byte-identical to before.
+        sparse_results: list[dict] = []
+        if self.method == "rrf" and sparse_lookup is not None and query_sparse:
+            cand_ids = [r.get("id", "") for r in vector_results] + [
+                r.get("id", "") for r in keyword_results
+            ]
+            wmap = await run_in_threadpool(sparse_lookup, [c for c in cand_ids if c]) or {}
+            if wmap:
+                from .sparse_index import sparse_dot
+
+                scored = [
+                    (cid, sparse_dot(query_sparse, w))
+                    for cid, w in wmap.items()
+                ]
+                scored = [x for x in scored if x[1] > 0.0]
+                scored.sort(key=lambda x: x[1], reverse=True)
+                result_map = {r["id"]: r for r in vector_results}
+                for r in keyword_results:
+                    result_map.setdefault(r["id"], r)
+                sparse_results = [dict(result_map.get(cid, {"id": cid})) for cid, _ in scored]
+                logger.debug("sparse channel: %d candidates scored, %d positive", len(wmap), len(sparse_results))
+
         if self.method == "rrf":
-            return self._rrf_fusion(vector_results, keyword_results, top_k, threshold)
+            return self._rrf_fusion(vector_results, keyword_results, top_k, threshold, sparse_results)
         return self._alpha_fusion(vector_results, keyword_results, top_k, threshold)
 
     def _alpha_fusion(
@@ -262,7 +290,12 @@ class HybridSearch:
 
     @staticmethod
     def _rrf_fusion(
-        vector_results: list[dict], keyword_results: list[dict], top_k: int, threshold: float, k: int = 60
+        vector_results: list[dict],
+        keyword_results: list[dict],
+        top_k: int,
+        threshold: float,
+        sparse_results: list[dict] | None = None,
+        k: int = 60,
     ) -> list[dict[str, Any]]:
         scores: dict[str, float] = {}
         for rank, r in enumerate(vector_results, 1):
@@ -271,9 +304,16 @@ class HybridSearch:
         for rank, r in enumerate(keyword_results, 1):
             rid = r.get("id", "")
             scores[rid] = scores.get(rid, 0) + 1.0 / (k + rank)
+        # Issue #132 (R10): optional third channel — same rank-based RRF weight.
+        for rank, r in enumerate(sparse_results or [], 1):
+            rid = r.get("id", "")
+            scores[rid] = scores.get(rid, 0) + 1.0 / (k + rank)
 
         result_map = {r["id"]: r for r in vector_results}
         for r in keyword_results:
+            if r["id"] not in result_map:
+                result_map[r["id"]] = r
+        for r in sparse_results or []:
             if r["id"] not in result_map:
                 result_map[r["id"]] = r
 

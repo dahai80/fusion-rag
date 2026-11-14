@@ -18,6 +18,8 @@ from ..engine.contextualizer import Contextualizer
 from ..engine.doc_acl import validate_acl
 from ..engine.document import CONTENT_TYPE_MAP, DocumentParser, DocumentType, ParseResult
 from ..engine.llm_errors import LLMUnavailable
+from ..engine.runtime_config import get_runtime_config
+from ..engine.sparse_index import get_sparse_index
 from ..store.metadata_store import MetadataStore
 from ..store.vector_store import VectorStore
 from .access import require_kb_action
@@ -173,6 +175,8 @@ async def _write_doc_to_stores(
     chars: int,
     chunk_metadata: dict | None = None,
     chunk_extra_metas: list[dict] | None = None,
+    sparse_weights: list[dict[str, float] | None] | None = None,
+    kb_id: str = "",
 ) -> tuple[bool, str | None, bool]:
     """P4-1 + 硬伤B: the ONE place that writes a doc's chunks to all stores.
 
@@ -316,6 +320,25 @@ async def _write_doc_to_stores(
         return (False, f"metadata write failed: {e}", rollback_failed)
 
     logger.info("_write_doc_to_stores: doc %s indexed, %d chunks", doc_id, len(chunks))
+
+    # Issue #132 (R10): persist per-chunk BGE-M3 sparse weights (third RRF
+    # channel). Enhancement tier — a failure here logs and moves on, never
+    # fails an ingest that already succeeded in vectors + BM25 + metadata.
+    if sparse_weights and get_runtime_config().sparse_channel:
+        try:
+            rows = [
+                (f"{doc_id}_{i}", doc_id, w)
+                for i, w in enumerate(sparse_weights)
+                if w
+            ]
+            if rows:
+                from .routes import _get_kb_storage_path
+
+                sparse_idx = get_sparse_index(f"{_get_kb_storage_path(kb_id)}/sparse.db")
+                await run_in_threadpool(sparse_idx.add_batch, rows)
+                logger.info("_write_doc_to_stores: %d sparse weight rows for doc %s", len(rows), doc_id)
+        except Exception as e:
+            logger.warning("_write_doc_to_stores: sparse index write failed for doc %s (non-fatal): %s", doc_id, e)
     return (True, None, False)
 
 
@@ -442,7 +465,9 @@ async def _index_document(
     for cd, c in zip(chunk_dicts, chunks):
         ctx = cd.get("context", "")
         embed_texts.append((ctx + " " + c.text).strip() if ctx else c.text)
-    vectors = await embed.embed_batch(embed_texts)
+    # Issue #132 (R10): combined dense+sparse call (sparse parsed only when
+    # FUSION_RAG_SPARSE_CHANNEL=1; otherwise identical dense-only request).
+    vectors, sparse_weights = await embed.embed_batch_sparse(embed_texts)
 
     vec_store = _get_vector_store(kb_id)
 
@@ -470,6 +495,15 @@ async def _index_document(
             await run_in_threadpool(vec_store.delete_by_chunk_ids, old_ids, old_path)
         else:
             await run_in_threadpool(vec_store.delete_by_doc, old_path)
+        # Issue #132 (R10): exact-chunk-id teardown of the sparse tier too.
+        try:
+            from .routes import _get_kb_storage_path
+
+            await run_in_threadpool(
+                get_sparse_index(f"{_get_kb_storage_path(kb_id)}/sparse.db").delete_by_chunk_ids, old_ids
+            )
+        except Exception as e:
+            logger.warning("index_document: sparse teardown failed for doc %s (non-fatal): %s", doc_id, e)
         await run_in_threadpool(meta_store.delete_chunks_by_doc, doc_id)
         await run_in_threadpool(meta_store.delete_document, doc_id)
     # P4-1 + 硬伤B: single write path. vectors-first ordering (hard-undo side
@@ -488,6 +522,8 @@ async def _index_document(
         chunk_dicts=chunk_dicts,
         chars=result.chars,
         chunk_extra_metas=chunk_extra_metas,
+        sparse_weights=sparse_weights,
+        kb_id=kb_id,
     )
     if not ok:
         # H2: rollback_failed means orphan vectors/meta may be durable. Signal
@@ -706,7 +742,9 @@ async def ingest_content(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     for cd, c in zip(chunk_dicts, chunks):
         ctx = cd.get("context", "")
         embed_texts.append((ctx + " " + c.text).strip() if ctx else c.text)
-    vectors = await embed.embed_batch(embed_texts)
+    # Issue #132 (R10): combined dense+sparse call (sparse parsed only when
+    # FUSION_RAG_SPARSE_CHANNEL=1).
+    vectors, sparse_weights = await embed.embed_batch_sparse(embed_texts)
 
     vec_store = _get_vector_store(kb_id)
     meta_store = _get_meta_store(kb_id)
@@ -728,6 +766,8 @@ async def ingest_content(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
         chunk_dicts=chunk_dicts,
         chars=len(content),
         chunk_metadata=metadata,
+        sparse_weights=sparse_weights,
+        kb_id=kb_id,
     )
     if not ok:
         # H2: 503 on rollback_failed (orphan data durable), else 500.
@@ -786,6 +826,16 @@ async def delete_document(kb_id: str, doc_id: str) -> dict[str, Any]:
             logger.error("delete_document: vector delete_by_doc failed for %s: %s", doc_id, e)
             raise HTTPException(500, f"vector delete failed: {e}") from e
         try:
+            # Issue #132 (R10): sparse tier teardown by doc_id (best-effort —
+            # a missing sparse.db or empty index must not fail the delete).
+            try:
+                from .routes import _get_kb_storage_path
+
+                await run_in_threadpool(
+                    get_sparse_index(f"{_get_kb_storage_path(kb_id)}/sparse.db").delete_by_doc, doc_id
+                )
+            except Exception as se:
+                logger.warning("delete_document: sparse delete failed for doc %s (non-fatal): %s", doc_id, se)
             await run_in_threadpool(meta_store.delete_chunks_by_doc, doc_id)
             await run_in_threadpool(meta_store.delete_document, doc_id)
         except Exception as e:
@@ -849,7 +899,9 @@ async def replace_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dic
     for cd, c in zip(chunk_dicts, chunks):
         ctx = cd.get("context", "")
         embed_texts.append((ctx + " " + c.text).strip() if ctx else c.text)
-    vectors = await embed.embed_batch(embed_texts)
+    # Issue #132 (R10): combined dense+sparse call (sparse parsed only when
+    # FUSION_RAG_SPARSE_CHANNEL=1).
+    vectors, sparse_weights = await embed.embed_batch_sparse(embed_texts)
 
     # New content prepared successfully — now swap. Old index is removed, new
     # index written. On a vector/bm25 write failure the old index is already
@@ -865,6 +917,15 @@ async def replace_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dic
         await run_in_threadpool(vec_store.delete_by_chunk_ids, old_ids, old_path)
     else:
         await run_in_threadpool(vec_store.delete_by_doc, old_path)
+    # Issue #132 (R10): exact-chunk-id teardown of the sparse tier too.
+    try:
+        from .routes import _get_kb_storage_path
+
+        await run_in_threadpool(
+            get_sparse_index(f"{_get_kb_storage_path(kb_id)}/sparse.db").delete_by_chunk_ids, old_ids
+        )
+    except Exception as e:
+        logger.warning("replace_document: sparse teardown failed for doc %s (non-fatal): %s", doc_id, e)
     await run_in_threadpool(meta_store.delete_chunks_by_doc, doc_id)
     await run_in_threadpool(meta_store.delete_document, doc_id)
 
@@ -882,6 +943,8 @@ async def replace_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dic
         vectors=vectors,
         chunk_dicts=chunk_dicts,
         chars=result.chars,
+        sparse_weights=sparse_weights,
+        kb_id=kb_id,
     )
     if not ok:
         # H2: 503 on rollback_failed, else 500. On replace the old index is
@@ -1067,7 +1130,9 @@ async def scan_directory(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
         for cd, c in zip(chunk_dicts, chunks):
             ctx = cd.get("context", "")
             embed_texts.append((ctx + " " + c.text).strip() if ctx else c.text)
-        vectors = await embed.embed_batch(embed_texts)
+        # Issue #132 (R10): combined dense+sparse call (sparse parsed only
+        # when FUSION_RAG_SPARSE_CHANNEL=1).
+        vectors, sparse_weights = await embed.embed_batch_sparse(embed_texts)
 
         doc_id = uuid.uuid4().hex[:16]
         # P4-1 + 硬伤B: single write path, vectors-first, unified rollback.
@@ -1085,6 +1150,8 @@ async def scan_directory(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
             vectors=vectors,
             chunk_dicts=chunk_dicts,
             chars=result.chars,
+            sparse_weights=sparse_weights,
+            kb_id=kb_id,
         )
         if not ok:
             errors.append(

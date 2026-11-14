@@ -250,6 +250,10 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.42
+
+- **BGE-M3 原生稀疏通道（R10，issue #132）** — 上游解锁（fusion-mlx#1621 已在 PR #1627 交付）：`POST /v1/embeddings` 支持 `"return_sparse": true`，按输入返回 BGE-M3 词法权重。`EmbeddingClient.embed_batch_sparse()` 单次调用同时取 dense + sparse（零额外模型前向）；逐块权重落盘 `{storage_path}/sparse.db`；混合检索将稀疏点积作为第三路 RRF 融合。选配 `FUSION_RAG_SPARSE_CHANNEL=1` —— 默认关闭：消融实测（`docs/benchmarks/sparse-ablation.json`）在 recall_bench 语料上无提升（rrf3 recall@10 0.9182 vs rrf2 0.9212，精确词查询 BM25 已饱和）。无稀疏头的模型自动降级 BM25（一次性 400/缺字段降级）；删除/替换按精确 chunk-id 清理稀疏层，失败不影响主流程。
+
 ### v0.8.41
 
 - **权限感知入库（R11，issue #133）** — 入库现在采集文档级 ACL 元数据（`{"visibility": "public"|"tenant"|"private", "tenant", "users"}`，POST /documents 与 /ingest 的 `acl` 字段；`GitLoader(acl=...)` 仓库级盖章）；`/search`、`/ask`、`/similar` 强制执行且**调用方无法绕过**，查询时从 documents 表解析权威 ACL —— PATCH acl（撤销 = `{"visibility": "public"}`）无需重建索引即生效。调用方身份 = 已解析请求租户（#61/#68）+ 新增 `X-Fusion-User` 头。无 ACL = public：无 ACL 的知识库与单租户开发零变化；无身份调用方只见 public 文档。

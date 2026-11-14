@@ -676,6 +676,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.42
+
+- **Native BGE-M3 sparse channel (R10, issue #132)** — unblocked upstream (fusion-mlx#1621 shipped in PR #1627): `POST /v1/embeddings` with `"return_sparse": true` returns BGE-M3 lexical weights per input. `EmbeddingClient.embed_batch_sparse()` fetches dense + sparse in ONE call (zero extra model passes); per-chunk weights persist to `{storage_path}/sparse.db`; hybrid search RRF-fuses a THIRD ranking (sparse dot-product over the candidate pool). Opt-in `FUSION_RAG_SPARSE_CHANNEL=1` — default OFF: measured ablation (`docs/benchmarks/sparse-ablation.json`) shows no lift on the recall_bench corpus (rrf3 recall@10 0.9182 vs rrf2 0.9212; the exact-term corpus saturates BM25). Models without a sparse head degrade to BM25 automatically (one-shot 400/missing-field downgrade); sparse teardown on delete/replace is exact-chunk-id and non-fatal.
+
 ## What's New in v0.8.41
 
 - **Permission-aware ingestion (R11, issue #133)** — ingestion now captures per-document ACL metadata (`{"visibility": "public"|"tenant"|"private", "tenant", "users"}`) on POST /documents + /ingest and repo-level via `GitLoader(acl=...)`; search (`/search`, `/ask`, `/similar`) enforces it with **no caller opt-out**, resolving the authoritative acl from the documents table at query time — PATCH acl (revoke = `{"visibility": "public"}`) propagates without reindex. Caller identity = resolved request tenant (#61/#68) + new `X-Fusion-User` header. Absent acl = public: ACL-less KBs and single-tenant dev unchanged; identity-less callers see public documents only.
