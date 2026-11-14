@@ -676,6 +676,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.41
+
+- **Permission-aware ingestion (R11, issue #133)** — ingestion now captures per-document ACL metadata (`{"visibility": "public"|"tenant"|"private", "tenant", "users"}`) on POST /documents + /ingest and repo-level via `GitLoader(acl=...)`; search (`/search`, `/ask`, `/similar`) enforces it with **no caller opt-out**, resolving the authoritative acl from the documents table at query time — PATCH acl (revoke = `{"visibility": "public"}`) propagates without reindex. Caller identity = resolved request tenant (#61/#68) + new `X-Fusion-User` header. Absent acl = public: ACL-less KBs and single-tenant dev unchanged; identity-less callers see public documents only.
+
 ## What's New in v0.8.40
 
 - **Optional Docling layout-aware PDF ingestion (R9, issue #131)** — PDF extraction was PyMuPDF-only: per-cell text with no layout understanding, so table rows scatter across column-contiguous chunks. New `engine/docling_parser.py` (opt-in `pip install 'fusion-rag[docling]'`): TableFormer ACCURATE table structure + reading order, per-page markdown export giving exact #77 page spans. Selectable per KB (`pdf_backend`: ""/legacy/docling) or globally (`FUSION_RAG_PDF_BACKEND`); ANY docling failure falls back to legacy — ingest never fails. Ablation (`docs/benchmarks/docling-ablation.json`): on column-major cell PDFs legacy row-intact ratio is 0.00 (no chunk holds item+value together) vs docling 1.00 with BM25 recall@10 1.0; parse cost ~2.3 s/PDF (CPU-pinned — TableFormer breaks under auto-MPS on Apple Silicon).

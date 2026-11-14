@@ -250,6 +250,10 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.41
+
+- **权限感知入库（R11，issue #133）** — 入库现在采集文档级 ACL 元数据（`{"visibility": "public"|"tenant"|"private", "tenant", "users"}`，POST /documents 与 /ingest 的 `acl` 字段；`GitLoader(acl=...)` 仓库级盖章）；`/search`、`/ask`、`/similar` 强制执行且**调用方无法绕过**，查询时从 documents 表解析权威 ACL —— PATCH acl（撤销 = `{"visibility": "public"}`）无需重建索引即生效。调用方身份 = 已解析请求租户（#61/#68）+ 新增 `X-Fusion-User` 头。无 ACL = public：无 ACL 的知识库与单租户开发零变化；无身份调用方只见 public 文档。
+
 ### v0.8.40
 
 - **可选 Docling 版面感知 PDF 解析（R9，issue #131）** — 此前 PDF 解析只有 PyMuPDF：逐单元格文本、无版面理解，表格行被打散到按列连续的块里。新增 `engine/docling_parser.py`（可选装 `pip install 'fusion-rag[docling]'`）：TableFormer ACCURATE 表格结构 + 阅读顺序，按页导出 markdown，#77 页码锚点精确。可按知识库选择（`pdf_backend`：""/legacy/docling）或全局 `FUSION_RAG_PDF_BACKEND`；docling 任何失败自动回退 legacy —— 入库永不失败。消融结果（`docs/benchmarks/docling-ablation.json`）：列优先单元格 PDF 上 legacy 行完整率 0.00（没有任何块同时含 item 与值）vs docling 1.00 且 BM25 recall@10 1.0；解析代价约 2.3 秒/PDF（固定 CPU —— Apple Silicon 上 TableFormer 在自动 MPS 下崩溃）。

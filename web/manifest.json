@@ -4,7 +4,7 @@
     "title_en": "Knowledge Base",
     "description": "离线向量知识库：建库、文档入库、混合检索测试、服务健康。",
     "description_en": "Offline vector knowledge base: KB CRUD, document ingest, hybrid search tester, service health.",
-    "version": "0.8.40",
+    "version": "0.8.41",
     "path": "/rag",
     "icon": "Database",
     "entry": "/shell/fusion-rag/",
