@@ -1,0 +1,31 @@
+{
+  "generated_at": "2026-11-14",
+  "queries": 55,
+  "route_mix": {
+    "simple": 49,
+    "standard": 6
+  },
+  "metrics_full": {
+    "recall@5": 0.7909,
+    "recall@10": 0.9212,
+    "mrr@10": 1.0,
+    "ndcg@10": 0.946,
+    "map@10": 0.919
+  },
+  "metrics_routed": {
+    "recall@5": 0.7848,
+    "recall@10": 0.9182,
+    "mrr@10": 1.0,
+    "ndcg@10": 0.943,
+    "map@10": 0.9147
+  },
+  "latency_ms_p50_by_level": {
+    "full": {
+      "full": 5.0
+    },
+    "routed": {
+      "simple": 3.4,
+      "standard": 5.0
+    }
+  }
+}
