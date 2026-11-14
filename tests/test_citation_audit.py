@@ -75,12 +75,23 @@ class TestCitationAuditStore:
 
 class TestAuditHook:
     async def test_flag_off_writes_nothing(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("FUSION_RAG_CITATION_AUDIT", raising=False)
+        # R2 (issue #124): default is now ON; explicit 0 disables.
+        monkeypatch.setenv("FUSION_RAG_CITATION_AUDIT", "0")
         monkeypatch.setattr("fusion_rag.api.routes._get_kb_storage_path", lambda kb_id: str(tmp_path / kb_id))
         reset_runtime_config()
         try:
             await _citation_audit_async("kb1", "q", [], _results())
             assert not list(tmp_path.rglob("citation_audit.db"))
+        finally:
+            reset_runtime_config()
+
+    def test_default_on(self, monkeypatch):
+        # R2 (issue #124): citation auditing enabled by default, env can
+        # still turn it off.
+        monkeypatch.delenv("FUSION_RAG_CITATION_AUDIT", raising=False)
+        reset_runtime_config()
+        try:
+            assert get_runtime_config().citation_audit is True
         finally:
             reset_runtime_config()
 
