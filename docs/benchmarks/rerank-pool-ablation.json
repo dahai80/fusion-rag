@@ -1,0 +1,48 @@
+{
+  "generated_at": "2026-11-14",
+  "mode": "real",
+  "rerank_model": "bge-reranker-v2-m3",
+  "queries": 55,
+  "pools": {
+    "20": {
+      "recall@5": 0.7939,
+      "recall@10": 0.9212,
+      "mrr@10": 1.0,
+      "ndcg@10": 0.9469,
+      "map@10": 0.9212,
+      "rerank_latency_p50_ms": 113.74,
+      "rerank_latency_p95_ms": 162.45,
+      "rerank_calls": 55
+    },
+    "50": {
+      "recall@5": 0.7939,
+      "recall@10": 0.9212,
+      "mrr@10": 1.0,
+      "ndcg@10": 0.9469,
+      "map@10": 0.9212,
+      "rerank_latency_p50_ms": 260.18,
+      "rerank_latency_p95_ms": 393.56,
+      "rerank_calls": 55
+    },
+    "100": {
+      "recall@5": 0.7939,
+      "recall@10": 0.9212,
+      "mrr@10": 1.0,
+      "ndcg@10": 0.9469,
+      "map@10": 0.9212,
+      "rerank_latency_p50_ms": 600.28,
+      "rerank_latency_p95_ms": 1016.75,
+      "rerank_calls": 55
+    },
+    "150": {
+      "recall@5": 0.7939,
+      "recall@10": 0.9212,
+      "mrr@10": 1.0,
+      "ndcg@10": 0.9469,
+      "map@10": 0.9212,
+      "rerank_latency_p50_ms": 1297.77,
+      "rerank_latency_p95_ms": 1837.99,
+      "rerank_calls": 55
+    }
+  }
+}

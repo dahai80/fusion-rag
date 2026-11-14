@@ -21,6 +21,19 @@ Retrieval-quality evidence for issue #79. Corpus: 505 chunks / 90 docs
 seed 20261025), 55 ground-truth queries. Run with
 `scripts/recall_benchmark.py --mode real` against live fusion-mlx BGE-M3.
 
+## Rerank pool A/B — 2026-11-14 (`rerank-pool-ablation.json`, mode=real, R3/#125)
+
+Live bge-reranker-v2-m3 (via fusion-mlx `/v1/rerank`, direct) over the same 55-query corpus, RRF candidates reranked per pool then truncated to top-10:
+
+| pool | recall@5 | recall@10 | mrr@10 | ndcg@10 | map@10 | p50 ms | p95 ms |
+|-----:|---------:|----------:|-------:|--------:|-------:|-------:|-------:|
+| 20   | 0.7939 | 0.9212 | 1.0000 | 0.9469 | 0.9212 | 114   | 162   |
+| 50   | 0.7939 | 0.9212 | 1.0000 | 0.9469 | 0.9212 | 260   | 394   |
+| 100  | 0.7939 | 0.9212 | 1.0000 | 0.9469 | 0.9212 | 600   | 1017  |
+| 150  | 0.7939 | 0.9212 | 1.0000 | 0.9469 | 0.9212 | 1298  | 1838  |
+
+**Verdict: `rerank_top_n=20` already saturates on this corpus** — identical metrics at every pool size, latency grows ~linearly (5.6x p50 from 20→100, 11x to 150). Default stays 20. Caveat: the synthetic corpus has clean ground truth and few hard negatives; re-run `scripts/rerank_pool_ablation.py` on a real labeled set before concluding for production traffic.
+
 ## Latest run — 2026-11-14 (`recall-2026-11-14.json`, mode=real)
 
 | mode | recall@5 | recall@10 | mrr@10 |

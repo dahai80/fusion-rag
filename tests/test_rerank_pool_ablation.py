@@ -6,8 +6,8 @@ from __future__ import annotations
 import tempfile
 
 from fusion_rag.engine.recall_bench import (
-    MockEmbed,
     SEED,
+    MockEmbed,
     generate_corpus,
     run_rerank_pool_ablation,
 )
