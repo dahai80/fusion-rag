@@ -413,7 +413,11 @@ async def _index_document(kb_id: str, file_path: str, contextualize: bool = True
             return {"error": "OCR produced no text chunks"}
         chunk_dicts = [{"id": f"tmp_{i}", "text": c.text, "context": ""} for i, c in enumerate(chunks)]
     else:
-        chunker = Chunker(strategy=kb.config.chunk_strategy, chunk_size=kb.config.chunk_size)
+        chunker = Chunker(
+            strategy=kb.config.chunk_strategy,
+            chunk_size=kb.config.chunk_size,
+            chunk_overlap=kb.config.chunk_overlap,
+        )
         chunks = await chunker.chunk(result)
         if not chunks:
             return {"error": "no chunks produced"}
@@ -653,7 +657,11 @@ async def ingest_content(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
         metadata={},
     )
 
-    chunker = Chunker(strategy=kb.config.chunk_strategy, chunk_size=kb.config.chunk_size)
+    chunker = Chunker(
+        strategy=kb.config.chunk_strategy,
+        chunk_size=kb.config.chunk_size,
+        chunk_overlap=kb.config.chunk_overlap,
+    )
     chunks = await chunker.chunk(parse_result)
 
     contextualize = data.get("contextualize", True)
@@ -796,7 +804,11 @@ async def replace_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dic
     if result.error:
         raise HTTPException(400, result.error)
 
-    chunker = Chunker(strategy=kb.config.chunk_strategy, chunk_size=kb.config.chunk_size)
+    chunker = Chunker(
+        strategy=kb.config.chunk_strategy,
+        chunk_size=kb.config.chunk_size,
+        chunk_overlap=kb.config.chunk_overlap,
+    )
     chunks = await chunker.chunk(result)
     if not chunks:
         raise HTTPException(400, "replacement file produced no chunks (keeping existing index)")
@@ -991,7 +1003,11 @@ async def scan_directory(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
             errors.append({"file": result.file_name, "error": result.error})
             continue
 
-        chunker = Chunker(strategy=kb.config.chunk_strategy, chunk_size=kb.config.chunk_size)
+        chunker = Chunker(
+            strategy=kb.config.chunk_strategy,
+            chunk_size=kb.config.chunk_size,
+            chunk_overlap=kb.config.chunk_overlap,
+        )
         chunks = await chunker.chunk(result)
         if not chunks:
             continue

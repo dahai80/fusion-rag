@@ -63,6 +63,17 @@ async def create_knowledge_base(data: dict[str, Any]) -> dict[str, Any]:
     description = data.get("description", "")
     chunk_strategy = data.get("chunk_strategy", "semantic")
     embedding_model = data.get("embedding_model", "BGE-M3")
+    # Issue #130 (R8): optional chunking profile (markdown/prose/code/table);
+    # explicit chunk_size/chunk_overlap override the profile.
+    from ..engine.chunker import Chunker
+
+    chunk_profile = str(data.get("chunk_profile", "") or "")
+    try:
+        Chunker.resolve_profile(chunk_profile)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    chunk_size = data.get("chunk_size")
+    chunk_overlap = data.get("chunk_overlap")
     # Issue #61: stamp the request's authoritative tenant on the new KB so
     # later list/get scope it to this tenant. None when isolation is off.
     from .tenant import get_request_tenant
@@ -76,6 +87,9 @@ async def create_knowledge_base(data: dict[str, Any]) -> dict[str, Any]:
         embedding_model=embedding_model,
         kb_id=kb_id,
         tenant=tenant,
+        chunk_profile=chunk_profile,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
     )
     status = "exists" if existing else "created"
     return {"id": kb.id, "name": kb.config.name, "status": status}

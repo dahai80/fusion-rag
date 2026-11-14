@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
 
 from .document import DocumentParser, ParseResult
 
@@ -34,6 +34,30 @@ class Chunk:
 
 class Chunker:
     """Split document text into chunks for embedding."""
+
+    # Issue #130 (R8): per-document-type chunking profiles, selectable per KB.
+    # Values come from the chunk-size ablation (docs/benchmarks/
+    # chunk-size-ablation.json, real BGE-M3 + BM25 over the labeled corpus):
+    # 512 chars @ 12.5% overlap won recall@10 AND map@10; 768 was worse on
+    # both; 1024 collapsed recall (docs merged into few chunks). Code gets a
+    # finer profile (structural boundaries make smaller units coherent);
+    # table-heavy gets the finest (row-aligned slices). prose == markdown
+    # winner (768 explicitly rejected by the bench).
+    CHUNK_PROFILES: ClassVar[dict[str, dict[str, int]]] = {
+        "markdown": {"chunk_size": 512, "chunk_overlap": 64},
+        "prose": {"chunk_size": 512, "chunk_overlap": 64},
+        "code": {"chunk_size": 384, "chunk_overlap": 48},
+        "table": {"chunk_size": 256, "chunk_overlap": 32},
+    }
+
+    @classmethod
+    def resolve_profile(cls, profile: str) -> dict[str, int] | None:
+        if not profile:
+            return None
+        p = cls.CHUNK_PROFILES.get(profile.strip().lower())
+        if p is None:
+            raise ValueError(f"unknown chunk_profile {profile!r}; choose from {sorted(cls.CHUNK_PROFILES)}")
+        return p
 
     def __init__(self, strategy: str = "semantic", chunk_size: int = 512, chunk_overlap: int = 64):
         # F10: overlap >= chunk_size makes the fixed-stride step <= 0, so the

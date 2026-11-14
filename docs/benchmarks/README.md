@@ -159,3 +159,36 @@ itself — treat these numbers as a regression gate, not a quality measurement;
 a real multi-hop corpus is required before enabling the layer in the service.
 `search_ppr` is NOT wired into any route (feature off by default until that
 validation exists).
+
+## Chunk-size ablation — 2026-11-14 (`chunk-size-ablation.json`, mode=real, issue #130)
+
+Semantic chunker at sizes 256/384/512/768/1024 chars (overlap = size/8) over
+the labeled corpus, real BGE-M3 + BM25:
+
+| size | chunks | vector recall@10 | bm25 recall@10 | vector map@10 | bm25 map@10 |
+|------|--------|------------------|----------------|---------------|-------------|
+| 256 | 582 | 0.9121 | 0.9212 | 0.8498 | 0.8818 |
+| 384 | 578 | 0.9121 | 0.9212 | 0.8498 | 0.8818 |
+| **512** | 505 | **0.9182** | **0.9212** | **0.9147** | **0.9212** |
+| 768 | 432 | 0.9061 | 0.9091 | 0.9026 | 0.9091 |
+| 1024 | 309 | 0.5394 | 0.5394 | 0.5384 | 0.5394 |
+
+**512 @ 12.5% overlap wins recall AND map** — the existing default is
+bench-validated, not magic. 768 worse on both axes; 1024 collapses (topic
+docs merge into few chunks, evidence diluted across retrieved chunks).
+Consequence: `Chunker.CHUNK_PROFILES` = markdown/prose 512/64 (bench winner),
+code 384/48, table 256/32 (structural profiles; smaller units for boundary-
+rich content). KB create accepts `chunk_profile` (optional; explicit
+`chunk_size`/`chunk_overlap` override), and KB `chunk_overlap` is now
+actually honored at ingest (previously the parameter existed on
+KnowledgeBaseConfig but every Chunker call site dropped it — fixed).
+
+## Late-chunking spike — 2026-11-14 (BLOCKED upstream, issue #130)
+
+Late Chunking (arXiv 2409.04701) needs per-token embeddings from the
+long-context pass, pooled over chunk spans. Probe: 7000-char input to
+fusion-mlx `POST /v1/embeddings` (BGE-M3) returns exactly one pooled 1024-d
+vector — no token-level field. **Conclusion: BLOCKED upstream** — filed
+dahai80/fusion-mlx#1624 (opt-in `return_token_embeddings` + token offsets).
+Re-evaluate the profile when that lands; no fusion-rag-side workaround
+(pooled-vector arithmetic cannot reconstruct token states).

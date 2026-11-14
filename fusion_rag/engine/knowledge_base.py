@@ -52,6 +52,9 @@ class KnowledgeBaseConfig:
     chunk_strategy: str = "semantic"  # "semantic", "code", "fixed"
     chunk_size: int = 512
     chunk_overlap: int = 64
+    # Issue #130 (R8): "" = class defaults; else a key of Chunker.CHUNK_PROFILES
+    # (markdown/prose/code/table) that seeds chunk_size/chunk_overlap at create.
+    chunk_profile: str = ""
     embedding_model: str = "BGE-M3"  # Model name for fusion-mlx
     max_results: int = 10
     similarity_threshold: float = 0.3
@@ -64,6 +67,7 @@ class KnowledgeBaseConfig:
             "chunk_strategy": self.chunk_strategy,
             "chunk_size": self.chunk_size,
             "chunk_overlap": self.chunk_overlap,
+            "chunk_profile": self.chunk_profile,
             "embedding_model": self.embedding_model,
             "max_results": self.max_results,
             "similarity_threshold": self.similarity_threshold,
@@ -256,6 +260,9 @@ class KnowledgeBaseManager:
         embedding_model: str = "BGE-M3",
         kb_id: str = "",
         tenant: str | None = None,
+        chunk_profile: str = "",
+        chunk_size: int | None = None,
+        chunk_overlap: int | None = None,
     ) -> KnowledgeBase:
         """Create a new knowledge base. If kb_id given and already exists, return existing (idempotent).
 
@@ -283,11 +290,22 @@ class KnowledgeBaseManager:
                 existing.tenant,
                 tenant,
             )
+        # Issue #130 (R8): chunk_profile selects size/overlap from bench-derived
+        # CHUNK_PROFILES; explicit chunk_size/chunk_overlap args win over the
+        # profile, and the profile wins over the class defaults.
+        from .chunker import Chunker
+
+        profile = Chunker.resolve_profile(chunk_profile)
+        if profile is None:
+            profile = {}
         config = KnowledgeBaseConfig(
             name=name,
             description=description,
             chunk_strategy=chunk_strategy,
             embedding_model=embedding_model,
+            chunk_profile=chunk_profile,
+            chunk_size=chunk_size if chunk_size is not None else profile.get("chunk_size", 512),
+            chunk_overlap=chunk_overlap if chunk_overlap is not None else profile.get("chunk_overlap", 64),
         )
         kb = KnowledgeBase(id=kb_id or "", config=config, storage_dir=str(self._storage_dir), tenant=tenant)
         self._bases[kb.id] = kb
