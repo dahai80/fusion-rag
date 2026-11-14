@@ -69,3 +69,25 @@ rrf recall@10 >= max(bm25, vector) on the deterministic mock set.
 Mock-mode numbers (`--mode mock`, hashed-bag embeddings) are
 wiring-regression evidence only and are never recorded here as quality
 evidence.
+
+## Contextual BM25 A/B — 2026-11-14 (`contextual-bm25-ablation.json`, mode=real, issue #126)
+
+Same deterministic corpus (55 queries, ~505 chunks). Dense channel (BGE-M3
+vectors) is IDENTICAL in both arms; only the text fed to the BM25 index
+changes. `prefix` arm prepends a deterministic template proxy for the
+contextual-retrieval context sentence (`Context: this chunk is from document
+{doc_id}. Document opening: {first 240 chars}`) — the production
+`Contextualizer` writes richer LLM-generated context into the same
+`chunk.context` field, and `BM25Index.add_documents` already indexes
+`context + text` (verified at `bm25_index.py`).
+
+| arm | recall@5 | recall@10 | mrr@10 | ndcg@10 | map@10 |
+|-----|----------|-----------|--------|---------|--------|
+| none (baseline) | 0.7939 | 0.9212 | 1.0000 | 0.9469 | 0.9212 |
+| context prefix | **0.8333** | **1.0000** | 1.0000 | **1.0000** | **1.0000** |
+
+Verdict: even a crude template context lifts BM25 recall@10 by +0.079 and
+pushes recall@10/ndcg/map to 1.0 on this corpus. The production LLM-generated
+context (Contextualizer) is strictly richer, so enabling it is strictly
+non-regressive for the BM25 channel. Caveat: synthetic keyword-heavy corpus;
+re-run on real corpora before quoting absolute numbers.

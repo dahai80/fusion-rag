@@ -1,0 +1,19 @@
+{
+  "generated_at": "2026-11-14",
+  "none": {
+    "recall@5": 0.7939,
+    "recall@10": 0.9212,
+    "mrr@10": 1.0,
+    "ndcg@10": 0.9469,
+    "map@10": 0.9212
+  },
+  "prefix": {
+    "recall@5": 0.8333,
+    "recall@10": 1.0,
+    "mrr@10": 1.0,
+    "ndcg@10": 1.0,
+    "map@10": 1.0
+  },
+  "mode": "real",
+  "note": "context is a template proxy (doc-id + doc opening), not LLM-generated; dense channel identical in both arms"
+}
