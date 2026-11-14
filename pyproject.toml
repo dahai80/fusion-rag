@@ -61,6 +61,12 @@ fusion_store = [
 qdrant = [
     "qdrant-client>=1.10.0",
 ]
+# Optional: layout-aware PDF ingestion (issue #131). Install via:
+# pip install 'fusion-rag[docling]'. Enables FUSION_RAG_PDF_BACKEND=docling
+# (tables + reading order); any failure falls back to the legacy PyMuPDF path.
+docling = [
+    "docling>=2.15.0",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

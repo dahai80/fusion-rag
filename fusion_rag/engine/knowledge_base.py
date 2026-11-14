@@ -55,6 +55,11 @@ class KnowledgeBaseConfig:
     # Issue #130 (R8): "" = class defaults; else a key of Chunker.CHUNK_PROFILES
     # (markdown/prose/code/table) that seeds chunk_size/chunk_overlap at create.
     chunk_profile: str = ""
+    # Issue #131 (R9): PDF extraction backend override. "" = defer to
+    # RuntimeConfig (FUSION_RAG_PDF_BACKEND, default "legacy"); "legacy" /
+    # "docling" pin the backend for this KB (docling falls back to legacy on
+    # any failure).
+    pdf_backend: str = ""
     embedding_model: str = "BGE-M3"  # Model name for fusion-mlx
     max_results: int = 10
     similarity_threshold: float = 0.3
@@ -68,6 +73,7 @@ class KnowledgeBaseConfig:
             "chunk_size": self.chunk_size,
             "chunk_overlap": self.chunk_overlap,
             "chunk_profile": self.chunk_profile,
+            "pdf_backend": self.pdf_backend,
             "embedding_model": self.embedding_model,
             "max_results": self.max_results,
             "similarity_threshold": self.similarity_threshold,
@@ -263,6 +269,7 @@ class KnowledgeBaseManager:
         chunk_profile: str = "",
         chunk_size: int | None = None,
         chunk_overlap: int | None = None,
+        pdf_backend: str = "",
     ) -> KnowledgeBase:
         """Create a new knowledge base. If kb_id given and already exists, return existing (idempotent).
 
@@ -304,6 +311,7 @@ class KnowledgeBaseManager:
             chunk_strategy=chunk_strategy,
             embedding_model=embedding_model,
             chunk_profile=chunk_profile,
+            pdf_backend=pdf_backend,
             chunk_size=chunk_size if chunk_size is not None else profile.get("chunk_size", 512),
             chunk_overlap=chunk_overlap if chunk_overlap is not None else profile.get("chunk_overlap", 64),
         )

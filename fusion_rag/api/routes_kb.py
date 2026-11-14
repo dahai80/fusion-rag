@@ -74,6 +74,11 @@ async def create_knowledge_base(data: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(400, str(e))
     chunk_size = data.get("chunk_size")
     chunk_overlap = data.get("chunk_overlap")
+    # Issue #131 (R9): optional PDF backend pin ("legacy"/"docling"); "" defers
+    # to FUSION_RAG_PDF_BACKEND at parse time.
+    pdf_backend = str(data.get("pdf_backend", "") or "").strip().lower()
+    if pdf_backend not in ("", "legacy", "docling"):
+        raise HTTPException(400, f"invalid pdf_backend {pdf_backend!r}; choose from '', 'legacy', 'docling'")
     # Issue #61: stamp the request's authoritative tenant on the new KB so
     # later list/get scope it to this tenant. None when isolation is off.
     from .tenant import get_request_tenant
@@ -90,6 +95,7 @@ async def create_knowledge_base(data: dict[str, Any]) -> dict[str, Any]:
         chunk_profile=chunk_profile,
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
+        pdf_backend=pdf_backend,
     )
     status = "exists" if existing else "created"
     return {"id": kb.id, "name": kb.config.name, "status": status}
