@@ -71,6 +71,16 @@ Local vector knowledge base service for the Fusion-MLX ecosystem — offline by 
 
 ### Install
 
+From PyPI (after the first tagged release is published):
+
+```bash
+pip install fusion-rag
+# optional extras:
+pip install "fusion-rag[qdrant]"   # Qdrant vector backend
+```
+
+From source (development):
+
 ```bash
 git clone https://github.com/dahai80/fusion-rag.git
 cd fusion-rag
