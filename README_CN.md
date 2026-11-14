@@ -250,6 +250,10 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.36
+
+- **有界 CRAG 重试循环（R5，issue #127）** — `/ask` 新增可选的"评分 → 改写 → 重检索"循环（`crag_rounds` 参数 / `FUSION_RAG_CRAG_ROUNDS`，默认 0 = 关闭）：严格 LLM 评判器给检索块打分，相关块不足时改写问题并重检索，结果去重合并，LLM 失败一律降级为当前结果。每轮轨迹通过 `crag` 字段返回，改写链写入引用审计。实测 A/B（`docs/benchmarks/README.md`）：单跳基准语料上触发率 0.00（top-10 恒满足评判器）——该循环针对多跳/弱首检场景，需在多跳标注集上复测才有提升数据。
+
 ### v0.8.35
 
 - **上下文 BM25 消融 — 上下文前缀提升 BM25（R4，issue #126）** — 已验证生产路径本就将 `chunk.context` 送入 BM25 索引（`BM25Index.add_documents` 索引 `context + text`）；新增 `recall_bench.run_contextual_bm25_ablation` + `scripts/contextual_bm25_ablation.py`，在确定性标注语料上量化差值（双臂共享稠密向量）。BGE-M3 实跑结果（`docs/benchmarks/contextual-bm25-ablation.json`）：即使只用模板上下文（doc-id + 文档开头），recall@5 0.7939 → 0.8333、recall@10 0.9212 → 1.0、ndcg@10/map@10 → 1.0 — 生产环境 LLM 生成的 Contextualizer 上下文只会更丰富，开启对 BM25 无回归风险。

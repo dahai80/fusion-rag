@@ -675,6 +675,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.36
+
+- **Bounded CRAG retry loop (R5, issue #127)** — `/ask` gains an opt-in grade → rewrite → re-retrieve loop (`crag_rounds` param / `FUSION_RAG_CRAG_ROUNDS`, default 0 = off): a strict LLM grader scores the retrieved chunks; below the relevance threshold the question is rewritten (QueryRewriter) and re-retrieved, results merged with dedupe, every LLM failure degrades to the current result. Per-round trace returned as `crag` on the answer; rewrites chain into the citation audit. Measured A/B (`docs/benchmarks/README.md`): retry rate 0.00 on the single-hop bench corpus (top-10 always grader-sufficient) — loop target case is weak first retrieval on multi-hop queries; re-run there before quoting lift.
+
 ## What's New in v0.8.35
 
 - **Contextual BM25 ablation — context prefix lifts BM25 (R4, issue #126)** — verified the production path already feeds `chunk.context` into the BM25 index (`BM25Index.add_documents` indexes `context + text`); new `recall_bench.run_contextual_bm25_ablation` + `scripts/contextual_bm25_ablation.py` measure the delta on the deterministic labeled corpus with the dense channel shared by both arms. Live BGE-M3 run (`docs/benchmarks/contextual-bm25-ablation.json`): even a crude template context (doc-id + doc opening) lifts recall@5 0.7939 → 0.8333, recall@10 0.9212 → 1.0, ndcg@10/map@10 → 1.0 — the production LLM-generated Contextualizer context is strictly richer, so enabling it is non-regressive for BM25.
