@@ -78,6 +78,17 @@ def test_console_bundle_uses_page_relative_api_base():
         assert "rag.console.key" not in text  # S8: no local API-key storage
 
 
+def test_console_bundle_has_chat_surface():
+    # Chat tab calls the page-relative /kb/bases/{id}/ask surface.
+    console = resources.files("fusion_rag") / "console"
+    js = "".join(
+        a.read_text(encoding="utf-8", errors="replace")
+        for a in (console / "assets").iterdir()
+        if a.suffix == ".js"
+    )
+    assert "/ask" in js
+
+
 def test_kb_api_served_under_console_subpath():
     # Issue #109: page-relative paths resolve to /shell/fusion-rag/kb/... —
     # the /kb router must answer there too, with the SAME handlers.

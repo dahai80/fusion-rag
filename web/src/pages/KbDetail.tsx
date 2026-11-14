@@ -14,6 +14,7 @@ import {
 } from "../api";
 import { sdk } from "../sdk";
 import { t } from "../i18n";
+import { ChatPanel } from "./ChatPanel";
 import { GraphPanel } from "./GraphPanel";
 import { TemplatesPanel } from "./TemplatesPanel";
 import { VersionsPanel } from "./VersionsPanel";
@@ -34,7 +35,7 @@ export function KbDetail({
     const [confirmOpen, setConfirmOpen] = useState(false);
     // Issue #113: tabbed KB detail — docs/search (original), graph,
     // versions, templates (previously API-only).
-    const [tab, setTab] = useState<"docs" | "graph" | "versions" | "templates">("docs");
+    const [tab, setTab] = useState<"docs" | "chat" | "graph" | "versions" | "templates">("docs");
 
     if (!kb) {
         return (
@@ -70,6 +71,7 @@ export function KbDetail({
 
     const TABS: Array<{ id: typeof tab; zh: string; en: string }> = [
         { id: "docs", zh: "文档 / 检索", en: "Docs / Search" },
+        { id: "chat", zh: "问答", en: "Chat" },
         { id: "graph", zh: "图谱", en: "Graph" },
         { id: "versions", zh: "版本", en: "Versions" },
         { id: "templates", zh: "模板", en: "Templates" },
@@ -116,6 +118,7 @@ export function KbDetail({
                             <SearchPanel kbId={kb.id} />
                         </>
                     )}
+                    {tab === "chat" && <ChatPanel kbId={kb.id} />}
                     {tab === "graph" && <GraphPanel kbId={kb.id} />}
                     {tab === "versions" && <VersionsPanel kbId={kb.id} />}
                     {tab === "templates" && <TemplatesPanel kbId={kb.id} />}

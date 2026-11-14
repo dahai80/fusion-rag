@@ -107,6 +107,34 @@ export function normalizeRows(r: SearchRow[] | { results: SearchRow[] }): Search
     return Array.isArray(r) ? r : r.results || [];
 }
 
+// ── Chat tab: POST /kb/bases/{kb_id}/ask ──
+
+export interface Citation {
+    doc_id?: string;
+    doc_name?: string;
+    chunk_id?: string;
+    page?: number;
+    score?: number;
+    status?: string;
+    ocr_confidence?: number;
+    low_confidence?: boolean;
+    slice_ref?: string;
+    [k: string]: unknown;
+}
+
+export interface AskResponse {
+    answer: string;
+    sources?: Array<Record<string, unknown>>;
+    citations?: Citation[];
+    has_low_confidence?: boolean;
+}
+
+export const askKb = (kbId: string, question: string) =>
+    api<AskResponse>(`/kb/bases/${kbId}/ask`, {
+        method: "POST",
+        body: JSON.stringify({ question, top_k: 5 }),
+    });
+
 // ── Issue #113: previously API-only surfaces ──
 
 export interface GraphStats {

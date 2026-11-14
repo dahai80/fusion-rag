@@ -664,6 +664,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.25
+
+- **Console chat tab** — new "问答 / Chat" tab in the KB detail view: a RAG Q&A box calling `POST /kb/bases/{kb_id}/ask`. Answers render with per-chunk citation chips (doc name, page, score; low-OCR-confidence citations flagged ⚠ and a per-answer warning). Plain text (no markdown lib) — it's an evidence tester on top of the /ask surface. Console rebuilt (v0.8.25, bundle +1.2 kB gzip).
+
 ## What's New in v0.8.24
 
 - **Citation audit trail (issue #117, feature 1)** — every retrieval call (`/search`, `/ask`, `/similar`) can now write a queryable audit trail to `citation_audit.db`: one `rag_queries` row per query version (the original plus each rewrite step chained via `parent_id`/`depth`) and `rag_citations` rows for the retrieved chunks linked to the FINAL query version with per-chunk similarity + rank. An answer's citations are reconstructable from the DB alone: `GET /kb/bases/{kb_id}/citations/traces` (list) + `GET /kb/bases/{kb_id}/citations/traces/{query_id}` (full chain + evidence). Opt-in via `FUSION_RAG_CITATION_AUDIT=1` (default OFF — zero behavior change); write failures log and never affect the response.
