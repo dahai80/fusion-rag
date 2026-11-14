@@ -1,0 +1,25 @@
+{
+  "generated_at": "2026-11-14",
+  "queries": {
+    "simple_fact": 55,
+    "multihop": 14
+  },
+  "recall@10": {
+    "simple_fact": {
+      "vector_only": 0.9182,
+      "vector_bfs": 0.9212,
+      "vector_ppr": 1.0
+    },
+    "multihop": {
+      "vector_only": 0.4702,
+      "vector_bfs": 0.4702,
+      "vector_ppr": 0.5119
+    }
+  },
+  "hipporag2_regression_check": {
+    "subset": "simple_fact",
+    "requirement": "vector_ppr >= vector_only",
+    "pass": true
+  },
+  "note": "graph built deterministically from the corpus term vocabulary (entities = topic terms, relations = within-doc co-occurrence); the synthetic corpus has no cross-doc entity chains, so PPR's multi-hop walk advantage cannot express itself here \u2014 treat as a regression gate, not a quality measurement. Real multi-hop corpus required before enabling."
+}

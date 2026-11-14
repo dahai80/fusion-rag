@@ -135,3 +135,27 @@ full (−32%); quality delta −0.003 recall@10 — inside the eval-gate toleran
 (0.02). Routing decisions logged per query (`query routed: level=...`), the
 decision rides on the `/ask` response as `route`. Default `FUSION_RAG_ROUTER=
 off` unchanged.
+
+## PPR graph-layer ablation — 2026-11-14 (`ppr-ablation.json`, mode=real, issue #129)
+
+`GraphRAG.search_ppr` (personalized PageRank over the extracted entity graph,
+seeds = query-token entity matches, chunks inherit summed entity PPR mass)
+fused with the vector path via RRF — never replacing it. Ablation arms:
+vector-only / vector+BFS-expand (current graph search) / vector+PPR. Graph
+built deterministically from the corpus term vocabulary (entities = topic
+terms, relations = within-doc co-occurrence) so the run isolates the ranking
+layer, not extraction quality.
+
+| subset | vector-only | vector+BFS | vector+PPR |
+|--------|-------------|------------|------------|
+| simple-fact (55 q) | 0.9182 | 0.9212 | **1.0000** |
+| multi-hop two-topic (14 q) | 0.4702 | 0.4702 | **0.5119** |
+
+HippoRAG-2 regression check: vector+PPR >= vector-only on the simple-fact
+subset — PASS (1.0 >= 0.9182). PPR also strictly beats BFS on both subsets.
+Caveat (recorded in the artifact): the synthetic corpus has no cross-doc
+entity chains, so PPR's walk-across-documents advantage cannot express
+itself — treat these numbers as a regression gate, not a quality measurement;
+a real multi-hop corpus is required before enabling the layer in the service.
+`search_ppr` is NOT wired into any route (feature off by default until that
+validation exists).

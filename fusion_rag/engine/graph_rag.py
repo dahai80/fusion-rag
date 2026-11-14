@@ -252,6 +252,98 @@ class GraphRAG:
         finally:
             conn.close()
 
+    def search_ppr(
+        self,
+        query: str,
+        kb_id: str = "",
+        damping: float = 0.85,
+        max_iterations: int = 50,
+        tolerance: float = 1e-6,
+        top_chunks: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Personalized-PageRank retrieval over the extracted graph (issue #129).
+
+        Seeds = entities whose name matches any query token (case-insensitive
+        substring, same match rule as search()). Runs PPR over the relation
+        graph (undirected, uniform edge weights); every entity accumulates a
+        score, and chunks inherit the summed PPR score of their entities.
+        Ranked chunks carry ppr_score so callers can fuse with the vector path
+        (RRF) via an ablation switch — this NEVER replaces vector retrieval.
+        Degrades to [] on an empty graph (no entities match).
+        """
+        conn = self._get_conn()
+        try:
+            if kb_id:
+                ent_rows = conn.execute(
+                    "SELECT name, chunk_id FROM entities WHERE kb_id = ?", (kb_id,)
+                ).fetchall()
+                rel_rows = conn.execute(
+                    "SELECT source, target FROM relations WHERE kb_id = ?", (kb_id,)
+                ).fetchall()
+            else:
+                ent_rows = conn.execute("SELECT name, chunk_id FROM entities").fetchall()
+                rel_rows = conn.execute("SELECT source, target FROM relations").fetchall()
+            if not ent_rows:
+                return []
+
+            tokens = [t for t in query.lower().split() if t]
+            chunk_score: dict[str, float] = {}
+            seeds: dict[str, float] = {}
+            for r in ent_rows:
+                name_l = r["name"].lower()
+                if any(t in name_l for t in tokens):
+                    seeds[r["name"]] = seeds.get(r["name"], 0.0) + 1.0
+                    if r["chunk_id"]:
+                        chunk_score[r["chunk_id"]] = chunk_score.get(r["chunk_id"], 0.0) + 1.0
+            if not seeds:
+                return []
+
+            # Build undirected adjacency (entity -> weighted neighbors).
+            adjacency: dict[str, dict[str, float]] = {}
+            for rel in rel_rows:
+                s, t = rel["source"], rel["target"]
+                if s == t:
+                    continue
+                adjacency.setdefault(s, {})
+                adjacency.setdefault(t, {})
+                adjacency[s][t] = adjacency[s].get(t, 0.0) + 1.0
+                adjacency[t][s] = adjacency[t].get(s, 0.0) + 1.0
+            # Standard PPR: p(n) = (1-d)*teleport(n) + d * sum_u p(u)*w(u,n)/deg(u).
+            # teleport mass concentrates on seed entities (uniform over seeds);
+            # dangling nodes return their rank to themselves (graph is small,
+            # distribution over reachable entities only).
+            nodes = set(adjacency) | set(seeds)
+            rank = dict.fromkeys(nodes, 0.0)
+            total_seed = sum(seeds.values())
+            for _ in range(max_iterations):
+                next_rank = dict.fromkeys(nodes, 0.0)
+                for n, r in rank.items():
+                    if r <= 0.0:
+                        continue
+                    neighbors = adjacency.get(n, {})
+                    if not neighbors:
+                        next_rank[n] += damping * r
+                        continue
+                    deg = sum(neighbors.values())
+                    for nb, w in neighbors.items():
+                        next_rank[nb] += damping * r * (w / deg)
+                for s, w in seeds.items():
+                    next_rank[s] += (1.0 - damping) * (w / total_seed)
+                delta = sum(abs(next_rank[n] - rank[n]) for n in nodes)
+                rank = next_rank
+                if delta < tolerance:
+                    break
+
+            # Chunks inherit the summed PPR score of their entities.
+            for r in ent_rows:
+                sc = rank.get(r["name"], 0.0)
+                if sc > 0.0 and r["chunk_id"]:
+                    chunk_score[r["chunk_id"]] = chunk_score.get(r["chunk_id"], 0.0) + sc
+            ranked = sorted(chunk_score.items(), key=lambda kv: kv[1], reverse=True)[:top_chunks]
+            return [{"chunk_id": cid, "ppr_score": round(sc, 6)} for cid, sc in ranked]
+        finally:
+            conn.close()
+
     def get_entity_count(self, kb_id: str = "") -> int:
         conn = self._get_conn()
         try:
