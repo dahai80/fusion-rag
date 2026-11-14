@@ -53,28 +53,42 @@ MCP_TOOLS = [
     },
     {
         "name": "kb_search",
-        "description": "Search for relevant chunks in a knowledge base",
+        "description": (
+            "Search for relevant chunks in a knowledge base. "
+            "kb_id is optional: when omitted, the single existing KB is used, "
+            "or with several KBs the most recently created one."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "kb_id": {"type": "string", "description": "Knowledge base ID"},
+                "kb_id": {
+                    "type": "string",
+                    "description": "Knowledge base ID (optional: defaults to the only KB, or most recent)",
+                },
                 "query": {"type": "string", "description": "Search query"},
                 "top_k": {"type": "integer", "description": "Max results (default 5)"},
             },
-            "required": ["kb_id", "query"],
+            "required": ["query"],
         },
     },
     {
         "name": "kb_ask",
-        "description": "Ask a question and get an AI-generated answer with sources",
+        "description": (
+            "Ask a question and get an AI-generated answer with sources. "
+            "kb_id is optional: when omitted, the single existing KB is used, "
+            "or with several KBs the most recently created one."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "kb_id": {"type": "string", "description": "Knowledge base ID"},
+                "kb_id": {
+                    "type": "string",
+                    "description": "Knowledge base ID (optional: defaults to the only KB, or most recent)",
+                },
                 "question": {"type": "string", "description": "Question to ask"},
                 "top_k": {"type": "integer", "description": "Max context chunks (default 5)"},
             },
-            "required": ["kb_id", "question"],
+            "required": ["question"],
         },
     },
     {
@@ -224,10 +238,46 @@ def _enforce_mcp_acl(tool_name: str, args: dict, subject: str | None) -> None:
     action = action_map.get(tool_name)
     if action is None:
         return  # unknown tool -> _dispatch_tool raises _MCPError(-32601)
-    kb_id = args.get("kb_id", "")
+    kb_id = args.get("kb_id") or ""
     if not kb_id:
-        return  # missing param -> _dispatch_tool raises _MCPError(-32602)
+        if tool_name in ("kb_search", "kb_ask"):
+            # Issue #136: kb_id now defaults to the resolved KB (only-KB /
+            # most-recent) — the ACL check must see the SAME resolved id the
+            # dispatch will use, or the default path would skip the gate.
+            kb_id = _resolve_kb_id(args)
+        else:
+            return  # missing param -> _dispatch_tool raises _MCPError(-32602)
     _check_kb_access(kb_id, subject, action, "/")
+
+
+def _resolve_kb_id(args: dict) -> str:
+    """Issue #136: kb_id is optional for kb_search / kb_ask.
+
+    Explicit kb_id wins. When absent, fall back deterministically:
+      1. the single existing KB (tenant-scoped, same scoping as kb_list);
+      2. with several KBs: the most recently created one (documented in the
+         tool descriptions so models can rely on it);
+      3. with none: -32602 so the caller gets an actionable error, not a
+         silent empty result."""
+    from .tenant import tenant_scope
+
+    kb_id = args.get("kb_id") or ""
+    if kb_id:
+        return str(kb_id)
+    _tenant, _require_match = tenant_scope()
+    kbs = _kb_manager_singleton().list(tenant=_tenant, require_tenant_match=_require_match)
+    if not kbs:
+        raise _MCPError(-32602, "kb_id is required: no knowledge bases exist yet (create one with kb_create)")
+    latest = max(kbs, key=lambda k: (getattr(k, "created_at", 0.0), getattr(k, "id", "")))
+    return latest.id
+
+
+def _kb_manager_singleton():
+    # Late-binding accessor — _dispatch_tool imports _get_kb_manager lazily to
+    # avoid a circular import at module load; reuse the same pattern here.
+    from .routes import _get_kb_manager
+
+    return _get_kb_manager()
 
 
 async def _dispatch_tool(name: str, args: dict) -> Any:
@@ -265,7 +315,7 @@ async def _dispatch_tool(name: str, args: dict) -> Any:
     if name == "kb_search":
         from fastapi.concurrency import run_in_threadpool
 
-        kb_id = _require("kb_id")
+        kb_id = _resolve_kb_id(args)
         query = _require("query")
         kb = _get_base(kb_id)
         embed = _get_embed_client()
@@ -285,7 +335,7 @@ async def _dispatch_tool(name: str, args: dict) -> Any:
 
         from .routes import _generate_answer
 
-        kb_id = _require("kb_id")
+        kb_id = _resolve_kb_id(args)
         question = _require("question")
         kb = _get_base(kb_id)
         embed = _get_embed_client()
