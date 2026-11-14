@@ -121,19 +121,27 @@ export function ChatPanel({ kbId }: { kbId: string }) {
                 )}
             </div>
             <div className="flex gap-2 border-t border-border p-3">
-                <input
+                <textarea
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && send()}
-                    placeholder={t("输入问题…", "Type a question…")}
+                    onKeyDown={(e) => {
+                        // Enter sends, Shift+Enter inserts a newline; IME
+                        // composition guarded so Chinese typing is safe.
+                        if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                            e.preventDefault();
+                            send();
+                        }
+                    }}
+                    rows={2}
+                    placeholder={t("输入问题…（Enter 发送，Shift+Enter 换行）", "Type a question… (Enter to send, Shift+Enter for newline)")}
                     disabled={busy}
-                    className="min-w-0 flex-1 rounded-md border border-border bg-bg px-2.5 py-1.5 text-xs text-text-primary outline-none placeholder:text-text-muted focus:border-brand disabled:opacity-50"
+                    className="min-w-0 flex-1 resize-none rounded-md border border-border bg-bg px-2.5 py-2 text-xs leading-relaxed text-text-primary outline-none placeholder:text-text-muted focus:border-brand disabled:opacity-50"
                 />
                 <button
                     type="button"
                     disabled={!input.trim() || busy}
                     onClick={send}
-                    className="shrink-0 rounded-md bg-brand px-3 py-1.5 text-xs text-white disabled:cursor-not-allowed disabled:opacity-40"
+                    className="shrink-0 self-end rounded-md bg-brand px-3 py-1.5 text-xs text-white disabled:cursor-not-allowed disabled:opacity-40"
                 >
                     {t("发送", "Send")}
                 </button>
