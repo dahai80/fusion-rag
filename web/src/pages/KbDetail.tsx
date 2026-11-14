@@ -1,5 +1,5 @@
 import { ConfirmDialog, EmptyState, ErrorState, SkeletonLines } from "@fusion/web-ui";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
     type KbDoc,
     type KbSummary,
@@ -7,6 +7,7 @@ import {
     deleteKb,
     fetchDocs,
     ingestDoc,
+    ingestFile,
     normalizeDocs,
     searchKb,
     type SearchRow,
@@ -151,6 +152,8 @@ function DocsPanel({ kbId }: { kbId: string }) {
     const [docName, setDocName] = useState("");
     const [content, setContent] = useState("");
     const [busy, setBusy] = useState(false);
+    const [fileBusy, setFileBusy] = useState(false);
+    const fileRef = useRef<HTMLInputElement>(null);
 
     const load = useCallback(async () => {
         try {
@@ -200,6 +203,35 @@ function DocsPanel({ kbId }: { kbId: string }) {
         }
     };
 
+    // File ingest: pick a file (txt/md/html/csv/pdf/docx/epub); binary types
+    // ride the #90 base64 inline path through the FULL parse pipeline.
+    const onPickFile = async (f: File | undefined) => {
+        if (!f || fileBusy) return;
+        setFileBusy(true);
+        try {
+            const r = await ingestFile(kbId, f);
+            sdk.toast.show({
+                level: "info",
+                message: t(
+                    `已入库 ${f.name}：${r.chunks ?? 0} 个分块`,
+                    `Ingested ${f.name}: ${r.chunks ?? 0} chunks`,
+                ),
+            });
+            load();
+        } catch (e) {
+            sdk.toast.show({
+                level: "error",
+                message: t(
+                    `入库失败: ${e instanceof Error ? e.message : String(e)}`,
+                    `Ingest failed: ${e instanceof Error ? e.message : String(e)}`,
+                ),
+            });
+        } finally {
+            setFileBusy(false);
+            if (fileRef.current) fileRef.current.value = "";
+        }
+    };
+
     const remove = async (docId: string) => {
         try {
             await deleteDoc(kbId, docId);
@@ -224,12 +256,34 @@ function DocsPanel({ kbId }: { kbId: string }) {
             <div className="border-b border-border px-3 py-2 text-xs font-medium text-text-secondary">
                 {t("文档", "Documents")}
             </div>
-            <div className="flex gap-2 p-3">
+            <div className="flex flex-wrap gap-2 p-3">
+                <input
+                    ref={fileRef}
+                    type="file"
+                    accept=".txt,.md,.markdown,.html,.htm,.csv,.pdf,.docx,.epub"
+                    className="hidden"
+                    onChange={(e) => onPickFile(e.target.files?.[0])}
+                />
+                <button
+                    type="button"
+                    disabled={fileBusy}
+                    onClick={() => fileRef.current?.click()}
+                    className="shrink-0 rounded-md border border-brand px-3 py-1.5 text-xs text-brand hover:bg-bg-muted disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                    {fileBusy
+                        ? t("解析中…", "Parsing…")
+                        : t("选择文件入库", "Pick a file")}
+                </button>
+                <span className="self-center text-[10px] text-text-muted">
+                    {t("支持 txt/md/html/csv/pdf/docx/epub", "txt/md/html/csv/pdf/docx/epub")}
+                </span>
+            </div>
+            <div className="flex gap-2 border-t border-border px-3 py-2">
                 <input
                     value={docName}
                     onChange={(e) => setDocName(e.target.value)}
-                    placeholder={t("文档名", "Doc name")}
-                    className="w-32 rounded-md border border-border bg-bg px-2.5 py-1.5 text-xs text-text-primary outline-none placeholder:text-text-muted focus:border-brand"
+                    placeholder={t("粘贴文本时可选填文档名", "Doc name (paste-text only)")}
+                    className="w-40 rounded-md border border-border bg-bg px-2.5 py-1.5 text-xs text-text-primary outline-none placeholder:text-text-muted focus:border-brand"
                 />
                 <input
                     value={content}

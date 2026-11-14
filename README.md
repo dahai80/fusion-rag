@@ -664,6 +664,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.28
+
+- **UI: file-picker ingest in Docs / Search tab** — "选择文件入库 / Pick a file" button: pick a `txt/md/markdown/html/htm/csv` (text) or `pdf/docx/epub` (binary, #90 base64 inline path → full parse pipeline incl. scanned-PDF OCR) file; doc name = filename. The paste-text path stays as a secondary row.
+
 ## What's New in v0.8.27
 
 - **UI: chat input doubled** — the 问答 / Chat input is now a 2-row textarea (Enter sends, Shift+Enter newline, IME-safe), send button bottom-aligned. Console rebuilt.
