@@ -664,6 +664,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.26
+
+- **UI: chat tab height doubled** — the 问答 / Chat message area now scrolls within `max-h-[48rem]` (was `max-h-96`), min height raised to match. Console rebuilt.
+
 ## What's New in v0.8.25
 
 - **Console chat tab** — new "问答 / Chat" tab in the KB detail view: a RAG Q&A box calling `POST /kb/bases/{kb_id}/ask`. Answers render with per-chunk citation chips (doc name, page, score; low-OCR-confidence citations flagged ⚠ and a per-answer warning). Plain text (no markdown lib) — it's an evidence tester on top of the /ask surface. Console rebuilt (v0.8.25, bundle +1.2 kB gzip).
