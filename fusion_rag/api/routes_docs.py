@@ -399,7 +399,7 @@ async def _index_document(kb_id: str, file_path: str, contextualize: bool = True
     existing = await run_in_threadpool(meta_store.get_document_by_path, file_path)
     doc_id = existing["id"] if existing else uuid.uuid4().hex[:16]
 
-    result = await _doc_parser.parse(file_path)
+    result = await _doc_parser.parse(file_path, pdf_backend=_get_base(kb_id).config.pdf_backend)
     if result.error:
         return {"error": result.error}
 
@@ -800,7 +800,7 @@ async def replace_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dic
     # Before: delete-then-parse left an orphan doc row with zero chunks (and
     # zero vectors) if the new file failed to parse — destroying the existing
     # index irrecoverably. Now a parse/embed failure leaves the old index intact.
-    result = await _doc_parser.parse(new_file_path)
+    result = await _doc_parser.parse(new_file_path, pdf_backend=_get_base(kb_id).config.pdf_backend)
     if result.error:
         raise HTTPException(400, result.error)
 
@@ -985,7 +985,12 @@ async def scan_directory(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     # D4: scan file cap was hardcoded 1000; RuntimeConfig makes it env-tunable.
     from ..engine.runtime_config import get_runtime_config
 
-    results = await _doc_parser.parse_directory(dir_path, recursive=True, max_files=get_runtime_config().scan_max_files)
+    results = await _doc_parser.parse_directory(
+        dir_path,
+        recursive=True,
+        max_files=get_runtime_config().scan_max_files,
+        pdf_backend=_get_base(kb_id).config.pdf_backend,
+    )
     _check_embed_model(kb_id)
     embed = _get_embed_client()
     vec_store = _get_vector_store(kb_id)

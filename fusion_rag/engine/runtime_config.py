@@ -101,6 +101,12 @@ class RuntimeConfig:
     # (simple -> single-path, standard -> hybrid+rerank, complex -> + retry).
     # Per-request override: "route" in {simple, standard, complex}.
     router_mode: str = "off"
+    # Issue #131 (R9): PDF extraction backend. "legacy" (default) = PyMuPDF
+    # text extraction (unchanged behavior). "docling" = layout-aware Docling
+    # conversion (table structure + reading order), falls back to legacy on
+    # any failure. Per-KB config (KnowledgeBaseConfig.pdf_backend) overrides
+    # this env default when set.
+    pdf_backend: str = "legacy"
 
     @classmethod
     def from_env(cls) -> RuntimeConfig:
@@ -129,6 +135,7 @@ class RuntimeConfig:
             citation_audit=_env_bool("FUSION_RAG_CITATION_AUDIT", True),
             crag_rounds=_env_int("FUSION_RAG_CRAG_ROUNDS", 0, minimum=0),
             router_mode=os.environ.get("FUSION_RAG_ROUTER", "off").strip().lower(),
+            pdf_backend=os.environ.get("FUSION_RAG_PDF_BACKEND", "legacy").strip().lower(),
         )
 
     def to_dict(self) -> dict:

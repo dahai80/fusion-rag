@@ -192,3 +192,28 @@ vector — no token-level field. **Conclusion: BLOCKED upstream** — filed
 dahai80/fusion-mlx#1624 (opt-in `return_token_embeddings` + token offsets).
 Re-evaluate the profile when that lands; no fusion-rag-side workaround
 (pooled-vector arithmetic cannot reconstruct token states).
+
+## Docling vs legacy table-PDF ablation — 2026-11-14 (issue #131, R9)
+
+Synthetic table corpus: 20 deterministic PDFs (fitz), 60 ruled-grid rows each,
+cells inserted COLUMN-MAJOR so naive per-cell extraction loses row alignment.
+40 row-level queries ("item region quarter value"); truth = the fixed-stride
+256/32 chunk containing BOTH the item name and the expected value.
+
+| backend | rows_intact_ratio | n_evaluable | recall@10 BM25 | recall@10 vector | parse+ingest |
+|---------|------------------|-------------|----------------|------------------|--------------|
+| legacy (PyMuPDF) | **0.00** | 0/40 | — (no truth chunks exist) | — | 0.7 s |
+| docling | **1.00** | 40/40 | **1.0** | 0.65 | 46.2 s (~2.3 s/PDF) |
+
+**Row alignment is binary, not incremental** — legacy extraction scatters each
+row's cells across column-contiguous chunks, so no chunk holds item+value
+together (0/40 rows evaluable); Docling rebuilds the ruled grid into markdown
+pipe tables (TableFormer ACCURATE) with every row intact and BM25 recall@10
+1.0 on row-level questions. Vector recall 0.65 shows random-token row keys are
+hard for dense retrieval regardless — BM25 is the winner channel for tables.
+Cost: docling parse is ~66x slower (2.3 s/PDF, CPU-pinned: TableFormer hits
+"MPS Tensor to float64" under the auto-selected MPS device on Apple Silicon).
+Consequence: `pdf_backend` selectable per KB ("legacy" default / "docling")
+or globally via `FUSION_RAG_PDF_BACKEND`; any docling failure falls back to
+legacy (logged, never fails ingest). Scanned PDFs keep the #84 OCR-service
+path (docling OCR stays off — no confidence metadata).

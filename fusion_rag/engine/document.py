@@ -124,8 +124,14 @@ class DocumentParser:
     def is_code_file(doc_type: DocumentType) -> bool:
         return doc_type.value.startswith("code_")
 
-    async def parse(self, file_path: str | Path) -> ParseResult:
-        """Parse a single file and return its text content."""
+    async def parse(self, file_path: str | Path, pdf_backend: str = "") -> ParseResult:
+        """Parse a single file and return its text content.
+
+        Issue #131 (R9): `pdf_backend` selects the PDF extraction backend for
+        this call — "docling" (layout-aware) or "legacy" (PyMuPDF). Empty
+        defers to RuntimeConfig.pdf_backend (FUSION_RAG_PDF_BACKEND). Any
+        Docling failure falls back to legacy (logged), never fails ingest.
+        """
         path = Path(file_path).expanduser().resolve()
         if not path.exists():
             return ParseResult(
@@ -148,7 +154,8 @@ class DocumentParser:
 
         try:
             if doc_type == DocumentType.PDF:
-                content, pages, page_spans = self._parse_pdf(path)
+                content, pages, page_spans, backend_used = await self._parse_pdf_with_backend(path, pdf_backend)
+                result.metadata["pdf_backend"] = backend_used
                 result.content = content
                 result.pages = pages
                 result.page_spans = page_spans
@@ -185,6 +192,41 @@ class DocumentParser:
             result.error = f"Parse error: {e}"
 
         return result
+
+    async def _parse_pdf_with_backend(
+        self, path: Path, pdf_backend: str = ""
+    ) -> tuple[str, int, list[tuple[int, int, int]], str]:
+        """Issue #131 (R9): route PDF parsing through the selected backend.
+
+        Backend resolution: explicit per-call value ("docling"/"legacy") wins,
+        else RuntimeConfig.pdf_backend (FUSION_RAG_PDF_BACKEND, default
+        "legacy"). A "docling" attempt that raises for ANY reason (missing
+        dependency, model download failure, conversion error) falls back to
+        the legacy PyMuPDF path with a loud warning — ingest degrades, the
+        caller sees pdf_backend="legacy" in the doc metadata.
+        """
+        backend = (pdf_backend or "").strip().lower()
+        if not backend:
+            from .runtime_config import get_runtime_config
+
+            backend = get_runtime_config().pdf_backend
+        if backend == "docling":
+            try:
+                from .docling_parser import DoclingParser
+
+                content, pages, spans = await DoclingParser().parse_pdf(path)
+                return content, pages, spans, "docling"
+            except Exception as e:
+                logger.warning(
+                    "docling PDF backend failed for %s (%s: %s) — falling back to legacy PyMuPDF",
+                    path.name,
+                    type(e).__name__,
+                    e,
+                )
+        elif backend not in ("legacy", ""):
+            logger.warning("unknown pdf_backend %r — using legacy PyMuPDF", backend)
+        content, pages, spans = self._parse_pdf(path)
+        return content, pages, spans, "legacy"
 
     def _parse_pdf(self, path: Path) -> tuple[str, int, list[tuple[int, int, int]]]:
         """Extract text from PDF using PyMuPDF, tracking per-page char spans."""
@@ -324,7 +366,11 @@ class DocumentParser:
         return chunks
 
     async def parse_directory(
-        self, dir_path: str | Path, recursive: bool = True, max_files: int = 1000
+        self,
+        dir_path: str | Path,
+        recursive: bool = True,
+        max_files: int = 1000,
+        pdf_backend: str = "",
     ) -> list[ParseResult]:
         """Parse all supported files in a directory."""
         path = Path(dir_path).expanduser().resolve()
@@ -342,7 +388,7 @@ class DocumentParser:
                 continue
             if files_scanned >= max_files:
                 break
-            result = await self.parse(f)
+            result = await self.parse(f, pdf_backend=pdf_backend)
             results.append(result)
             files_scanned += 1
 

@@ -1,0 +1,29 @@
+{
+  "generated_at": "2026-11-14",
+  "n_docs": 20,
+  "rows_per_doc": 60,
+  "n_queries": 40,
+  "chunk": "semantic 256/32 (table profile)",
+  "backends": {
+    "legacy": {
+      "n_chunks": 100,
+      "rows_intact_ratio": 0.0,
+      "n_evaluable": 0,
+      "recall@10_bm25": 0.0,
+      "recall@10_vector": 0.0,
+      "latency_bm25_p50_ms": 0.0,
+      "latency_vector_p50_ms": 2.1,
+      "parse_ingest_seconds": 0.7
+    },
+    "docling": {
+      "n_chunks": 206,
+      "rows_intact_ratio": 1.0,
+      "n_evaluable": 40,
+      "recall@10_bm25": 1.0,
+      "recall@10_vector": 0.65,
+      "latency_bm25_p50_ms": 0.1,
+      "latency_vector_p50_ms": 2.1,
+      "parse_ingest_seconds": 46.2
+    }
+  }
+}
