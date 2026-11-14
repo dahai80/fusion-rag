@@ -240,6 +240,14 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.31
+
+- **引用审计默认开启（R2，issue #124）** — `FUSION_RAG_CITATION_AUDIT` 默认值改为 `1`（设 `0` 可关闭）。实测开销约 0.11 ms/次检索写入（10 chunk + 1 重写，SQLite WAL 批量），相对检索延迟可忽略。评估器（`RAGEvaluator`）新增引用准确性评审（`CITATION_ACCURACY_PROMPT`：答案的论点有多大比例被**被引用**来源支撑——Anthropic/Glean 生产评审标准），逐用例输出 `citation_accuracy`、聚合输出 `avg_citation_accuracy`（仅对带引用的用例取平均）；新增 `citation_accuracy_from_trace()` 将 /ask 响应引用与审计链路做 chunk-id 重叠打分。
+
+### v0.8.30
+
+- **RRF 融合收敛（R1，issue #123）** — `HybridSearch(method="rrf")` 是唯一受支持的融合路径；加权原始分 `FusionRetriever` 标记废弃（构造时发 DeprecationWarning，仅实验用途）。召回消融在真实 BGE-M3 上重跑并记录为 `docs/benchmarks/recall-2026-11-14.json`（RRF 0.7939/0.9212/1.0000，rrf ≥ max(单通道) 成立）。
+
 ### v0.8.29
 
 - **Office 格式入库：PPTX + XLSX** — 服务端解析器（`python-pptx`、`openpyxl`）：PPTX 每页渲染为 `## Slide N` 段落（按阅读顺序取文本框 + 演讲者备注；纯图片页跳过），XLSX 每个工作表渲染为 `## Sheet: 名称` 段落、单元格按 ` | ` 连接（取公式缓存值、去尾部空单元格、空表跳过）。两种类型已加入 #90 内联二进制入库集合与控制台文件选择器。旧版二进制格式（.doc/.xls/.ppt）仍不支持——需要转换器而非解析器，请另存为 docx/xlsx/pptx。新增依赖：`python-pptx>=1.0.0`、`openpyxl>=3.1.0`。
@@ -358,7 +366,7 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 | `FUSION_RAG_OCR_TIMEOUT` | 300 | 单个 OCR 任务的轮询总预算（秒，issue #84） |
 | `FUSION_RAG_OCR_TENANT_ID` | (空) | OCR 调用 `X-Tenant-Id` 兜底值：请求上下文无租户时使用（后台目录监听入库、单租户部署）。OCR 服务端中间件无条件要求该头（issue #88）；请求内调用会自动透传当前租户 |
 | `FUSION_RAG_LOW_OCR_CONFIDENCE` | 0.85 | OCR 片段置信度低于该值时，检索结果与 `/ask` 引用标记 `low_confidence: true`（issue #85） |
-| `FUSION_RAG_CITATION_AUDIT` | (空) | `1` = 写入可查询的引用审计链路（issue #117）：每次检索调用的查询链 + 检索 chunk 落库 `citation_audit.db`，经 `GET /kb/bases/{kb_id}/citations/traces` 重建。默认关闭 |
+| `FUSION_RAG_CITATION_AUDIT` | 1 | 写入可查询的引用审计链路（issue #117，R2/#124 起默认开启）：每次检索调用的查询链 + 检索 chunk 落库 `citation_audit.db`，经 `GET /kb/bases/{kb_id}/citations/traces` 重建。设 `0` 关闭 |
 
 ### 使用 start.sh
 

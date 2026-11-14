@@ -38,6 +38,17 @@ RELEVANCE_PROMPT = (
     "Question: {query}\n\nAnswer: {answer}\n\nJSON:"
 )
 
+# R2 (issue #124): citation accuracy is a standard judge criterion alongside
+# factual accuracy (Anthropic multi-agent rubric, Glean) — does the answer's
+# content actually come from the CITED sources, not just any context?
+CITATION_ACCURACY_PROMPT = (
+    "You are grading citation accuracy. Given an answer and the sources it cites, "
+    "score what fraction of the answer's substantive claims are supported by the "
+    "cited sources. Unsupported or invented attributions lower the score. "
+    'Output ONLY a JSON object: {"score": <0.0-1.0>, "reason": "..."}\n\n'
+    "Answer: {answer}\n\nCited sources:\n{citations}\n\nJSON:"
+)
+
 
 class RAGEvaluator:
     """Evaluates RAG pipeline quality with automated metrics."""
@@ -130,8 +141,12 @@ class RAGEvaluator:
             avg_cr = sum(r.get("context_recall", 0) for r in scored) / len(scored)
         else:
             avg_f = avg_r = avg_cr = 0.0
+        # R2: citation accuracy averaged only over cases that were scored
+        # for it (cases without citations don't drag the mean).
+        cited = [r for r in scored if "citation_accuracy" in r]
+        avg_ca = sum(r["citation_accuracy"] for r in cited) / len(cited) if cited else 0.0
 
-        return {
+        out = {
             "total": len(results),
             "scored": len(scored),
             "errors": len(results) - len(scored),
@@ -140,6 +155,10 @@ class RAGEvaluator:
             "avg_context_recall": round(avg_cr, 3),
             "results": results,
         }
+        if cited:
+            out["avg_citation_accuracy"] = round(avg_ca, 3)
+            out["citation_scored"] = len(cited)
+        return out
 
     async def _evaluate_single(self, kb_id: str, query: str, expected: str, expected_docs: list[str]) -> dict[str, Any]:
         """Evaluate a single query."""
@@ -176,7 +195,7 @@ class RAGEvaluator:
         relevance = await self._score_relevance(query, actual_answer)
         context_recall = self._compute_context_recall(chunks, expected_docs)
 
-        return {
+        result = {
             "query": query,
             "expected_answer": expected[:200],
             "actual_answer": actual_answer[:200],
@@ -185,6 +204,50 @@ class RAGEvaluator:
             "relevance": relevance,
             "context_recall": context_recall,
         }
+
+        # R2 (issue #124): citation accuracy — only scored when the answer
+        # carries citations. Absent field (no citations) is NOT a 0.
+        answer_citations = answer_result.get("citations") or []
+        if answer_citations:
+            result["citation_accuracy"] = await self._score_citation_accuracy(
+                actual_answer, answer_citations
+            )
+        return result
+
+    async def _score_citation_accuracy(self, answer: str, citations: list[dict]) -> float:
+        if not answer or not citations:
+            return 0.0
+        cited_text = "\n".join(
+            f"- [{c.get('doc_name', '')}] {c.get('snippet', '')}" for c in citations
+        )
+        prompt = CITATION_ACCURACY_PROMPT.format(answer=answer[:1000], citations=cited_text[:3000])
+        try:
+            client = await self._get_client()
+            resp = await with_retry(
+                lambda: client.post(
+                    f"{self.mlx_url}/chat/completions",
+                    json={
+                        "model": self.model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 200,
+                        "temperature": 0.0,
+                    },
+                ),
+                retries=2,
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"].strip()
+            if not content:
+                logger.warning("citation accuracy empty content")
+                raise ValueError("empty_content")
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if not match:
+                raise ValueError("no JSON in judge response")
+            score = float(json.loads(match.group(0)).get("score", 0.0))
+            return max(0.0, min(1.0, score))
+        except Exception as e:
+            logger.warning("citation accuracy scoring failed: %s", e)
+            return 0.0
 
     async def _generate_answer(self, question: str, context: str, chunks: list[dict]) -> dict[str, Any]:
         import os
@@ -241,7 +304,17 @@ class RAGEvaluator:
                         "snippet": c.get("text", "")[:200],
                     }
                 )
-        return {"answer": answer_text, "sources": sources}
+        # R2 (issue #124): per-chunk citations so the judge can score
+        # citation accuracy (answer claims vs cited evidence).
+        citations = [
+            {
+                "doc_name": c.get("doc_name", "unknown"),
+                "chunk_id": c.get("chunk_id", ""),
+                "snippet": c.get("text", "")[:200],
+            }
+            for c in chunks
+        ]
+        return {"answer": answer_text, "sources": sources, "citations": citations}
 
     async def _score_faithfulness(self, context: str, answer: str) -> float:
         if not answer or not context:
@@ -367,3 +440,21 @@ class RAGEvaluator:
             return [dict(r) for r in rows]
         finally:
             conn.close()
+
+
+def citation_accuracy_from_trace(
+    answer_citations: list[dict], trace_chunk_ids: list[str]
+) -> float:
+    """R2 (issue #124): citation-accuracy proxy from a citation-audit trace.
+
+    Fraction of an /ask response's citations whose chunk_id appears in the
+    retrieval trace's citation set — i.e. the answer cites evidence the
+    retrieval actually returned. 1.0 when every cited chunk is grounded in
+    the trace; 0.0 when nothing matches or either side is empty."""
+    if not answer_citations or not trace_chunk_ids:
+        return 0.0
+    trace = set(trace_chunk_ids)
+    hits = sum(
+        1 for c in answer_citations if c.get("chunk_id", "") in trace
+    )
+    return round(hits / len(answer_citations), 4)

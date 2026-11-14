@@ -88,7 +88,7 @@ class RuntimeConfig:
     # are down — cold-loading BGE-M3 takes ~2-4 minutes, which used to hang
     # each request for minutes with no way to opt out.
     embed_local_fallback: bool = True
-    citation_audit: bool = False
+    citation_audit: bool = True
 
     @classmethod
     def from_env(cls) -> RuntimeConfig:
@@ -114,7 +114,7 @@ class RuntimeConfig:
             rerank_top_n=_env_int("FUSION_RAG_RERANK_TOP_N", 20, minimum=1),
             low_ocr_confidence=_env_float("FUSION_RAG_LOW_OCR_CONFIDENCE", 0.85, minimum=0.0, maximum=1.0),
             embed_local_fallback=_env_bool("FUSION_RAG_EMBED_LOCAL_FALLBACK", True),
-            citation_audit=_env_bool("FUSION_RAG_CITATION_AUDIT", False),
+            citation_audit=_env_bool("FUSION_RAG_CITATION_AUDIT", True),
         )
 
     def to_dict(self) -> dict:

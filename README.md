@@ -522,7 +522,7 @@ Modules migrated to fusion-core: `contextualizer`, `query_rewriter`, `reranker`,
 | `FUSION_RAG_OCR_TIMEOUT` | 300 | Total poll budget in seconds for one OCR task (issue #84). |
 | `FUSION_RAG_OCR_TENANT_ID` | (empty) | `X-Tenant-Id` fallback for OCR calls when no request tenant is bound (background watch-loop ingestion, single-tenant deployments). The OCR service requires the header unconditionally (issue #88); during a request the calling tenant is passed through automatically. |
 | `FUSION_RAG_LOW_OCR_CONFIDENCE` | 0.85 | OCR chunk confidence below this flags `low_confidence: true` on search results and `/ask` citations (issue #85). |
-| `FUSION_RAG_CITATION_AUDIT` | (empty) | `1` = write a queryable citation audit trail (issue #117): query chain + retrieved chunks per retrieval call to `citation_audit.db`, reconstructable via `GET /kb/bases/{kb_id}/citations/traces`. Default OFF. |
+| `FUSION_RAG_CITATION_AUDIT` | 1 | `1` = write a queryable citation audit trail (issue #117, default ON since R2/#124): query chain + retrieved chunks per retrieval call to `citation_audit.db`, reconstructable via `GET /kb/bases/{kb_id}/citations/traces`. `0` = disable. |
 
 **Multi-tenant isolation (#61).** When `FUSION_RAG_REQUIRE_GATEWAY=1`, fusion-rag enforces the backend half of fusion-gateway's tenant scoping: every `/kb/*` request must transit the gateway (proven by the `X-Fusion-Route: gateway-decision` header) and carries an authoritative `X-Fusion-Tenant`. KBs are stamped with their tenant at creation and scoped on list/get — a tenant-A caller never sees tenant-B's KBs. The client-supplied `X-Space-Id` is a non-authoritative passthrough, ignored for scoping. `/health`, `/ready`, `/metrics`, `/mcp`, and auth routes stay open so the service remains observable when the gateway is down. Default off; no migration needed (existing KBs have `tenant=null`).
 
@@ -663,6 +663,14 @@ ruff check fusion_rag/
 ```
 
 ---
+
+## What's New in v0.8.31
+
+- **Citation auditing ON by default (R2, issue #124)** — `FUSION_RAG_CITATION_AUDIT` now defaults to `1` (set `0` to disable). Measured overhead: ~0.11 ms per retrieval write (10 chunks + 1 rewrite, sqlite WAL batch) — noise against search latency. The evaluator (`RAGEvaluator`) gained a citation-accuracy judge (`CITATION_ACCURACY_PROMPT`: what fraction of the answer's claims are supported by the CITED sources — Anthropic/Glean production rubric) emitted per-case as `citation_accuracy` + aggregate `avg_citation_accuracy` (averaged only over cases that carry citations), and `citation_accuracy_from_trace()` scores an /ask response's citations against a citation-audit trace (chunk-id overlap).
+
+## What's New in v0.8.30
+
+- **RRF fusion consolidation (R1, issue #123)** — `HybridSearch(method="rrf")` is the single supported fusion path; the weighted-score `FusionRetriever` is deprecated (DeprecationWarning, experimental only). Recall ablation re-run on live BGE-M3 recorded as `docs/benchmarks/recall-2026-11-14.json` (RRF 0.7939/0.9212/1.0000, rrf >= max(single) holds).
 
 ## What's New in v0.8.29
 
