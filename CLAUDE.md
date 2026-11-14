@@ -91,6 +91,7 @@ fusion_rag/
 │   ├── contextualizer.py    # Contextualizer — Anthropic Contextual Retrieval for chunk context
 │   ├── ocr_hook.py          # Issue #84/#85: OcrHook — async client to fusion-drawing-parser for scanned-PDF OCR
 │   ├── reranker.py          # Reranker (batch LLM scoring) + HybridSearch (alpha-weighted + RRF fusion)
+│   ├── sparse_index.py      # Issue #132: SparseIndex — per-chunk BGE-M3 sparse weights (SQLite), third RRF channel
 │   ├── cross_encoder_reranker.py # CrossEncoderReranker — fusion-mlx /v1/rerank (real bge-reranker-v2-m3), #70
 │   ├── query_rewriter.py    # QueryRewriter — HyDE, query expansion, condensation
 │   ├── rag_chain.py         # MultiTurnRAG (token-budget history) + DocumentChain (stuff/refine/map_reduce)
@@ -181,6 +182,8 @@ fusion_rag/
 
 - **Offline eval harness (#117)**: `engine/eval_set.py` — `eval_cases` (seeded idempotently from the deterministic recall_bench 55-query corpus) + `eval_runs` tables; `run_offline_eval()` is BM25-only (recall@5/recall@10/mrr@10, no model/network). Gate: `scripts/eval_gate.py` vs `scripts/eval_baseline.json`, fails when a metric drops beyond tolerance (0.02); CI job `.github/workflows/eval.yml`. Re-baseline with `--update-baseline` when a retrieval change IMPROVES metrics (commit the new baseline in the same PR).
 
+- **Native sparse channel (R10, #132)**: unblocked by upstream fusion-mlx#1621 (CLOSED, shipped PR #1627) — `POST /v1/embeddings` with `"return_sparse": true` returns BGE-M3 lexical weights per input (`{"token_id": weight}`; sparse head lazy-loads, models without it → 400 / missing field). `EmbeddingClient.embed_batch_sparse()` requests dense+sparse in ONE call (zero extra model passes; flag off = payload identical to `embed_batch`), `engine/sparse_index.py` persists per-chunk weights to `{storage_path}/sparse.db` (SqliteBase WAL, batched chunk_id lookups, exact-chunk-id teardown on delete/replace), and `HybridSearch.search(query_sparse=..., sparse_lookup=...)` RRF-fuses a THIRD ranking over the candidate pool (vector ∪ BM25 results, sparse dot-product scored). Flag `FUSION_RAG_SPARSE_CHANNEL=1` (default OFF = byte-identical retrieval); teardown/write failures are logged non-fatal — sparse is an enhancement tier, BM25 is never replaced. Measured (docs/benchmarks/sparse-ablation.json): rrf3 recall@10 0.9182 vs rrf2 0.9212 (−0.003), ndcg@10 −0.0133 — NO lift on the exact-term recall_bench corpus; flag stays default OFF. Available for corpora with BM25-unfriendly lexical gaps.
+
 ### Environment Variables
 
 | Variable | Default | Purpose |
@@ -224,6 +227,7 @@ fusion_rag/
 | `FUSION_RAG_ROUTER` | off | Query complexity routing (issue #128): `auto` = rule-based simple/standard/complex routing overrides hybrid/rerank/retry; logged + returned as `route`. |
 | `FUSION_RAG_CRAG_ROUNDS` | 0 | Bounded CRAG retry loop (issue #127): LLM grades retrieved chunks; below threshold rewrites + re-retrieves, max this many extra rounds. Trace on `/ask` as `crag`. `0` = off. |
 | `FUSION_RAG_PDF_BACKEND` | legacy | PDF extraction backend (issue #131, R9): `legacy` (PyMuPDF text) or `docling` (layout-aware tables + reading order; optional dep `pip install 'fusion-rag[docling]'`; any failure falls back to legacy). Per-KB `pdf_backend` config overrides this default. |
+| `FUSION_RAG_SPARSE_CHANNEL` | (empty) | Native sparse channel (issue #132, R10): `1` = ingest stores per-chunk BGE-M3 sparse weights (same single embeddings call, `return_sparse: true`) and hybrid search RRF-fuses a third sparse ranking. Default off — measured no lift on the recall_bench corpus (see docs/benchmarks/sparse-ablation.json). Models without a sparse head degrade to BM25 automatically. |
 | `FUSION_RAG_WATCH_CAP` | 16 | Max concurrent directory watches per process (R3) |
 | `FUSION_RAG_TRAJECTORY_MAX_MB` | 100 | Max trajectory file MB before rotation (R6) |
 | `FUSION_RAG_TRAJECTORY_KEEP` | 5 | Rotated trajectory files kept (R6) |

@@ -107,6 +107,13 @@ class RuntimeConfig:
     # any failure. Per-KB config (KnowledgeBaseConfig.pdf_backend) overrides
     # this env default when set.
     pdf_backend: str = "legacy"
+    # Issue #132 (R10): BGE-M3 native sparse channel. OFF (default) = retrieval
+    # byte-identical to before. ON = ingest stores per-chunk sparse weights
+    # (same single /v1/embeddings call, "return_sparse": true — zero extra
+    # model passes) and hybrid search RRF-fuses a third sparse ranking; when
+    # the model lacks a sparse head (400 / missing field) the channel silently
+    # degrades and BM25 stays the lexical tier.
+    sparse_channel: bool = False
 
     @classmethod
     def from_env(cls) -> RuntimeConfig:
@@ -136,6 +143,7 @@ class RuntimeConfig:
             crag_rounds=_env_int("FUSION_RAG_CRAG_ROUNDS", 0, minimum=0),
             router_mode=os.environ.get("FUSION_RAG_ROUTER", "off").strip().lower(),
             pdf_backend=os.environ.get("FUSION_RAG_PDF_BACKEND", "legacy").strip().lower(),
+            sparse_channel=_env_bool("FUSION_RAG_SPARSE_CHANNEL", False),
         )
 
     def to_dict(self) -> dict:

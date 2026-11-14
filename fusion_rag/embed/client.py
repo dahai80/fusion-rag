@@ -93,6 +93,9 @@ class EmbeddingClient:
         self._client: httpx.AsyncClient | None = None
         self._fallback_client: httpx.AsyncClient | None = None
         self._semaphore = asyncio.Semaphore(4)
+        # Issue #132 (R10): one-shot sparse feature-detect — 400 or a missing
+        # "sparse" field flips this and the flag is never re-sent this process.
+        self._sparse_unsupported = False
         self._cache = None
         if cache_enabled:
             from ..engine.embedding_cache import EmbeddingCache
@@ -238,6 +241,78 @@ class EmbeddingClient:
         if self.fallback_url:
             return await self._call_fallback_api(texts)
         return await self._call_local_embed(texts)
+
+    async def embed_batch_sparse(self, texts: list[str]) -> tuple[list[list[float]], list[dict[str, float] | None]]:
+        """Issue #132 (R10): dense + BGE-M3 sparse weights in ONE request.
+
+        fusion-mlx PR #1627: POST /v1/embeddings with "return_sparse": true
+        returns per-item "sparse": {"token_id": weight} — zero extra model
+        passes vs a separate lexical pass. Returns (vectors, sparse) aligned by
+        index; sparse entries are None when the model has no sparse head (400)
+        or the field is absent — callers fall back to BM25, never fail ingest.
+        Dense cache is NOT consulted here (ingest path, fresh chunks).
+        """
+        if not texts:
+            return [], []
+        # Flag off = dense-only payload, byte-identical request shape to
+        # embed_batch (no return_sparse probe noise on models without a head).
+        from ..engine.runtime_config import get_runtime_config
+
+        want_sparse = get_runtime_config().sparse_channel and not self._sparse_unsupported
+        for attempt in range(self.max_retries):
+            try:
+                async with self._semaphore:
+                    payload = {"model": self.model, "input": texts}
+                    if want_sparse:
+                        payload["return_sparse"] = True
+                    resp = await self.client.post("/embeddings", json=payload)
+                    if resp.status_code == 400 and want_sparse:
+                        # Model has no sparse head (upstream rejects the flag).
+                        # One-shot downgrade: log once, retry dense-only.
+                        self._sparse_unsupported = True
+                        want_sparse = False
+                        logger.warning(
+                            "embedding endpoint rejected return_sparse (model %s has no sparse head); "
+                            "sparse channel disabled, BM25 stays the lexical tier",
+                            self.model,
+                        )
+                        continue
+                    resp.raise_for_status()
+                    data = resp.json()
+                    items = data.get("data", [])
+                    vectors = _map_embed_response(data, len(texts))
+                    sparse: list[dict[str, float] | None] = [None] * len(texts)
+                    if want_sparse:
+                        got = 0
+                        for item in items:
+                            idx = item.get("index", 0)
+                            weights = item.get("sparse")
+                            if isinstance(weights, dict) and weights:
+                                sparse[idx] = {str(k): float(v) for k, v in weights.items()}
+                                got += 1
+                        if got == 0:
+                            # Field silently absent — treat as unsupported, log once.
+                            self._sparse_unsupported = True
+                            logger.warning(
+                                "embedding response carried no sparse field; "
+                                "sparse channel disabled, BM25 stays the lexical tier"
+                            )
+                    return vectors, sparse
+            except httpx.TimeoutException:
+                logger.warning("embed_batch_sparse timeout (attempt %d/%d)", attempt + 1, self.max_retries)
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(1.0 * (attempt + 1))
+            except EmbeddingError:
+                raise
+            except Exception as e:
+                logger.warning("embed_batch_sparse failed (attempt %d/%d): %s", attempt + 1, self.max_retries, e)
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(1.0)
+        # Total failure — keep the dense path's provider chain (cloud/local).
+        # Sparse is an enhancement: degrade to None, never block ingest.
+        logger.warning("embed_batch_sparse exhausted retries; falling back to dense-only embed_batch")
+        vectors = await self.embed_batch(texts)
+        return vectors, [None] * len(texts)
 
     async def _call_fallback_api(self, texts: list[str]) -> list[list[float]]:
         logger.info("Falling back to cloud embedding: %s", self.fallback_url)

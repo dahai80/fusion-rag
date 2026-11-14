@@ -1,0 +1,48 @@
+{
+  "bm25_only": {
+    "mode": "bm25_only",
+    "recall@5": 0.7939,
+    "ndcg@5": 0.969,
+    "recall@10": 0.9212,
+    "ndcg@10": 0.9469,
+    "mrr@10": 1.0,
+    "map@10": 0.9212
+  },
+  "vector_only": {
+    "mode": "vector_only",
+    "recall@5": 0.7848,
+    "ndcg@5": 0.961,
+    "recall@10": 0.9182,
+    "ndcg@10": 0.943,
+    "mrr@10": 1.0,
+    "map@10": 0.9147
+  },
+  "rrf2": {
+    "mode": "rrf2",
+    "recall@5": 0.7909,
+    "ndcg@5": 0.9658,
+    "recall@10": 0.9212,
+    "ndcg@10": 0.946,
+    "mrr@10": 1.0,
+    "map@10": 0.919
+  },
+  "rrf3": {
+    "mode": "rrf3",
+    "recall@5": 0.7576,
+    "ndcg@5": 0.932,
+    "recall@10": 0.9182,
+    "ndcg@10": 0.9327,
+    "mrr@10": 1.0,
+    "map@10": 0.8907
+  },
+  "ablation": {
+    "rrf3_vs_rrf2_recall@10": -0.003,
+    "rrf3_geq_rrf2": false,
+    "rrf3_vs_rrf2_ndcg@10": -0.0133,
+    "sparse_rows": 505,
+    "chunks": 505,
+    "queries": 55,
+    "avg_query_ms_all_arms": 21.3,
+    "note": "single combined dense+sparse embed pass at ingest; query adds one sparse call when the flag is on"
+  }
+}
