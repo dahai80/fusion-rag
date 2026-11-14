@@ -250,6 +250,10 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.34
+
+- **Rerank 候选池 A/B——20 已饱和（R3，issue #125）** — 新增 `recall_bench.run_rerank_pool_ablation` 与 `scripts/rerank_pool_ablation.py`（各池 RRF 候选 → 交叉编码器重排 → top-10，R12 指标 + 重排延迟 p50/p95）。真实 bge-reranker-v2-m3 实测已记录（`docs/benchmarks/rerank-pool-ablation.json`）：四档池指标完全一致，延迟 114 ms → 1298 ms p50——`rerank_top_n=20` 默认不变；上线真实流量前请在真实标注集上重跑。
+
 ### v0.8.33
 
 - **PyPI 打包** — `pyproject.toml` 达到发布标准（readme/classifiers/urls，`fusion-core>=0.12.1` 可从 PyPI 解析）；`.github/workflows/pypi.yml` 通过 Trusted Publishing（OIDC）在 `v*` tag 推送时发布；sdist + wheel 已验证（含控制台资产）。首个 tag 发布后即可 `pip install fusion-rag`。
