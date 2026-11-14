@@ -410,3 +410,88 @@ async def run_benchmark(
         metrics["ablation"]["rrf_geq_max_single"],
     )
     return metrics
+
+
+async def run_rerank_pool_ablation(
+    embed: Any,
+    docs: list[dict[str, Any]],
+    queries: list[tuple[str, str]],
+    *,
+    workdir: str,
+    pools: tuple[int, ...] = (20, 50, 100, 150),
+    rerank_model: str = "bge-reranker-v2-m3",
+) -> dict[str, Any]:
+    # R3 (issue #125): A/B the cross-encoder rerank candidate pool size.
+    # Baseline rerank_top_n=20; Anthropic's contextual-retrieval recipe reranks
+    # top-150 then keeps top-20. Builds the same index as run_benchmark, takes
+    # RRF candidates up to max(pools), then per pool: rerank the first
+    # `pool` candidates, truncate to 10, score with the R12 metrics and
+    # record rerank-only latency p50/p95. Requires a live rerank model —
+    # quality evidence, never mock.
+    import os
+    import time
+
+    from ..store.vector_store import VectorStore
+    from .bm25_index import BM25Index
+    from .cross_encoder_reranker import CrossEncoderReranker
+    from .reranker import HybridSearch
+
+    records, doc_to_chunks = await build_chunk_records(docs)
+    vectors = await embed.embed_batch([r["text"] for r in records])
+    for r, v in zip(records, vectors):
+        r["vector"] = v
+
+    vpath = os.path.join(workdir, "vectors")
+    vs = VectorStore(vector_path=vpath, dimension=len(vectors[0]), backend_type="local")
+    vs.add_batch(records)
+    bm25 = BM25Index(store_path=os.path.join(workdir, "bm25.db"))
+    bm25.add_documents(records)
+    hs = HybridSearch(vs, method="rrf")
+    reranker = CrossEncoderReranker(model=rerank_model)
+
+    max_pool = max(pools)
+    per_pool = {p: {m: [] for m in ("recall@5", "recall@10", "mrr@10", "ndcg@10", "map@10")} for p in pools}
+    latencies: dict[int, list[float]] = {p: [] for p in pools}
+    evaluated = 0
+    for query, doc_id in queries:
+        truth = set(doc_to_chunks.get(doc_id, []))
+        if not truth:
+            continue
+        qv = await embed.embed(query)
+        rrf_rows = await hs.search(qv, query, top_k=max_pool, threshold=0.0)
+        if not rrf_rows:
+            continue
+        evaluated += 1
+        for pool in pools:
+            candidates = rrf_rows[:pool]
+            t0 = time.perf_counter()
+            reranked = await reranker.rerank(query, candidates, top_k=10)
+            latencies[pool].append((time.perf_counter() - t0) * 1000)
+            ids = [r.get("id", "") for r in reranked]
+            per_pool[pool]["recall@5"].append(_recall_at_k(ids, truth, 5))
+            per_pool[pool]["recall@10"].append(_recall_at_k(ids, truth, 10))
+            per_pool[pool]["mrr@10"].append(_mrr_at_k(ids, truth, 10))
+            per_pool[pool]["ndcg@10"].append(_ndcg_at_k(ids, truth, 10))
+            per_pool[pool]["map@10"].append(_map_at_k(ids, truth, 10))
+
+    vs.close()
+
+    def _pct(vals: list[float], q: float) -> float:
+        if not vals:
+            return 0.0
+        s = sorted(vals)
+        return round(s[min(int(len(s) * q), len(s) - 1)], 2)
+
+    out: dict[str, Any] = {"mode": "real", "rerank_model": rerank_model, "queries": evaluated, "pools": {}}
+    for pool in pools:
+        m = per_pool[pool]
+        lat = latencies[pool]
+        out["pools"][pool] = {
+            metric: round(sum(v) / len(v), 4) if v else 0.0 for metric, v in m.items()
+        } | {
+            "rerank_latency_p50_ms": _pct(lat, 0.50),
+            "rerank_latency_p95_ms": _pct(lat, 0.95),
+            "rerank_calls": len(lat),
+        }
+    logger.info("rerank pool ablation done: queries=%d pools=%s", evaluated, list(pools))
+    return out
