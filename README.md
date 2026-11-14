@@ -674,6 +674,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.34
+
+- **Rerank pool A/B — 20 saturates (R3, issue #125)** — `recall_bench.run_rerank_pool_ablation` + `scripts/rerank_pool_ablation.py` (RRF candidates per pool → cross-encoder → top-10, R12 metrics + rerank latency p50/p95). Live bge-reranker-v2-m3 run recorded (`docs/benchmarks/rerank-pool-ablation.json`): metrics identical at pool 20/50/100/150, latency 114 ms → 1298 ms p50 — `rerank_top_n=20` default stays, re-run on a real labeled set before concluding for production traffic.
+
 ## What's New in v0.8.33
 
 - **PyPI packaging** — `pyproject.toml` PyPI-ready (readme/classifiers/urls, `fusion-core>=0.12.1` resolves from PyPI); `.github/workflows/pypi.yml` publishes via Trusted Publishing (OIDC) on `v*` tags; sdist + wheel verified (console assets included). `pip install fusion-rag` once the first tag publishes.
