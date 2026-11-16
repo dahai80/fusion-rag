@@ -676,6 +676,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.43
+
+- **CI retrofit per the fusion#2 checklist (issue #154)** — `ci.yml` gains `concurrency` (grouped by ref, `cancel-in-progress: true` — a new push cancels the superseded run instead of queueing), `paths-ignore` for `**.md`/`docs/**` on push+PR (doc-only edits skip the test/lint gate; the `docs` workflow still validates them), and a pip dependency cache keyed on the `pyproject.toml` hash for both the test and lint jobs. `eval.yml`/`docs.yml` get the same concurrency groups; `pypi.yml` gets a publish group WITHOUT cancel (a release publish is never cancelled mid-flight). Deliberately not applied: test sharding (suite ~4 min wall, under the ~5 min threshold) and a nightly tiered gate (per-PR suite is already the full offline suite).
+
 ## What's New in v0.8.42
 
 - **Native BGE-M3 sparse channel (R10, issue #132)** — unblocked upstream (fusion-mlx#1621 shipped in PR #1627): `POST /v1/embeddings` with `"return_sparse": true` returns BGE-M3 lexical weights per input. `EmbeddingClient.embed_batch_sparse()` fetches dense + sparse in ONE call (zero extra model passes); per-chunk weights persist to `{storage_path}/sparse.db`; hybrid search RRF-fuses a THIRD ranking (sparse dot-product over the candidate pool). Opt-in `FUSION_RAG_SPARSE_CHANNEL=1` — default OFF: measured ablation (`docs/benchmarks/sparse-ablation.json`) shows no lift on the recall_bench corpus (rrf3 recall@10 0.9182 vs rrf2 0.9212; the exact-term corpus saturates BM25). Models without a sparse head degrade to BM25 automatically (one-shot 400/missing-field downgrade); sparse teardown on delete/replace is exact-chunk-id and non-fatal.

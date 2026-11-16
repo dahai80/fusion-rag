@@ -250,6 +250,10 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.43
+
+- **按 fusion#2 清单完成 CI 改造（issue #154）** —— `ci.yml` 新增 `concurrency`（按 ref 分组、`cancel-in-progress: true`，新推送取消同 ref 上被取代的运行而非排队）、push/PR 的 `paths-ignore`（`**.md`/`docs/**` 纯文档改动跳过测试/静态检查；`docs` 工作流仍会校验文档）、以及以 `pyproject.toml` 哈希为键的 pip 依赖缓存（test + lint 两个 job）。`eval.yml`/`docs.yml` 加同款 concurrency；`pypi.yml` 加发布组但**不取消**（发布过程绝不中断）。评估后不加：测试分片（套件约 4 分钟，低于 ~5 分钟阈值）与夜间分层门禁（PR 套件已是完整离线套件）。
+
 ### v0.8.42
 
 - **BGE-M3 原生稀疏通道（R10，issue #132）** — 上游解锁（fusion-mlx#1621 已在 PR #1627 交付）：`POST /v1/embeddings` 支持 `"return_sparse": true`，按输入返回 BGE-M3 词法权重。`EmbeddingClient.embed_batch_sparse()` 单次调用同时取 dense + sparse（零额外模型前向）；逐块权重落盘 `{storage_path}/sparse.db`；混合检索将稀疏点积作为第三路 RRF 融合。选配 `FUSION_RAG_SPARSE_CHANNEL=1` —— 默认关闭：消融实测（`docs/benchmarks/sparse-ablation.json`）在 recall_bench 语料上无提升（rrf3 recall@10 0.9182 vs rrf2 0.9212，精确词查询 BM25 已饱和）。无稀疏头的模型自动降级 BM25（一次性 400/缺字段降级）；删除/替换按精确 chunk-id 清理稀疏层，失败不影响主流程。
