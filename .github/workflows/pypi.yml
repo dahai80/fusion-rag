@@ -24,6 +24,11 @@ on:
 permissions:
   contents: read
 
+# Issue #154 (fusion#2 CI retrofit): serialize publish runs per ref. NO
+# cancel-in-progress — a release publish must never be cancelled mid-flight.
+concurrency:
+  group: pypi-${{ github.ref }}
+
 jobs:
   publish:
     runs-on: ubuntu-latest
