@@ -250,6 +250,10 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.44
+
+- **独立附件文件服务（issue #156）** —— 聊天客户端不再需要自行存储附件，也不必为每个上传建一次性知识库。新增与 KB 解耦的接口：`POST /api/files`（multipart 或 raw body，返回 `file_id`、大小、sha256 校验和）、`GET /api/files`、`GET /api/files/{file_id}/segments?offset=&max_bytes=`（确定性有界字节段读取 —— fusion-harness `file.read_segment` 契约的服务端强制点：`max_bytes` 超限钳制到 `FUSION_RAG_FILE_SEGMENT_MAX_BYTES`（默认 256 KB），文本按 UTF-8 字符边界切片、`next_offset` 按实际消费字节数推进，拼接各段可逐字节还原原文件，二进制以 base64 返回）、`DELETE /api/files/{file_id}`，以及可选 `POST /api/files/{file_id}/ingest` 将上传文件晋升进现有 KB 管线（parse → chunk → index 不变）。Blob 落盘 `{data_dir}/files/` + SQLite 元数据侧库；根路径与 `/shell/fusion-rag/` 双挂载。同时修复一个潜在的测试套件缺口：R10 的 `embed_batch_sparse` 绕过了旧 fixture 的 `embed_batch` mock（24 个用例一直依赖重试耗尽后的回退路径才绿 —— `tests/conftest.py` 现在让 sparse 委托给当前生效的 mock），并把 `python-multipart` 补为显式运行时依赖。
+
 ### v0.8.43
 
 - **按 fusion#2 清单完成 CI 改造（issue #154）** —— `ci.yml` 新增 `concurrency`（按 ref 分组、`cancel-in-progress: true`，新推送取消同 ref 上被取代的运行而非排队）、push/PR 的 `paths-ignore`（`**.md`/`docs/**` 纯文档改动跳过测试/静态检查；`docs` 工作流仍会校验文档）、以及以 `pyproject.toml` 哈希为键的 pip 依赖缓存（test + lint 两个 job）。`eval.yml`/`docs.yml` 加同款 concurrency；`pypi.yml` 加发布组但**不取消**（发布过程绝不中断）。评估后不加：测试分片（套件约 4 分钟，低于 ~5 分钟阈值）与夜间分层门禁（PR 套件已是完整离线套件）。

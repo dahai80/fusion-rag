@@ -676,6 +676,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.44
+
+- **Standalone attachment file service (issue #156)** — chat clients no longer need to store attachments themselves or spin up a throwaway KB per upload. New KB-independent surface: `POST /api/files` (multipart or raw body → `file_id`, size, sha256 checksum), `GET /api/files`, `GET /api/files/{file_id}/segments?offset=&max_bytes=` (deterministic bounded byte-range reads — the server-side enforcement point of the fusion-harness `file.read_segment` contract: `max_bytes` clamps to `FUSION_RAG_FILE_SEGMENT_MAX_BYTES` (default 256 KB), text serves UTF-8 slices cut on char boundaries with `next_offset` advancing by consumed bytes so concatenated segments reconstruct the file byte-exactly, binary serves base64), `DELETE /api/files/{file_id}`, and optional `POST /api/files/{file_id}/ingest` to promote an upload into the existing KB pipeline (parse → chunk → index unchanged). Blobs live under `{data_dir}/files/` with a SQLite metadata sidecar; mounted at root and under `/shell/fusion-rag/`. Also fixed a latent suite-wide test gap: R10's `embed_batch_sparse` bypassed the `embed_batch` mock in pre-R10 fixtures (24 tests silently depended on the retry-exhaustion fallback — `tests/conftest.py` now delegates sparse to the active mock), and `python-multipart` was added as an explicit runtime dep.
+
 ## What's New in v0.8.43
 
 - **CI retrofit per the fusion#2 checklist (issue #154)** — `ci.yml` gains `concurrency` (grouped by ref, `cancel-in-progress: true` — a new push cancels the superseded run instead of queueing), `paths-ignore` for `**.md`/`docs/**` on push+PR (doc-only edits skip the test/lint gate; the `docs` workflow still validates them), and a pip dependency cache keyed on the `pyproject.toml` hash for both the test and lint jobs. `eval.yml`/`docs.yml` get the same concurrency groups; `pypi.yml` gets a publish group WITHOUT cancel (a release publish is never cancelled mid-flight). Deliberately not applied: test sharding (suite ~4 min wall, under the ~5 min threshold) and a nightly tiered gate (per-PR suite is already the full offline suite).
