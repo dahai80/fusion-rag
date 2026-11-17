@@ -73,6 +73,7 @@ fusion_rag/
 │   ├── routes_store.py    # /kb/bases/{kb_id}/store/* — M2M vector store surface (RemoteBackend server half)
 │   ├── routes_bnup.py     # Issue #74: /api/v1/bnup/* — BNUP textbook corpus ingest + retrieve + KG + misconceptions + stats
 │   ├── routes_graph.py    # Issue #79: /kb/bases/{id}/graph/* — GraphRAG build/stats/search (LLM entity extraction, per-KB graph.db)
+│   ├── routes_files.py    # Issue #156: /api/files/* — standalone attachment service (upload/list/segment/delete + promote-to-KB ingest, KB-independent)
 │   ├── auth.py            # API key authentication (AuthConfig + verify_api_key)
 │   ├── app_state.py       # Per-app state on app.state (contextvar-bound) + resource pools
 │   ├── logging_setup.py   # O-P1-2/O-P2-2: RotatingFileHandler + JSON formatter + request-id
@@ -98,6 +99,7 @@ fusion_rag/
 │   ├── graph_rag.py         # GraphRAG — entity extraction + relationship-aware retrieval, wired to /kb/bases/{id}/graph/* (issue #79)
 │   ├── evaluator.py         # RAGEvaluator — faithfulness/relevance/context_recall scoring (internal library, NOT HTTP-wired)
 │   ├── embedding_cache.py   # EmbeddingCache — SQLite-backed vector cache with TTL
+│   ├── file_store.py        # Issue #156: FileStore — KB-independent file objects (blobs under {data_dir}/files + files.db; byte-range segment reads with server-side max_bytes clamp)
 │   ├── retrievers.py        # MMRRetriever, ContextCompressionRetriever, FusionRetriever (internal library, NOT HTTP-wired)
 │   ├── version_manager.py   # KB snapshot/rollback via hard-link copies
 │   ├── incremental_sync.py  # MD5 + mtime change detection for directory sync
@@ -184,6 +186,8 @@ fusion_rag/
 
 - **Native sparse channel (R10, #132)**: unblocked by upstream fusion-mlx#1621 (CLOSED, shipped PR #1627) — `POST /v1/embeddings` with `"return_sparse": true` returns BGE-M3 lexical weights per input (`{"token_id": weight}`; sparse head lazy-loads, models without it → 400 / missing field). `EmbeddingClient.embed_batch_sparse()` requests dense+sparse in ONE call (zero extra model passes; flag off = payload identical to `embed_batch`), `engine/sparse_index.py` persists per-chunk weights to `{storage_path}/sparse.db` (SqliteBase WAL, batched chunk_id lookups, exact-chunk-id teardown on delete/replace), and `HybridSearch.search(query_sparse=..., sparse_lookup=...)` RRF-fuses a THIRD ranking over the candidate pool (vector ∪ BM25 results, sparse dot-product scored). Flag `FUSION_RAG_SPARSE_CHANNEL=1` (default OFF = byte-identical retrieval); teardown/write failures are logged non-fatal — sparse is an enhancement tier, BM25 is never replaced. Measured (docs/benchmarks/sparse-ablation.json): rrf3 recall@10 0.9182 vs rrf2 0.9212 (−0.003), ndcg@10 −0.0133 — NO lift on the exact-term recall_bench corpus; flag stays default OFF. Available for corpora with BM25-unfriendly lexical gaps.
 
+- **Standalone attachment file service (#156)**: `POST/GET /api/files` + `GET /api/files/{file_id}/segments?offset=&max_bytes=` + `DELETE /api/files/{file_id}` + optional `POST /api/files/{file_id}/ingest` (promote into the existing KB pipeline via a temp copy — parse/chunk/index unchanged). KB-independent by design: no KB creation, no throwaway KBs per attachment. `engine/file_store.py` keeps blobs under `{data_dir}/files/{file_id}` (uuid4 hex ids; malformed ids never reach the blob path) + a `files.db` metadata sidecar (SqliteBase). Segment reads are the server-side enforcement point of the fusion-harness `file.read_segment` contract: `max_bytes` clamps to `FUSION_RAG_FILE_SEGMENT_MAX_BYTES` (default 256 KB, oversize = clamp not error); text files serve UTF-8 slices cut on char boundaries with `next_offset` advancing by CONSUMED bytes (a split multibyte char is re-served by the next segment — concatenated segments reconstruct the file byte-exactly); binary files serve base64. Mounted at root AND under `/shell/fusion-rag/` (console parity, before the StaticFiles mount).
+
 ### Environment Variables
 
 | Variable | Default | Purpose |
@@ -228,6 +232,7 @@ fusion_rag/
 | `FUSION_RAG_CRAG_ROUNDS` | 0 | Bounded CRAG retry loop (issue #127): LLM grades retrieved chunks; below threshold rewrites + re-retrieves, max this many extra rounds. Trace on `/ask` as `crag`. `0` = off. |
 | `FUSION_RAG_PDF_BACKEND` | legacy | PDF extraction backend (issue #131, R9): `legacy` (PyMuPDF text) or `docling` (layout-aware tables + reading order; optional dep `pip install 'fusion-rag[docling]'`; any failure falls back to legacy). Per-KB `pdf_backend` config overrides this default. |
 | `FUSION_RAG_SPARSE_CHANNEL` | (empty) | Native sparse channel (issue #132, R10): `1` = ingest stores per-chunk BGE-M3 sparse weights (same single embeddings call, `return_sparse: true`) and hybrid search RRF-fuses a third sparse ranking. Default off — measured no lift on the recall_bench corpus (see docs/benchmarks/sparse-ablation.json). Models without a sparse head degrade to BM25 automatically. |
+| `FUSION_RAG_FILE_SEGMENT_MAX_BYTES` | 262144 | Server-side cap on one `/api/files/{file_id}/segments` `max_bytes` (issue #156). Oversize/unset/zero request values CLAMP to this cap (never an error) so one call can never return a whole large document. |
 | `FUSION_RAG_WATCH_CAP` | 16 | Max concurrent directory watches per process (R3) |
 | `FUSION_RAG_TRAJECTORY_MAX_MB` | 100 | Max trajectory file MB before rotation (R6) |
 | `FUSION_RAG_TRAJECTORY_KEEP` | 5 | Rotated trajectory files kept (R6) |

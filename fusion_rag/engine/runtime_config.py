@@ -114,6 +114,11 @@ class RuntimeConfig:
     # the model lacks a sparse head (400 / missing field) the channel silently
     # degrades and BM25 stays the lexical tier.
     sparse_channel: bool = False
+    # Issue #156: standalone attachment file service. Server-side cap on one
+    # segment read's max_bytes — one call can never return a whole large
+    # document. Oversize / unset / non-positive request values CLAMP to this
+    # cap (never an error).
+    file_segment_max_bytes: int = 262_144
 
     @classmethod
     def from_env(cls) -> RuntimeConfig:
@@ -144,6 +149,9 @@ class RuntimeConfig:
             router_mode=os.environ.get("FUSION_RAG_ROUTER", "off").strip().lower(),
             pdf_backend=os.environ.get("FUSION_RAG_PDF_BACKEND", "legacy").strip().lower(),
             sparse_channel=_env_bool("FUSION_RAG_SPARSE_CHANNEL", False),
+            file_segment_max_bytes=_env_int(
+                "FUSION_RAG_FILE_SEGMENT_MAX_BYTES", 262_144, minimum=1
+            ),
         )
 
     def to_dict(self) -> dict:

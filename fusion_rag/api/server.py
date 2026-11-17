@@ -20,6 +20,7 @@ from .mcp_server import router as mcp_router
 from .routes import router as kb_router
 from .routes_auth import router as auth_router
 from .routes_bnup import router as bnup_router
+from .routes_files import router as files_router
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,15 @@ def create_app(
                 await close_trajectory_writer()
             except Exception as e:
                 logger.warning("lifespan: meta/trajectory close failed: %s", e)
+            # Issue #156: close the file store's sqlite conn (built lazily —
+            # None means it was never used). Direct app.state read: the
+            # contextvar binding is gone by shutdown time.
+            try:
+                fs = getattr(app.state, "file_store", None)
+                if fs is not None:
+                    fs._close_conn()
+            except Exception as e:
+                logger.warning("lifespan: file store close failed: %s", e)
             try:
                 from fusion_core.http_client import close_all
 
@@ -186,6 +196,8 @@ def create_app(
     app.include_router(mcp_router)
     app.include_router(auth_router)
     app.include_router(bnup_router)
+    # Issue #156: standalone attachment file service (KB-independent).
+    app.include_router(files_router)
 
     # Issue #106: map EmbeddingError to a clean 503 instead of a bare 500
     # "Internal Server Error". EmbeddingError means every provider (MLX +
@@ -213,6 +225,9 @@ def create_app(
     # separately from the kb router at root level, so it needs its own
     # subpath inclusion or those calls 404 behind the gateway.
     app.include_router(auth_router, prefix="/shell/fusion-rag")
+    # Issue #156: file service mounted under the console subpath too (page-
+    # relative calls), same registration-order rule as above.
+    app.include_router(files_router, prefix="/shell/fusion-rag")
 
     @app.get("/shell/fusion-rag/health", include_in_schema=False)
     async def health_subpath():
