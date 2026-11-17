@@ -180,7 +180,18 @@ class FileStore(SqliteBase):
             if dropped:
                 logger.debug("segment for %s trimmed %d trailing partial utf-8 bytes", file_id, dropped)
             next_offset = offset + len(raw)
-            content = raw.decode("utf-8")
+            try:
+                content = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                # Issue #159: a caller-supplied offset that starts MID-character
+                # leaves the slice invalid from byte 0 — tail-trimming cannot
+                # fix the head. Fail with a deterministic, actionable 400 (the
+                # client should continue from the previous segment's
+                # next_offset) instead of an uncaught 500.
+                raise ValueError(
+                    f"offset {offset} splits a multibyte character; "
+                    "continue from the previous segment's next_offset"
+                )
         else:
             next_offset = offset + len(raw)
             content = base64.b64encode(raw).decode("ascii")

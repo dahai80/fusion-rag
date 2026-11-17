@@ -119,6 +119,12 @@ class RuntimeConfig:
     # document. Oversize / unset / non-positive request values CLAMP to this
     # cap (never an error).
     file_segment_max_bytes: int = 262_144
+    # Issue #159: durable upload cap for the attachment file service (clients
+    # cap their own uploads, but the platform layer is where the durable cap
+    # belongs). Bodies over this limit are rejected 413. Checked against
+    # Content-Length when present AND against a hard ceiling while buffering
+    # raw/chunked bodies (chunked uploads without Content-Length covered).
+    file_max_upload_bytes: int = 104_857_600
 
     @classmethod
     def from_env(cls) -> RuntimeConfig:
@@ -151,6 +157,9 @@ class RuntimeConfig:
             sparse_channel=_env_bool("FUSION_RAG_SPARSE_CHANNEL", False),
             file_segment_max_bytes=_env_int(
                 "FUSION_RAG_FILE_SEGMENT_MAX_BYTES", 262_144, minimum=1
+            ),
+            file_max_upload_bytes=_env_int(
+                "FUSION_RAG_FILE_MAX_UPLOAD_BYTES", 104_857_600, minimum=1
             ),
         )
 
