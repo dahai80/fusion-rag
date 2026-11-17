@@ -86,6 +86,28 @@ class TestFileService:
         assert seg["content"] == "multipart body content"
         assert seg["eof"] is True
 
+    def test_urlencoded_body_not_500(self, client):
+        # Regression: a declared UploadFile param made FastAPI parse ANY body
+        # as form data — a urlencoded POST used to 500 on the double read.
+        resp = client.post(
+            "/api/files?filename=form.txt",
+            content="smoke test file",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        assert resp.status_code == 200, resp.text
+        meta = resp.json()
+        assert meta["size"] == len("smoke test file")
+        seg = client.get(f"/api/files/{meta['file_id']}/segments").json()
+        assert seg["content"] == "smoke test file"
+        client.delete(f"/api/files/{meta['file_id']}")
+
+    def test_multipart_missing_file_field_400(self, client):
+        resp = client.post(
+            "/api/files",
+            files={"notfile": ("x.txt", b"x", "text/plain")},
+        )
+        assert resp.status_code == 400, resp.text
+
     def test_binary_roundtrip_base64(self, client):
         # Acceptance: binary content round-trips correctly (base64 segments).
         blob = bytes(range(256)) * 3
