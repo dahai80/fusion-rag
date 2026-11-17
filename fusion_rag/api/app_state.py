@@ -168,6 +168,11 @@ def init_app_state(app: Any, kb_manager: KnowledgeBaseManager, embed_client: Emb
     # concurrent searches). One writer per process, lock-guarded rotation.
     app.state.trajectory_writer: Any = None
     app.state.trajectory_writer_lock = threading.Lock()
+    # Issue #156: standalone attachment file store (KB-independent). One
+    # FileStore per app (blobs under {data_dir}/files + files.db), built
+    # lazily on first file route call, lock-guarded like the writer.
+    app.state.file_store: Any = None
+    app.state.file_store_lock = threading.Lock()
     # R3: restore persisted watches so a restart does not silently drop every
     # directory monitor (operator believes monitoring is live; without restore
     # it was gone with no signal). Rebuild hashes from the files on disk + spawn
@@ -379,6 +384,26 @@ async def close_meta_pool() -> None:
             logger.info("meta pool: closed %s", mpath)
         except Exception as e:
             logger.warning("meta pool: close failed for %s: %s", mpath, e)
+
+
+def get_file_store():
+    """Issue #156: return the per-app FileStore, build once on first use.
+
+    Blobs live under {data_dir}/files with a files.db sidecar. Lazy (not in
+    init_app_state) so apps that never touch /api/files never create the dir.
+    """
+    from ..engine.file_store import FileStore
+
+    state = _state()
+    if state.file_store is not None:
+        return state.file_store
+    with state.file_store_lock:
+        if state.file_store is not None:
+            return state.file_store
+        store = FileStore(str(data_dir() / "files"))
+        state.file_store = store
+        logger.info("file store initialized at %s", store.files_dir)
+        return store
 
 
 def get_trajectory_writer():
