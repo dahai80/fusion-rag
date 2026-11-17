@@ -20,7 +20,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 
 from ..engine.file_store import FileStore, is_valid_file_id
@@ -37,16 +37,29 @@ router = APIRouter(prefix="/api/files", tags=["files"], dependencies=[Depends(ve
 async def upload_file(
     request: Request,
     filename: str = Query("", description="Filename for raw-body uploads"),
-    file: UploadFile | None = File(None),
 ) -> dict:
+    # Body handling is manual (NOT a declared File parameter): a declared
+    # UploadFile makes FastAPI consume/parse the body as form data for ANY
+    # content type, and a urlencoded/plain POST then 500s on the double
+    # body read. Only multipart/form-data goes through form parsing; every
+    # other content type is the raw bytes, untouched.
     store: FileStore = get_file_store()
-    if file is not None:
-        data = await file.read()
-        name = file.filename or filename or "attachment.bin"
+    content_type = request.headers.get("content-type", "")
+    name = filename
+    if content_type.startswith("multipart/form-data"):
+        form = await request.form()
+        upload = form.get("file")
+        if upload is None:
+            raise HTTPException(400, "multipart upload requires a 'file' field")
+        if hasattr(upload, "read"):
+            data = await upload.read()
+            name = name or getattr(upload, "filename", "") or "attachment.bin"
+        else:
+            data = str(upload).encode("utf-8")
         logger.info("file upload (multipart): %s (%d bytes)", name, len(data))
     else:
         data = await request.body()
-        name = filename or "attachment.bin"
+        name = name or "attachment.bin"
         logger.info("file upload (raw body): %s (%d bytes)", name, len(data))
     if not data:
         raise HTTPException(400, "empty upload")
