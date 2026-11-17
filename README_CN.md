@@ -250,6 +250,10 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.45
+
+- **文件服务加固（issue #159）** —— 超过 `FUSION_RAG_FILE_MAX_UPLOAD_BYTES`（新配置项，默认 100 MB）的上传返回 **413**，三处强制：Content-Length 预检、raw/chunked body 流式硬上限（数 GB 的分块上传在落盘前中止）、multipart 暂存的解析后检查。另外：文本文件的段 `offset` 落在**多字节字符中间**时（尾部裁剪修不了头部）现在返回可操作的 **400**（"从上一段的 next_offset 继续"），而非未捕获的 500；二进制文件任意 offset 均可。
+
 ### v0.8.44
 
 - **独立附件文件服务（issue #156）** —— 聊天客户端不再需要自行存储附件，也不必为每个上传建一次性知识库。新增与 KB 解耦的接口：`POST /api/files`（multipart 或 raw body，返回 `file_id`、大小、sha256 校验和）、`GET /api/files`、`GET /api/files/{file_id}/segments?offset=&max_bytes=`（确定性有界字节段读取 —— fusion-harness `file.read_segment` 契约的服务端强制点：`max_bytes` 超限钳制到 `FUSION_RAG_FILE_SEGMENT_MAX_BYTES`（默认 256 KB），文本按 UTF-8 字符边界切片、`next_offset` 按实际消费字节数推进，拼接各段可逐字节还原原文件，二进制以 base64 返回）、`DELETE /api/files/{file_id}`，以及可选 `POST /api/files/{file_id}/ingest` 将上传文件晋升进现有 KB 管线（parse → chunk → index 不变）。Blob 落盘 `{data_dir}/files/` + SQLite 元数据侧库；根路径与 `/shell/fusion-rag/` 双挂载。同时修复一个潜在的测试套件缺口：R10 的 `embed_batch_sparse` 绕过了旧 fixture 的 `embed_batch` mock（24 个用例一直依赖重试耗尽后的回退路径才绿 —— `tests/conftest.py` 现在让 sparse 委托给当前生效的 mock），并把 `python-multipart` 补为显式运行时依赖。

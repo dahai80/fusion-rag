@@ -676,6 +676,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.45
+
+- **File service hardening (issue #159)** — uploads over `FUSION_RAG_FILE_MAX_UPLOAD_BYTES` (new knob, default 100 MB) reject **413**, enforced at three points: Content-Length precheck, hard ceiling while streaming raw/chunked bodies (a chunked multi-GB upload aborts before anything lands on disk), and a post-parse check for multipart spools. Also: a segment `offset` starting **mid-character** on a text file (the tail trim cannot fix the head) now returns an actionable **400** ("continue from the previous segment's next_offset") instead of an uncaught 500; binary files accept any offset.
+
 ## What's New in v0.8.44
 
 - **Standalone attachment file service (issue #156)** — chat clients no longer need to store attachments themselves or spin up a throwaway KB per upload. New KB-independent surface: `POST /api/files` (multipart or raw body → `file_id`, size, sha256 checksum), `GET /api/files`, `GET /api/files/{file_id}/segments?offset=&max_bytes=` (deterministic bounded byte-range reads — the server-side enforcement point of the fusion-harness `file.read_segment` contract: `max_bytes` clamps to `FUSION_RAG_FILE_SEGMENT_MAX_BYTES` (default 256 KB), text serves UTF-8 slices cut on char boundaries with `next_offset` advancing by consumed bytes so concatenated segments reconstruct the file byte-exactly, binary serves base64), `DELETE /api/files/{file_id}`, and optional `POST /api/files/{file_id}/ingest` to promote an upload into the existing KB pipeline (parse → chunk → index unchanged). Blobs live under `{data_dir}/files/` with a SQLite metadata sidecar; mounted at root and under `/shell/fusion-rag/`. Also fixed a latent suite-wide test gap: R10's `embed_batch_sparse` bypassed the `embed_batch` mock in pre-R10 fixtures (24 tests silently depended on the retry-exhaustion fallback — `tests/conftest.py` now delegates sparse to the active mock), and `python-multipart` was added as an explicit runtime dep.
