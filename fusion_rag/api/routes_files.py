@@ -44,6 +44,15 @@ async def upload_file(
     # body read. Only multipart/form-data goes through form parsing; every
     # other content type is the raw bytes, untouched.
     store: FileStore = get_file_store()
+    # Issue #159: durable platform-side upload cap. Content-Length precheck
+    # when present; a hard ceiling while buffering covers chunked bodies that
+    # carry no Content-Length. Multipart bodies spool through starlette, so
+    # for those the cap is enforced after the form parse (oversize = 413,
+    # nothing persisted to the file store).
+    limit = get_runtime_config().file_max_upload_bytes
+    content_length = request.headers.get("content-length", "")
+    if content_length.isdigit() and int(content_length) > limit:
+        raise HTTPException(413, f"upload exceeds the {limit} byte limit")
     content_type = request.headers.get("content-type", "")
     name = filename
     if content_type.startswith("multipart/form-data"):
@@ -58,11 +67,20 @@ async def upload_file(
             data = str(upload).encode("utf-8")
         logger.info("file upload (multipart): %s (%d bytes)", name, len(data))
     else:
-        data = await request.body()
+        # Streamed read with a hard ceiling — aborts as soon as the cap is
+        # crossed, so a chunked multi-GB body never lands on disk.
+        buf = bytearray()
+        async for chunk in request.stream():
+            buf += chunk
+            if len(buf) > limit:
+                raise HTTPException(413, f"upload exceeds the {limit} byte limit")
+        data = bytes(buf)
         name = name or "attachment.bin"
         logger.info("file upload (raw body): %s (%d bytes)", name, len(data))
     if not data:
         raise HTTPException(400, "empty upload")
+    if len(data) > limit:
+        raise HTTPException(413, f"upload exceeds the {limit} byte limit")
     row = await run_in_threadpool(store.put, name, data)
     return row
 
@@ -90,6 +108,10 @@ async def read_segment(
         segment = await run_in_threadpool(store.read_segment, file_id, offset, max_bytes, cap)
     except KeyError:
         raise HTTPException(404, f"file '{file_id}' not found")
+    except ValueError as e:
+        # Issue #159: offset starts mid-character on a text file — actionable
+        # 400, not a 500.
+        raise HTTPException(400, str(e))
     logger.debug(
         "segment %s offset=%d bytes=%d eof=%s", file_id, offset,
         len(segment["content"]), segment["eof"],

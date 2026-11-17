@@ -108,6 +108,58 @@ class TestFileService:
         )
         assert resp.status_code == 400, resp.text
 
+    def test_upload_over_cap_413(self, client, monkeypatch):
+        # Issue #159: platform-side upload cap. Content-Length precheck (raw),
+        # hard ceiling while streaming (chunked, no Content-Length), and the
+        # post-parse check (multipart spool).
+        from fusion_rag.engine.runtime_config import reset_runtime_config
+
+        monkeypatch.setenv("FUSION_RAG_FILE_MAX_UPLOAD_BYTES", "100")
+        reset_runtime_config()
+        try:
+            # Content-Length present -> precheck.
+            resp = client.post(
+                "/api/files?filename=big.txt",
+                content=b"x" * 200,
+                headers={"Content-Length": "200"},
+            )
+            assert resp.status_code == 413, resp.text
+            # Chunked, no Content-Length -> hard ceiling while streaming.
+            resp = client.post("/api/files?filename=big.txt", content=b"y" * 200)
+            assert resp.status_code == 413, resp.text
+            # Multipart spool -> post-parse check.
+            resp = client.post(
+                "/api/files",
+                files={"file": ("big.bin", b"z" * 200, "application/octet-stream")},
+            )
+            assert resp.status_code == 413, resp.text
+            # Under the cap still fine.
+            resp = client.post("/api/files?filename=ok.txt", content=b"x" * 50)
+            assert resp.status_code == 200, resp.text
+            client.delete(f"/api/files/{resp.json()['file_id']}")
+        finally:
+            reset_runtime_config()
+
+    def test_mid_character_offset_400_not_500(self, client):
+        # Issue #159: offset starting mid-character on a text file — the tail
+        # trim can't fix the head. Must be an actionable 400, never a 500.
+        raw = "融合平台文件服务".encode()
+        file_id = client.post("/api/files?filename=cjk.txt", content=raw).json()["file_id"]
+        resp = client.get(f"/api/files/{file_id}/segments", params={"offset": 1, "max_bytes": 64})
+        assert resp.status_code == 400, resp.text
+        assert "next_offset" in resp.json()["detail"]
+        # Offset on a char boundary still serves text and walks cleanly.
+        seg = client.get(f"/api/files/{file_id}/segments", params={"offset": 0, "max_bytes": 6}).json()
+        assert seg["content"] == "融合"
+        assert seg["next_offset"] == 6
+        # Binary files have no char boundary — any offset is fair game.
+        blob = bytes(range(256))
+        bin_id = client.post("/api/files?filename=b.bin", content=blob).json()["file_id"]
+        seg = client.get(f"/api/files/{bin_id}/segments", params={"offset": 1, "max_bytes": 4}).json()
+        assert seg["offset"] == 1 and not seg["eof"]
+        client.delete(f"/api/files/{file_id}")
+        client.delete(f"/api/files/{bin_id}")
+
     def test_binary_roundtrip_base64(self, client):
         # Acceptance: binary content round-trips correctly (base64 segments).
         blob = bytes(range(256)) * 3
