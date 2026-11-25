@@ -676,6 +676,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.46
+
+- **Structured XLSX query — text-to-SQL over sheet schema (issue #161)** — aggregation questions over spreadsheet ingests ("Q3 East-region sales total") are now answered from COMPUTED rows with citations, not LLM arithmetic over linearized chunks. At ingest, every sheet of an XLSX document additionally lands as a real SQLite table in the per-KB `sheets.db` (columns with inferred INTEGER/REAL/TEXT types, header mapping, full rows capped at 100k with the true `row_count` always reported). `POST /kb/bases/{kb_id}/xlsx/query` sends the schema DDL + question to an LLM planner (short aliases `sheet_N` — never the long generated table names, which small models mangle); the generated SQL passes deterministic guards (single statement, SELECT/WITH only, forbidden-keyword blocklist, prose/fence strip, doubled-quote collapse) and executes on a READ-ONLY SQLite connection with an enforced row cap (truncation observable). Citations resolve the sheets the SQL actually touched; `answer=true` composes the answer from the computed rows (LLM formats, never recomputes); `GET .../xlsx/sheets` is no-LLM schema introspection. Markdown chunks stay untouched — the structured tier is additive; rejected SQL = 400, planner down = 502, callers fall back to `/search`.
+
 ## What's New in v0.8.45
 
 - **File service hardening (issue #159)** — uploads over `FUSION_RAG_FILE_MAX_UPLOAD_BYTES` (new knob, default 100 MB) reject **413**, enforced at three points: Content-Length precheck, hard ceiling while streaming raw/chunked bodies (a chunked multi-GB upload aborts before anything lands on disk), and a post-parse check for multipart spools. Also: a segment `offset` starting **mid-character** on a text file (the tail trim cannot fix the head) now returns an actionable **400** ("continue from the previous segment's next_offset") instead of an uncaught 500; binary files accept any offset.

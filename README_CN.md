@@ -250,6 +250,10 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.46
+
+- **结构化 XLSX 查询 —— 基于 sheet schema 的 text-to-SQL（issue #161）** —— 表格类聚合问题（"Q3 华东区销售额合计"）现在由**计算出的数据行**带引用回答，而非 LLM 对线性化 chunk 做算术。ingest 时，XLSX 文档的每个 sheet 额外落成 per-KB `sheets.db` 里的真实 SQLite 表（推断 INTEGER/REAL/TEXT 列类型、表头映射、全量行，行数上限 100k 且 `row_count` 恒报真实总数）。`POST /kb/bases/{kb_id}/xlsx/query` 把 schema DDL + 问题交给 LLM planner（短别名 `sheet_N`，绝不要求模型转写长随机表名）；生成的 SQL 经确定性守卫（单语句、仅 SELECT/WITH、危险关键字黑名单、前导散文/围栏剥离、双引号坍缩）后在**只读** SQLite 连接上执行并强制行数上限（截断可观测）。引用解析 SQL 实际触碰的 sheet；`answer=true` 由计算行组装答案（LLM 只排版，绝不重算）；`GET .../xlsx/sheets` 为无 LLM 的 schema 内省。Markdown chunk 原样保留 —— 结构化层是增量；SQL 被拒返回 400、planner 不可用返回 502，调用方可回退 `/search`。
+
 ### v0.8.45
 
 - **文件服务加固（issue #159）** —— 超过 `FUSION_RAG_FILE_MAX_UPLOAD_BYTES`（新配置项，默认 100 MB）的上传返回 **413**，三处强制：Content-Length 预检、raw/chunked body 流式硬上限（数 GB 的分块上传在落盘前中止）、multipart 暂存的解析后检查。另外：文本文件的段 `offset` 落在**多字节字符中间**时（尾部裁剪修不了头部）现在返回可操作的 **400**（"从上一段的 next_offset 继续"），而非未捕获的 500；二进制文件任意 offset 均可。
