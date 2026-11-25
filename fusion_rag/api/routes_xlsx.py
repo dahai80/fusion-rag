@@ -55,6 +55,7 @@ async def xlsx_query(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     from ..engine.xlsx_query import (
         DEFAULT_MAX_QUERY_ROWS,
         HARD_MAX_QUERY_ROWS,
+        bind_aliases,
         schema_ddl,
         validate_sql,
     )
@@ -81,10 +82,17 @@ async def xlsx_query(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
         )
 
     planner = _planner(model)
+    # Short aliases: the LLM writes SQL against sheet_N; bind_aliases rewrites
+    # them to the real table names in code — the model never transcribes the
+    # long generated identifiers it would inevitably mangle.
+    for i, s in enumerate(sheets):
+        s["alias"] = f"sheet_{i}"
+    alias_map = {s["alias"]: s["table_name"] for s in sheets}
     ddl = schema_ddl(sheets)
     try:
         raw_sql = await planner.generate_sql(ddl, question)
         sql = validate_sql(raw_sql)
+        bound_sql = bind_aliases(sql, alias_map)
     except ValueError as e:
         # Bad generation — caller falls back to /search (markdown chunks).
         logger.warning("xlsx query SQL rejected for kb %s: %s", kb_id, e)
@@ -94,15 +102,15 @@ async def xlsx_query(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(502, f"LLM unavailable for xlsx query: {e}")
 
     try:
-        result = await run_in_threadpool(index.run_sql, sql, max_rows)
+        result = await run_in_threadpool(index.run_sql, bound_sql, max_rows)
     except Exception as e:
-        logger.warning("xlsx query execution failed for kb %s: %s", kb_id, e)
+        logger.warning("xlsx query execution failed for kb %s: %s (sql=%r, raw=%r)", kb_id, e, bound_sql, raw_sql)
         raise HTTPException(400, f"SQL execution failed: {e}")
 
-    # Citations: every sheet whose table the SQL actually touched; unknown
-    # table names fall back to the full scoped sheet set.
-    used = set(re.findall(r'(?i)\bt_[0-9a-z_]+', sql))
-    cited = [s for s in sheets if s["table_name"] in used] or sheets
+    # Citations: every sheet whose table (alias or real name) the SQL touched;
+    # unknown names fall back to the full scoped sheet set.
+    used = set(re.findall(r"(?i)\b(?:sheet_\d+|t_[0-9a-z_]+)\b", sql))
+    cited = [s for s in sheets if s["alias"] in used or s["table_name"] in used] or sheets
     citations = [
         {
             "doc_id": s["doc_id"],

@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from fusion_rag.api.server import create_app
 from fusion_rag.embed.client import EmbeddingClient
 from fusion_rag.engine.llm_errors import LLMUnavailable
-from fusion_rag.engine.xlsx_query import validate_sql
+from fusion_rag.engine.xlsx_query import bind_aliases, validate_sql
 
 
 def _make_xlsx(path, rows_a, rows_b=None):
@@ -117,6 +117,18 @@ class TestSqlGuards:
         sql = validate_sql("```sql\nSELECT 1\n```")
         assert sql == "SELECT 1"
 
+    def test_bind_aliases_quoted_and_bare(self):
+        m = {"sheet_1": "t_abc_1"}
+        assert bind_aliases('SELECT * FROM "sheet_1"', m) == 'SELECT * FROM "t_abc_1"'
+        assert bind_aliases("SELECT * FROM sheet_1", m) == 'SELECT * FROM "t_abc_1"'
+
+    def test_strips_prose_preamble(self):
+        assert validate_sql("Here is the SQL:\nSELECT 1 FROM t") == "SELECT 1 FROM t"
+
+    def test_collapses_doubled_quotes(self):
+        sql = validate_sql('SELECT "_c1" FROM "sheet_0" WHERE "_c2" = ""华东""')
+        assert sql == 'SELECT "_c1" FROM "sheet_0" WHERE "_c2" = "华东"'
+
     def test_allows_select_and_cte(self):
         assert validate_sql("SELECT SUM(_c3) FROM t_x") == "SELECT SUM(_c3) FROM t_x"
         assert validate_sql("WITH a AS (SELECT 1 AS x) SELECT x FROM a")
@@ -128,7 +140,7 @@ class TestQueryPath:
         import re as _re
 
         m = _re.search(
-            r'-- sheet "' + sheet + r'"[^;]*?CREATE TABLE "(t_[0-9a-z_]+)"', ddl, _re.DOTALL
+            r'-- sheet "' + sheet + r'"[^;]*?CREATE TABLE "(sheet_\d+)"', ddl, _re.DOTALL
         )
         return m.group(1)
 

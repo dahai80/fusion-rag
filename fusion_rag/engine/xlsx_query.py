@@ -321,8 +321,21 @@ def validate_sql(sql: str) -> str:
     fence = re.match(r"^```[a-zA-Z]*\n(.*)\n```$", cleaned, re.DOTALL)
     if fence:
         cleaned = fence.group(1).strip()
+    # Small models prepend prose ("Here is the SQL:") — cut from the first
+    # SELECT/WITH keyword.
+    kw = re.search(r"\b(SELECT|WITH)\b", cleaned, re.IGNORECASE)
+    if not kw:
+        raise ValueError("no SELECT statement found in LLM output")
+    cleaned = cleaned[kw.start() :]
+    # Small models double the quotes around string literals when the schema
+    # uses quoted identifiers ("") — ""华东"" is a syntax error; collapse any
+    # run of 2+ quotes to one. (Legit SQL uses '' for escaping, never "".)
+    cleaned = re.sub(r'"{2,}', '"', cleaned)
     if not cleaned:
         raise ValueError("empty SQL")
+    # Models habitually append a trailing semicolon — strip ONE; an internal
+    # semicolon still means multiple statements and is rejected below.
+    cleaned = cleaned.rstrip().rstrip(";").rstrip()
     if ";" in cleaned:
         raise ValueError("multiple SQL statements are not allowed")
     first = re.match(r"^\s*(\w+)", cleaned)
@@ -335,11 +348,16 @@ def validate_sql(sql: str) -> str:
 
 
 def schema_ddl(sheets: list[dict[str, Any]]) -> str:
-    """Render the sheet schema as CREATE TABLE statements for the planner prompt."""
+    """Render the sheet schema as CREATE TABLE statements for the planner prompt.
+
+    Sheets carry a short `alias` (sheet_0, sheet_1, ...) — the LLM writes SQL
+    against aliases and `bind_aliases` rewrites them to the real table names
+    in code, so the model never has to transcribe long generated identifiers."""
     blocks = []
     for s in sheets:
+        tname = s.get("alias") or s["table_name"]
         lines = [f'-- sheet "{s["sheet_name"]}" from document "{s["doc_name"]}" ({s["row_count"]} rows)']
-        lines.append(f"CREATE TABLE {_quote_ident(s['table_name'])} (")
+        lines.append(f"CREATE TABLE {_quote_ident(tname)} (")
         cols = s["columns"]
         col_lines = [
             f"  {_quote_ident(c['name'])} {c['dtype']}"
@@ -351,6 +369,19 @@ def schema_ddl(sheets: list[dict[str, Any]]) -> str:
         lines.append(");")
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks)
+
+
+def bind_aliases(sql: str, alias_map: dict[str, str]) -> str:
+    """Rewrite planner aliases to the real (quoted) table names. Deterministic.
+
+    The model may write the alias quoted ("sheet_1") or bare (sheet_1) —
+    consume the surrounding quotes first so the replacement never doubles
+    them (""t_..."" is a syntax error)."""
+    for alias in sorted(alias_map, key=len, reverse=True):
+        real = f'"{alias_map[alias]}"'
+        sql = re.sub(rf'"{re.escape(alias)}"', real, sql)
+        sql = re.sub(rf"\b{re.escape(alias)}\b", real, sql)
+    return sql
 
 
 SQL_PROMPT = (
