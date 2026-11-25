@@ -545,6 +545,26 @@ async def _index_document(
             kb.chunk_count += len(chunks)
         _get_kb_manager().update(kb_id, file_count=kb.file_count, chunk_count=kb.chunk_count)
 
+    # Issue #161: XLSX docs additionally index their sheets as structured
+    # SQLite tables (schema + rows) for the text-to-SQL query path. Best-effort
+    # tier — a failure never fails an otherwise-successful ingest.
+    if result.doc_type.value == "xlsx":
+        try:
+            from ..engine.xlsx_query import build_sheets_from_xlsx, get_xlsx_index, table_name
+            from .routes import _get_kb_storage_path
+
+            sheets = await run_in_threadpool(build_sheets_from_xlsx, file_path)
+            for i, s in enumerate(sheets):
+                s["table_name"] = table_name(doc_id, i)
+            await run_in_threadpool(
+                get_xlsx_index(f"{_get_kb_storage_path(kb_id)}/sheets.db").replace_doc,
+                doc_id,
+                result.file_name,
+                sheets,
+            )
+        except Exception as e:
+            logger.warning("index_document: sheet indexing failed for doc %s (non-fatal): %s", doc_id, e)
+
     return {"doc_id": doc_id, "chunks": len(chunks), "chars": result.chars}
 
 
@@ -836,6 +856,16 @@ async def delete_document(kb_id: str, doc_id: str) -> dict[str, Any]:
                 )
             except Exception as se:
                 logger.warning("delete_document: sparse delete failed for doc %s (non-fatal): %s", doc_id, se)
+            # Issue #161: structured sheet tables teardown (best-effort tier).
+            try:
+                from ..engine.xlsx_query import get_xlsx_index
+                from .routes import _get_kb_storage_path
+
+                await run_in_threadpool(
+                    get_xlsx_index(f"{_get_kb_storage_path(kb_id)}/sheets.db").delete_doc, doc_id
+                )
+            except Exception as se:
+                logger.warning("delete_document: sheet tables delete failed for doc %s (non-fatal): %s", doc_id, se)
             await run_in_threadpool(meta_store.delete_chunks_by_doc, doc_id)
             await run_in_threadpool(meta_store.delete_document, doc_id)
         except Exception as e:
@@ -926,6 +956,17 @@ async def replace_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dic
         )
     except Exception as e:
         logger.warning("replace_document: sparse teardown failed for doc %s (non-fatal): %s", doc_id, e)
+    # Issue #161: drop the old sheet tables up front (best-effort; re-indexed
+    # below when the replacement is itself an XLSX).
+    try:
+        from ..engine.xlsx_query import get_xlsx_index
+        from .routes import _get_kb_storage_path
+
+        await run_in_threadpool(
+            get_xlsx_index(f"{_get_kb_storage_path(kb_id)}/sheets.db").delete_doc, doc_id
+        )
+    except Exception as e:
+        logger.warning("replace_document: sheet teardown failed for doc %s (non-fatal): %s", doc_id, e)
     await run_in_threadpool(meta_store.delete_chunks_by_doc, doc_id)
     await run_in_threadpool(meta_store.delete_document, doc_id)
 
@@ -959,6 +1000,25 @@ async def replace_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dic
     async with _kb_lock(kb_id):
         kb.chunk_count = max(0, kb.chunk_count - old_chunk_count + len(chunks))
         _get_kb_manager().update(kb_id, file_count=kb.file_count, chunk_count=kb.chunk_count)
+
+    # Issue #161: refresh structured sheet tables on replace (best-effort tier;
+    # replace_doc drops the old tables for this doc_id before writing).
+    if result.doc_type.value == "xlsx":
+        try:
+            from ..engine.xlsx_query import build_sheets_from_xlsx, get_xlsx_index, table_name
+            from .routes import _get_kb_storage_path
+
+            sheets = await run_in_threadpool(build_sheets_from_xlsx, result.file_path)
+            for i, s in enumerate(sheets):
+                s["table_name"] = table_name(doc_id, i)
+            await run_in_threadpool(
+                get_xlsx_index(f"{_get_kb_storage_path(kb_id)}/sheets.db").replace_doc,
+                doc_id,
+                result.file_name,
+                sheets,
+            )
+        except Exception as e:
+            logger.warning("replace_document: sheet indexing failed for doc %s (non-fatal): %s", doc_id, e)
 
     logger.info("replaced doc %s in kb %s: %d -> %d chunks", doc_id, kb_id, old_chunk_count, len(chunks))
     return {

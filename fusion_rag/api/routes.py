@@ -434,6 +434,7 @@ from .routes_kb import router as _kb_router
 from .routes_project import router as _project_router
 from .routes_search import router as _search_router
 from .routes_store import router as _store_router
+from .routes_xlsx import router as _xlsx_router
 
 router.include_router(_kb_router)
 router.include_router(_docs_router)
@@ -442,3 +443,4 @@ router.include_router(_admin_router)
 router.include_router(_project_router)
 router.include_router(_store_router)
 router.include_router(_graph_router)
+router.include_router(_xlsx_router)
