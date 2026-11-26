@@ -676,6 +676,10 @@ ruff check fusion_rag/
 
 ---
 
+## What's New in v0.8.48
+
+- **English-only source cleanup + console-script entry point (issue #165)** — all Chinese comments, docstring fragments, and leftover generator-instruction artifacts across 25 source files under `fusion_rag/` translated to natural English (English-only source constraint). Functional Chinese stays: query-router keyword lists, CJK regex char classes, BM25 benchmark corpus strings, and user-facing product strings (`label_zh` stage labels, the `[已作废版本]` citation prefix, BNUP corpus text). Also fixes the audit's P2: `fusion-rag` is now a registered console script (`fusion_rag.api.server:main`) — same boot path as `python -m fusion_rag.api.server` (env resolution + startup probes + serve), so `pip install` gives you a runnable command.
+
 ## What's New in v0.8.47
 
 - **Retrieval-pipeline zone in the console chat tab (issue #163)** — implements the 检索管线 zone from approved prototype 04-knowledge-qa: the Knowledge QA tab now shows the stage-by-stage pipeline (`query rewrite (HyDE/expand) → vector+BM25+sparse → RRF → cross-encoder rerank → ACL/status filter + over-fetch → answer generation`) with live per-KB counters (docs / chunks / queries) and per-stage calls + avg latency where instrumented. Backed by new `GET /kb/bases/{kb_id}/pipeline`, which assembles everything read-only from the RED metrics registry; stages without instrumentation return `null` stats, never invented numbers. Also fixes a latent RED-metrics bug the endpoint exposed: the middleware extracted route labels before routing ran, so counters were keyed by raw path with an empty `kb_id` instead of the low-cardinality route template — labels are now re-extracted after `call_next`.

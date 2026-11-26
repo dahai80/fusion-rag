@@ -250,6 +250,10 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.48
+
+- **源码纯英文化 + console-script 入口（issue #165）** —— `fusion_rag/` 下 25 个源文件中的中文注释、docstring 片段与遗留生成器指令全部译为自然英文（源码仅英文硬约束）。功能性中文保留：query-router 关键词表、CJK 正则字符类、BM25 基准语料字符串，以及用户可见产品文案（`label_zh` 阶段标签、`[已作废版本]` 引用前缀、BNUP 语料文本）。同时修复审计 P2：`fusion-rag` 现为注册的 console script（`fusion_rag.api.server:main`）—— 与 `python -m fusion_rag.api.server` 完全同一启动路径（env 解析 + 启动探针 + serve），`pip install` 后即是可运行命令。
+
 ### v0.8.47
 
 - **控制台问答页新增检索管线区（issue #163）** —— 按已定稿原型 04-knowledge-qa 落地"检索管线"区：问答页在回答卡片下方展示分阶段管线（`查询改写 (HyDE/扩展) → 向量+BM25+稀疏三路 → RRF → cross-encoder 重排 → 权限/状态过滤过采样 → 答案生成`），带 per-KB 实时计数（文档 / 分块 / 查询）与已埋点阶段的调用次数 + 平均延迟。后端新增只读接口 `GET /kb/bases/{kb_id}/pipeline`，全部数据取自 RED 指标注册表；未埋点阶段返回 `null`，绝不编造数字。同 PR 修复该接口暴露出的 RED 指标潜伏 bug：中间件在路由发生前提取标签，计数器一直按原始路径 + 空 kb_id 记账而非低基数路由模板 —— 现改为 `call_next` 之后重新提取。
