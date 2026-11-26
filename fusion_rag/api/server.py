@@ -425,7 +425,10 @@ def _run_startup_probe(mlx_url: str, embed_model: str, mlx_api_key: str) -> None
     logger.info("startup probe: fusion-mlx embedding backend reachable at %s", mlx_url)
 
 
-if __name__ == "__main__":
+def main() -> None:
+    # Issue #165 (P2): registered as the `fusion-rag` console script in
+    # pyproject.toml — the module entry (`python -m fusion_rag.api.server`)
+    # and start.sh keep working unchanged; this is the same boot path.
     from fusion_core.config import client_key, resolve_api_key, service_port
 
     host = os.environ.get("FUSION_RAG_HOST", "127.0.0.1")
@@ -498,3 +501,7 @@ if __name__ == "__main__":
         mlx_api_key=mlx_api_key,
         log_level=log_level,
     )
+
+
+if __name__ == "__main__":
+    main()
