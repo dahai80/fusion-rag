@@ -281,7 +281,11 @@ async def metrics_middleware(request: Any, call_next: Any) -> Any:
     import time
 
     start = time.perf_counter()
-    endpoint, kb_id = _extract_labels(request)
+    # Pre-routing the scope has no "route"/"path_params" yet — labels extracted
+    # here would be the raw path + empty kb_id. Use the raw path only for the
+    # in-flight gauge; re-extract AFTER call_next once routing has populated
+    # the scope so counters carry the low-cardinality route template.
+    endpoint, _ = _extract_labels(request)
     skipped = request.url.path in _SKIP_PATHS
     if not skipped:
         inflight_enter(endpoint)
@@ -290,11 +294,13 @@ async def metrics_middleware(request: Any, call_next: Any) -> Any:
     except Exception:
         latency_ms = (time.perf_counter() - start) * 1000
         if not skipped:
-            record_request(endpoint, kb_id, 500, latency_ms)
+            ep, kb = _extract_labels(request)
+            record_request(ep, kb, 500, latency_ms)
             inflight_exit(endpoint)
         raise
     latency_ms = (time.perf_counter() - start) * 1000
     if not skipped:
-        record_request(endpoint, kb_id, response.status_code, latency_ms)
+        ep, kb = _extract_labels(request)
+        record_request(ep, kb, response.status_code, latency_ms)
         inflight_exit(endpoint)
     return response
