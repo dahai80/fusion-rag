@@ -66,7 +66,7 @@ fusion_rag/
 │   ├── routes.py          # /kb router: shared helpers, /status, /stats, sub-router mount hub
 │   ├── routes_kb.py       # KB CRUD endpoints (/kb/bases/*)
 │   ├── routes_docs.py     # Document ingest/list/delete/replace/patch status/scan/watch endpoints
-│   ├── routes_search.py   # /search + /ask + /similar endpoints (hybrid, rerank, templates, rewrite, status_filter)
+│   ├── routes_search.py   # /search + /ask + /similar + /pipeline endpoints (hybrid, rerank, templates, rewrite, status_filter; /pipeline = #163 live retrieval-pipeline stats from the RED metrics registry, uninstrumented stages return null)
 │   ├── routes_admin.py    # Versions, templates, permissions, audit, sync, bench endpoints
 │   ├── routes_project.py  # Project-KB mapping endpoints (/kb/projects/*)
 │   ├── routes_auth.py     # Auth token/login endpoints
