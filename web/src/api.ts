@@ -187,6 +187,28 @@ export const askKb = (kbId: string, question: string) =>
         body: JSON.stringify({ question, top_k: 5 }),
     });
 
+// ── Issue #163: 检索管线 (retrieval pipeline) live stats ──
+
+export interface PipelineStage {
+    id: string;
+    label_zh: string;
+    label_en: string;
+    calls: number | null;
+    avg_ms: number | null;
+}
+
+export interface PipelineStats {
+    kb_id: string;
+    docs: number;
+    chunks: number;
+    queries: number;
+    ask_latency: number | null;
+    stages: PipelineStage[];
+}
+
+export const fetchPipeline = (kbId: string) =>
+    api<PipelineStats>(`/kb/bases/${kbId}/pipeline`);
+
 // ── Issue #113: previously API-only surfaces ──
 
 export interface GraphStats {

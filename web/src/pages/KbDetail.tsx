@@ -17,6 +17,7 @@ import { sdk } from "../sdk";
 import { t } from "../i18n";
 import { ChatPanel } from "./ChatPanel";
 import { GraphPanel } from "./GraphPanel";
+import { PipelinePanel } from "./PipelinePanel";
 import { TemplatesPanel } from "./TemplatesPanel";
 import { VersionsPanel } from "./VersionsPanel";
 
@@ -119,7 +120,12 @@ export function KbDetail({
                             <SearchPanel kbId={kb.id} />
                         </>
                     )}
-                    {tab === "chat" && <ChatPanel kbId={kb.id} />}
+                    {tab === "chat" && (
+                        <>
+                            <ChatPanel kbId={kb.id} />
+                            <PipelinePanel kbId={kb.id} />
+                        </>
+                    )}
                     {tab === "graph" && <GraphPanel kbId={kb.id} />}
                     {tab === "versions" && <VersionsPanel kbId={kb.id} />}
                     {tab === "templates" && <TemplatesPanel kbId={kb.id} />}

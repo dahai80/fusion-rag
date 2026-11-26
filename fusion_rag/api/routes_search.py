@@ -741,3 +741,71 @@ async def get_citation_trace(
     if trace is None:
         raise HTTPException(404, f"trace {query_id} not found in kb {kb_id}")
     return trace
+
+
+@router.get("/bases/{kb_id}/pipeline")
+async def kb_pipeline(
+    kb_id: str,
+    subject: str | None = Depends(require_kb_action("read")),
+) -> dict[str, Any]:
+    """Issue #163: retrieval-pipeline live stats for the console 检索管线 zone.
+
+    One read-only call assembles what the prototype's stage view needs:
+    docs/chunks from the KB summary, per-kb query counts + retrieve latency
+    from the RED metrics registry, and per-LLM-stage latency (rerank /
+    generate / contextualize). Stages without instrumentation (HyDE rewrite,
+    RRF fusion, permission filter) are returned as structural rows so the UI
+    renders the full prototype pipeline; their stats are null, not invented."""
+    from ..engine.metrics import get_metrics
+    from .routes import _get_base
+
+    kb = _get_base(kb_id)
+    snap = get_metrics().snapshot()
+
+    pipe_endpoints = (
+        "/bases/{kb_id}/search",
+        "/bases/{kb_id}/ask",
+        "/bases/{kb_id}/similar",
+    )
+    queries = sum(
+        v
+        for key, v in snap["requests"].items()
+        if key.split("|")[0] in pipe_endpoints and key.split("|")[1] == kb_id and key.endswith("|2xx")
+    )
+    search_lat = snap["latency"].get(f"/bases/{{kb_id}}/search|{kb_id}")
+    ask_lat = snap["latency"].get(f"/bases/{{kb_id}}/ask|{kb_id}")
+
+    def _stage(stage_id: str, label_zh: str, label_en: str, calls: int | None, avg_ms: float | None) -> dict[str, Any]:
+        return {"id": stage_id, "label_zh": label_zh, "label_en": label_en, "calls": calls, "avg_ms": avg_ms}
+
+    def _llm_stage(stage_id: str, label_zh: str, label_en: str) -> dict[str, Any]:
+        b = snap["llm_latency"].get(stage_id)
+        if not b or not b["count"]:
+            return _stage(stage_id, label_zh, label_en, None, None)
+        return _stage(stage_id, label_zh, label_en, b["count"], round(b["sum"] / b["count"], 1))
+
+    def _ep_stage(stage_id: str, label_zh: str, label_en: str, lat: dict | None) -> dict[str, Any]:
+        if not lat or not lat["count"]:
+            return _stage(stage_id, label_zh, label_en, None, None)
+        return _stage(stage_id, label_zh, label_en, lat["count"], round(lat["sum"] / lat["count"], 1))
+
+    stages = [
+        # HyDE rewrite is inside /ask (QueryRewriter) — its per-stage cost is
+        # not separately instrumented, so it renders as an unlabeled stage.
+        _stage("rewrite", "查询改写 (HyDE/扩展)", "Query rewrite (HyDE/expand)", None, None),
+        _ep_stage("retrieve", "向量+BM25+稀疏三路 → RRF", "Vector+BM25+sparse → RRF", search_lat),
+        _llm_stage("rerank", "cross-encoder 重排", "Cross-encoder rerank"),
+        _stage("filter", "权限/状态过滤过采样", "ACL/status filter + over-fetch", None, None),
+        _llm_stage("generate", "答案生成", "Answer generation"),
+        _llm_stage("contextualize", "入库上下文化", "Ingest contextualization"),
+    ]
+    return {
+        "kb_id": kb_id,
+        "docs": kb.file_count,
+        "chunks": kb.chunk_count,
+        "queries": queries,
+        "ask_latency": (
+            round(ask_lat["sum"] / ask_lat["count"], 1) if ask_lat and ask_lat["count"] else None
+        ),
+        "stages": stages,
+    }
