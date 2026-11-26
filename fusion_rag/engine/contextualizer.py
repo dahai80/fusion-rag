@@ -3,7 +3,7 @@
 callers: KnowledgeBase intake flow, routes.py upload_document/scan_directory
 API: Contextualizer.contextualize(chunks, doc_text) -> list[dict]
 schema: chunks gain "context" field (str), embedded as context+text
-user instruction: "按照你的方案和计划落地所有phase阶段的需求"
+user instruction: "implement all phase requirements according to your plan"
 """
 
 from __future__ import annotations

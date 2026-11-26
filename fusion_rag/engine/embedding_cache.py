@@ -3,7 +3,7 @@
 callers: EmbeddingClient.embed/embed_batch via integration
 API: EmbeddingCache.get(text) -> list[float] | None, .set(text, vector), .clear()
 schema: cache table (text_hash TEXT PK, text TEXT, vector BLOB, model TEXT, created_at REAL)
-user instruction: "按照你的方案和计划落地所有phase阶段的需求"
+user instruction: "implement all phase requirements according to your plan"
 """
 
 from __future__ import annotations

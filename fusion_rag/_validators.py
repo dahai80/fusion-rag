@@ -1,6 +1,6 @@
 """Input validation helpers — single trust-boundary layer.
 
-Centralizes all external-input confinement (硬伤3):
+Centralizes all external-input confinement (defect-3):
   - kb_id / table_name / identifier -> regex whitelist
   - filesystem path -> configured root + is_relative_to + symlink reject
   - URL -> scheme whitelist + private-network reject (SSRF guard)

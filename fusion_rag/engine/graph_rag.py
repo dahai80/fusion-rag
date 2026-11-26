@@ -3,7 +3,7 @@
 callers: routes.py ask endpoint, KnowledgeBase advanced search
 API: GraphRAG.extract_entities(text), .build_graph(chunks), .search(query, graph)
 schema: entities table (id, name, type), relations table (source, target, label)
-user instruction: "按照你的方案和计划落地所有phase阶段的需求"
+user instruction: "implement all phase requirements according to your plan"
 """
 
 from __future__ import annotations

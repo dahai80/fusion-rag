@@ -34,6 +34,7 @@ def _bnup_kb(kb_id: str = DEFAULT_KB_ID):
     except KeyError:
         kb = mgr.create(
             name="BNUP Math Corpus",
+            # i18n: user-facing
             description="北师大版小学数学教材语料 (issue #74)",
             chunk_strategy="semantic",
             kb_id=kb_id,

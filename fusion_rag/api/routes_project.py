@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["project"])
 
-# 硬伤1: read kb_manager + project_kb_map from app.state via contextvar.
+# defect-1: read kb_manager + project_kb_map from app.state via contextvar.
 _get_kb_manager = get_kb_manager
 
 

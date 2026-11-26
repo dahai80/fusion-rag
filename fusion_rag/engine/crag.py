@@ -8,7 +8,7 @@ insufficient, rewrite the question (QueryRewriter) and re-retrieve; merge
 round results (dedupe by chunk id, first-seen order wins). Bounded by
 max_rounds; every grader/rewrite failure degrades to the current result
 (enhancement never breaks retrieval).
-user instruction: "按照你的方案和计划落地所有phase阶段的需求"
+user instruction: "implement all phase requirements according to your plan"
 """
 
 from __future__ import annotations

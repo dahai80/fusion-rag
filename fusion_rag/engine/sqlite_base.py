@@ -1,4 +1,4 @@
-"""硬伤6 unified SQLite concurrency base.
+"""Defect-6 unified SQLite concurrency base.
 
 Before this, half the modules opened WAL + a fresh connection per call, the
 other half kept one shared connection with no WAL and no

@@ -3,7 +3,7 @@
 callers: routes.py search/ask endpoints, HybridSearch pipeline
 API: QueryRewriter.rewrite(query, history=None, mode="hyde") -> str | list[str]
 schema: input query str, output rewritten query or list of expanded queries
-user instruction: "按照你的方案和计划落地所有phase阶段的需求"
+user instruction: "implement all phase requirements according to your plan"
 """
 
 from __future__ import annotations

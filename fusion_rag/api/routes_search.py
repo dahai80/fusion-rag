@@ -162,7 +162,7 @@ async def _audit_and_trajectory_async(
     latency_ms: float,
     metadata: dict | None = None,
 ) -> None:
-    # P8/硬伤8: audit/trajectory do sync sqlite writes; running them inline in
+    # P8/defect-8: audit/trajectory do sync sqlite writes; running them inline in
     # the async handler blocks the event loop for the write duration. Push the
     # fire-and-forget logging off the loop thread.
     await run_in_threadpool(_audit_and_trajectory, kb_id, query, caller, results, latency_ms, metadata)
@@ -219,7 +219,7 @@ async def search(
         from .app_state import get_template_manager
         from .routes import _get_kb_storage_path
 
-        # P8/硬伤8: SearchTemplateManager opens + queries sqlite synchronously.
+        # P8/defect-8: SearchTemplateManager opens + queries sqlite synchronously.
         tpl_mgr = get_template_manager(f"{_get_kb_storage_path(kb_id)}/templates.db")
         tpl = await run_in_threadpool(tpl_mgr.get_template, kb_id, template)
         if tpl:
@@ -309,7 +309,7 @@ async def search(
                             query_sparse=sub_sparse,
                             sparse_lookup=sub_lookup,
                         )
-                    # P8/硬伤8: vec_store.search is sync LanceDB+BM25; push off-loop.
+                    # P8/defect-8: vec_store.search is sync LanceDB+BM25; push off-loop.
                     sub = await run_in_threadpool(vec_store.search, qv, top_k=fetch_k, threshold=threshold)
                     return await run_in_threadpool(_apply_search_filters, sub, folder_prefix, metadata_filter)
 
@@ -388,7 +388,7 @@ async def search(
         fetch_k = pool_k
         if folder_prefix or metadata_filter or doc_type_filter:
             fetch_k = max(fetch_k, top_k * fetch_mult)
-        # P8/硬伤8: sync LanceDB search + per-row json.loads filter block the
+        # P8/defect-8: sync LanceDB search + per-row json.loads filter block the
         # event loop if run inline in an async handler.
         results = await run_in_threadpool(vec_store.search, query_vector, top_k=fetch_k, threshold=threshold)
         results = await run_in_threadpool(_apply_search_filters, results, folder_prefix, metadata_filter)
@@ -542,7 +542,7 @@ async def ask(
             fetch_k = pool_k
             if folder_prefix or metadata_filter:
                 fetch_k = max(fetch_k, top_k * fetch_mult)
-            # P8/硬伤8: sync LanceDB search + filter block the event loop.
+            # P8/defect-8: sync LanceDB search + filter block the event loop.
             found = await run_in_threadpool(
                 vec_store.search, qv, top_k=fetch_k, threshold=kb.config.similarity_threshold
             )
@@ -590,6 +590,7 @@ async def ask(
     # Issue #86: deprecated chunks are still usable when explicitly requested
     # (status_filter=deprecated/all) but the model must know they are stale —
     # mark them in the context label so it does not cite them as current truth.
+    # i18n: user-facing
     context = "\n\n".join(
         f"[{'[已作废版本] ' if c.get('status') == 'deprecated' else ''}{c['doc_name']}] {c['text'][:2000]}"
         for c in chunks
@@ -748,7 +749,7 @@ async def kb_pipeline(
     kb_id: str,
     subject: str | None = Depends(require_kb_action("read")),
 ) -> dict[str, Any]:
-    """Issue #163: retrieval-pipeline live stats for the console 检索管线 zone.
+    """Issue #163: retrieval-pipeline live stats for the console retrieval-pipeline zone.
 
     One read-only call assembles what the prototype's stage view needs:
     docs/chunks from the KB summary, per-kb query counts + retrieve latency
@@ -792,6 +793,7 @@ async def kb_pipeline(
     stages = [
         # HyDE rewrite is inside /ask (QueryRewriter) — its per-stage cost is
         # not separately instrumented, so it renders as an unlabeled stage.
+        # i18n: user-facing (label_zh below is displayed in the console UI)
         _stage("rewrite", "查询改写 (HyDE/扩展)", "Query rewrite (HyDE/expand)", None, None),
         _ep_stage("retrieve", "向量+BM25+稀疏三路 → RRF", "Vector+BM25+sparse → RRF", search_lat),
         _llm_stage("rerank", "cross-encoder 重排", "Cross-encoder rerank"),

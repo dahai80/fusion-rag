@@ -3,7 +3,7 @@
 callers: routes.py via FastAPI dependency injection
 API: verify_api_key() dependency, AuthBackend ABC, AuthConfig for key management
 schema: api_keys table (key_hash TEXT PK, name TEXT, created_at REAL)
-user instruction: "修复所有的issue和pr"
+user instruction: "fix all issues and PRs"
 """
 
 from __future__ import annotations
