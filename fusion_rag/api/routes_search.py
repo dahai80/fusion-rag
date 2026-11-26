@@ -795,8 +795,11 @@ async def kb_pipeline(
         # not separately instrumented, so it renders as an unlabeled stage.
         # i18n: user-facing (label_zh below is displayed in the console UI)
         _stage("rewrite", "查询改写 (HyDE/扩展)", "Query rewrite (HyDE/expand)", None, None),
+        # i18n: user-facing (label_zh below is displayed in the console UI)
         _ep_stage("retrieve", "向量+BM25+稀疏三路 → RRF", "Vector+BM25+sparse → RRF", search_lat),
+        # i18n: user-facing (label_zh below is displayed in the console UI)
         _llm_stage("rerank", "cross-encoder 重排", "Cross-encoder rerank"),
+        # i18n: user-facing (label_zh below is displayed in the console UI)
         _stage("filter", "权限/状态过滤过采样", "ACL/status filter + over-fetch", None, None),
         _llm_stage("generate", "答案生成", "Answer generation"),
         _llm_stage("contextualize", "入库上下文化", "Ingest contextualization"),
