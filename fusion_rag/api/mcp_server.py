@@ -3,7 +3,7 @@
 callers: External MCP clients (Claude Desktop, Cursor, etc.)
 API: MCP tool definitions for kb_list, kb_search, kb_ask, kb_create
 schema: JSON-RPC 2.0 protocol, tools following MCP specification
-user instruction: "按照你的方案和计划落地所有phase阶段的需求"
+user instruction: "implement all phase requirements according to your plan"
 """
 
 from __future__ import annotations
@@ -325,7 +325,7 @@ async def _dispatch_tool(name: str, args: dict) -> Any:
         query = _require("query")
         kb = _get_base(kb_id)
         embed = _get_embed_client()
-        # 硬伤A: reuse pooled backend handle; prior raw VectorStore(kb.vector_path)
+        # defect-A: reuse pooled backend handle; prior raw VectorStore(kb.vector_path)
         # opened a new handle per call (default backend, no env-var) and leaked.
         vec_store = _get_vector_store(kb_id)
         query_vector = await embed.embed(query)

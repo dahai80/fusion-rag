@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["kb-crud"])
 
-# 硬伤1: read kb_manager from app.state via contextvar, not a module global.
+# defect-1: read kb_manager from app.state via contextvar, not a module global.
 _get_kb_manager = get_kb_manager
 
 

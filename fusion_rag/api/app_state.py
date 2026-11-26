@@ -1,4 +1,4 @@
-"""硬伤1 per-app state on app.state, read via contextvar.
+"""Defect-1 per-app state on app.state, read via contextvar.
 
 Before this, 6 route files held module-level globals (_kb_manager /
 _embed_client / _tasks / _watches / _kb_locks / _project_kb_map) that a
@@ -138,7 +138,7 @@ def init_app_state(app: Any, kb_manager: KnowledgeBaseManager, embed_client: Emb
     # asyncio.Lock itself is created under it so exactly one wins.
     app.state.kb_locks_lock = threading.Lock()
     app.state.project_kb_map: dict[str, str] = {}
-    # 硬伤A/P0-3/P2-1: per-app VectorStore singleton pool. One backend handle
+    # defect-A/P0-3/P2-1: per-app VectorStore singleton pool. One backend handle
     # per vector_path, reused across requests — kills the per-request
     # construction that (a) leaked LanceDB/FusionStore handles (never closed),
     # (b) reopened the fusion_store env each call → RuntimeError EnvAlreadyOpened
@@ -290,7 +290,7 @@ def get_vec_store_pool_lock() -> threading.Lock:
 
 
 def get_or_create_vec_store(vector_path: str, backend_type: str) -> Any:
-    """硬伤A: return the cached VectorStore for vector_path, build on first use.
+    """Defect-A: return the cached VectorStore for vector_path, build on first use.
 
     One backend handle per KB vector dir, shared across every request that hits
     that KB. Reuses the LanceDB table / fusion_store env / in-process BM25Index

@@ -57,7 +57,7 @@ class EmbeddingClient:
 
     # callers: routes.py search/ask/upload endpoints
     # API: embed/embed_batch with cache, schema: cache stores text_hash->vector
-    # user instruction: "按照你的方案和计划落地所有phase阶段的需求"
+    # user instruction: "implement all phase requirements according to your plan"
     def __init__(
         self,
         base_url: str = "http://127.0.0.1:11432/v1",

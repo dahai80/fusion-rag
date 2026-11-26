@@ -4,7 +4,7 @@ callers: routes.py eval endpoint, CLI evaluation commands
 API: RAGEvaluator.evaluate(kb_id, test_cases) -> EvaluationResult
 schema: test_cases list[dict(query, expected_answer, expected_docs)],
         results with faithfulness/relevance/context_recall scores
-user instruction: "按照你的方案和计划落地所有phase阶段的需求"
+user instruction: "implement all phase requirements according to your plan"
 """
 
 from __future__ import annotations

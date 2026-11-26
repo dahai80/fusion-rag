@@ -27,7 +27,7 @@ _DEFAULT_SYSTEM_PROMPT = (
 )
 
 
-# 硬伤1: per-app state lives on app.state (populated by init_app_state in the
+# defect-1: per-app state lives on app.state (populated by init_app_state in the
 # lifespan) and is read per-request via a contextvar. These no-arg accessors
 # delegate to app_state so existing callers (_get_base, _do_rerank,
 # _generate_answer, and the `from .routes import _get_embed_client` in
@@ -58,7 +58,7 @@ def _get_base(kb_id: str):
 def _get_vector_store(kb_id: str) -> VectorStore:
     kb = _get_base(kb_id)
     backend_type = os.environ.get("FUSION_RAG_STORE_BACKEND", "local")
-    # 硬伤A: reuse one pooled backend handle per KB (see app_state
+    # defect-A: reuse one pooled backend handle per KB (see app_state
     # get_or_create_vec_store). The prior per-request VectorStore leaked
     # handles and reopened the fusion_store env each call (EnvAlreadyOpened).
     from .app_state import get_or_create_vec_store
@@ -399,7 +399,7 @@ async def _generate_answer(
 
 @router.get("/status")
 async def status() -> dict[str, Any]:
-    # 硬伤1: read via contextvar accessors. /status is a readiness probe, so
+    # defect-1: read via contextvar accessors. /status is a readiness probe, so
     # if the app state isn't bound yet (startup race / direct call) degrade
     # gracefully to "not ready" rather than 503-ing the probe.
     try:

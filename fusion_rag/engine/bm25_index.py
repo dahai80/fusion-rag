@@ -3,7 +3,7 @@
 callers: VectorStore.keyword_search(), HybridSearch.search(), KnowledgeBase intake flow
 API: BM25Index.add_documents(), search(), remove_document(), save(), load(), count()
 schema: internal _inverted {token: {doc_id: tf}}, _doc_texts {doc_id: text}, persisted to SQLite
-user instruction: "按照你的方案和计划落地所有phase阶段的需求"
+user instruction: "implement all phase requirements according to your plan"
 """
 
 from __future__ import annotations
@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 
 # callers: VectorStore (vector_store.py:115-117), HybridSearch
 # API: BM25Index — public class unchanged, only _tokenize() enhanced
-# data: tech_dict.txt — jieba user dict format: "词语 词频 词性"
-# user instruction: "完成所有待办任务"
+# data: tech_dict.txt — jieba user dict format: "word freq pos"
+# user instruction: "complete all pending tasks"
 _JIEBA_AVAILABLE = False
 _JIEBA_DICT_LOADED = False
 try:

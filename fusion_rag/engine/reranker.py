@@ -3,7 +3,7 @@
 callers: routes.py search/ask endpoints, KnowledgeBase pipeline
 API: Reranker.rerank(query, documents, top_k), HybridSearch.search(query_vector, query_text, ...)
 schema: documents list[dict] with id/text/score keys, HybridSearch supports alpha and rrf fusion methods
-user instruction: "按照你的方案和计划落地所有phase阶段的需求"
+user instruction: "implement all phase requirements according to your plan"
 """
 
 from __future__ import annotations

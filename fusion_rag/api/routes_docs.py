@@ -40,7 +40,7 @@ router = APIRouter(tags=["documents"])
 # _doc_parser is stateless and safe to share across requests.
 _doc_parser = DocumentParser()
 
-# 硬伤1: per-app state (_kb_manager / _embed_client / _tasks / _watches /
+# defect-1: per-app state (_kb_manager / _embed_client / _tasks / _watches /
 # _kb_locks) now lives on app.state, read per-request via a contextvar. The
 # mutable dicts (tasks/watches/locks) are per-app so a reload rebuilds them
 # fresh instead of carrying stale module globals across app instances.
@@ -113,7 +113,7 @@ def _check_ingest_root(file_path: str) -> None:
 def _get_vector_store(kb_id: str) -> VectorStore:
     kb = _get_base(kb_id)
     backend_type = os.environ.get("FUSION_RAG_STORE_BACKEND", "local")
-    # 硬伤A: reuse one pooled backend handle per KB (see app_state
+    # defect-A: reuse one pooled backend handle per KB (see app_state
     # get_or_create_vec_store). Prior per-request construction leaked handles.
     from .app_state import get_or_create_vec_store
 
@@ -178,7 +178,7 @@ async def _write_doc_to_stores(
     sparse_weights: list[dict[str, float] | None] | None = None,
     kb_id: str = "",
 ) -> tuple[bool, str | None, bool]:
-    """P4-1 + 硬伤B: the ONE place that writes a doc's chunks to all stores.
+    """P4-1 + defect-B: the ONE place that writes a doc's chunks to all stores.
 
     R1: every sync store call (add_batch / delete_by_doc / add_document /
     add_chunk / delete_chunks_by_doc / delete_document) runs in a threadpool so
@@ -236,7 +236,7 @@ async def _write_doc_to_stores(
             }
         )
 
-    # 硬伤B: write the hard-undo side (vectors + bm25) FIRST.
+    # defect-B: write the hard-undo side (vectors + bm25) FIRST.
     rollback_failed = False
     try:
         # P0-1: add_batch writes vectors AND bm25 in one call (both backends
@@ -267,7 +267,7 @@ async def _write_doc_to_stores(
     # are already durable, so roll them back too and return a clean failure
     # (the caller decides whether to retry). A crash BETWEEN add_batch and
     # here leaves orphan vectors — recoverable by re-ingest over doc_path, the
-    # strictly better of the two orphan kinds per 硬伤B.
+    # strictly better of the two orphan kinds per defect-B.
     try:
         await run_in_threadpool(
             meta_store.add_document, doc_id, doc_path, doc_name, doc_type, file_size, metadata=metadata
@@ -506,7 +506,7 @@ async def _index_document(
             logger.warning("index_document: sparse teardown failed for doc %s (non-fatal): %s", doc_id, e)
         await run_in_threadpool(meta_store.delete_chunks_by_doc, doc_id)
         await run_in_threadpool(meta_store.delete_document, doc_id)
-    # P4-1 + 硬伤B: single write path. vectors-first ordering (hard-undo side
+    # P4-1 + defect-B: single write path. vectors-first ordering (hard-undo side
     # before cheap metadata) with unified rollback lives in _write_doc_to_stores.
     ok, err, rollback_failed = await _write_doc_to_stores(
         vec_store=vec_store,
@@ -770,7 +770,7 @@ async def ingest_content(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
     meta_store = _get_meta_store(kb_id)
 
     doc_id = uuid.uuid4().hex[:16]
-    # P4-1 + 硬伤B: single write path, vectors-first. chunk_metadata=metadata
+    # P4-1 + defect-B: single write path, vectors-first. chunk_metadata=metadata
     # so the inline content's user metadata lands on each chunk row too.
     ok, err, rollback_failed = await _write_doc_to_stores(
         vec_store=vec_store,
@@ -970,7 +970,7 @@ async def replace_document(kb_id: str, doc_id: str, data: dict[str, Any]) -> dic
     await run_in_threadpool(meta_store.delete_chunks_by_doc, doc_id)
     await run_in_threadpool(meta_store.delete_document, doc_id)
 
-    # P4-1 + 硬伤B: single write path, vectors-first. doc_id reused for replace.
+    # P4-1 + defect-B: single write path, vectors-first. doc_id reused for replace.
     ok, err, rollback_failed = await _write_doc_to_stores(
         vec_store=vec_store,
         meta_store=meta_store,
@@ -1195,7 +1195,7 @@ async def scan_directory(kb_id: str, data: dict[str, Any]) -> dict[str, Any]:
         vectors, sparse_weights = await embed.embed_batch_sparse(embed_texts)
 
         doc_id = uuid.uuid4().hex[:16]
-        # P4-1 + 硬伤B: single write path, vectors-first, unified rollback.
+        # P4-1 + defect-B: single write path, vectors-first, unified rollback.
         # On failure this file is rolled back clean; continue scanning the rest.
         ok, err, rollback_failed = await _write_doc_to_stores(
             vec_store=vec_store,

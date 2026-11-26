@@ -61,7 +61,7 @@ def create_app(
     # and the LRU pool's eviction tasks never run if the loop is exiting.
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # 硬伤1: populate per-app state on app.state (shared services + the
+        # defect-1: populate per-app state on app.state (shared services + the
         # per-app mutable dicts tasks/watches/kb_locks/project_kb_map). The
         # contextvar-binding middleware is registered on the app below (must
         # happen before the middleware stack is built, not inside lifespan).
@@ -89,7 +89,7 @@ def create_app(
                 await embed_client.close()
             except Exception as e:
                 logger.warning("lifespan: embed_client close failed: %s", e)
-            # 硬伤A/P0-3: close every pooled VectorStore backend handle (LanceDB
+            # defect-A/P0-3: close every pooled VectorStore backend handle (LanceDB
             # table refs / fusion_store lmdb envs) so no FD/env leaks across
             # reload.
             try:
@@ -161,7 +161,7 @@ def create_app(
         app.state.identity_client = None
         logger.debug("identity integration OFF (FUSION_RAG_REQUIRE_IDENTITY unset)")
 
-    # 硬伤1: bind each request's app.state to a contextvar so the no-arg
+    # defect-1: bind each request's app.state to a contextvar so the no-arg
     # accessors (get_kb_manager / get_embed_client / ...) resolve the current
     # request's app without a Request parameter. Registered on the app object,
     # not in the lifespan — middleware cannot be added after the stack starts.
@@ -425,7 +425,10 @@ def _run_startup_probe(mlx_url: str, embed_model: str, mlx_api_key: str) -> None
     logger.info("startup probe: fusion-mlx embedding backend reachable at %s", mlx_url)
 
 
-if __name__ == "__main__":
+def main() -> None:
+    # Issue #165 (P2): registered as the `fusion-rag` console script in
+    # pyproject.toml — the module entry (`python -m fusion_rag.api.server`)
+    # and start.sh keep working unchanged; this is the same boot path.
     from fusion_core.config import client_key, resolve_api_key, service_port
 
     host = os.environ.get("FUSION_RAG_HOST", "127.0.0.1")
@@ -498,3 +501,7 @@ if __name__ == "__main__":
         mlx_api_key=mlx_api_key,
         log_level=log_level,
     )
+
+
+if __name__ == "__main__":
+    main()

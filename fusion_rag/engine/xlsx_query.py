@@ -328,7 +328,7 @@ def validate_sql(sql: str) -> str:
         raise ValueError("no SELECT statement found in LLM output")
     cleaned = cleaned[kw.start() :]
     # Small models double the quotes around string literals when the schema
-    # uses quoted identifiers ("") — ""华东"" is a syntax error; collapse any
+    # uses quoted identifiers ("") — ""EastChina"" is a syntax error; collapse any
     # run of 2+ quotes to one. (Legit SQL uses '' for escaping, never "".)
     cleaned = re.sub(r'"{2,}', '"', cleaned)
     if not cleaned:

@@ -100,6 +100,11 @@ ignore = ["BLE001", "S101", "S311", "S324", "S608", "RUF003", "RUF005", "E402", 
 [tool.setuptools.packages.find]
 include = ["fusion_rag*"]
 
+[project.scripts]
+# Issue #165 (P2): console-script entry point — same boot path as
+# `python -m fusion_rag.api.server` (env resolution + startup probes + serve).
+fusion-rag = "fusion_rag.api.server:main"
+
 [tool.setuptools.package-data]
 # Console UI page (issue: admin menu) must ship inside the wheel/editable install.
 "fusion_rag.console" = ["*.html", "assets/*"]

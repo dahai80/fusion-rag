@@ -9,7 +9,7 @@ Storage: per-KB SQLite {storage_path}/sparse.db — chunk_id -> {token_id:
 weight} JSON, written at ingest, read at query time for the third RRF fusion
 channel in HybridSearch. Batched lookups by chunk_id (same #94 exact-chunk-id
 discipline as vectors/BM25 teardown). SqliteBase gives WAL + the shared
-thread-safe connection policy (硬伤6).
+thread-safe connection policy (defect-6).
 """
 
 from __future__ import annotations

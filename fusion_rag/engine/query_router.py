@@ -8,7 +8,7 @@ pipeline (+ retry). Rules first (deterministic, zero cost); a learned
 classifier is deliberately NOT added until rules prove insufficient.
 Route map: simple -> single-path (no hybrid/rerank/retry); standard ->
 hybrid + rerank; complex -> full pipeline + bounded retry (R5).
-user instruction: "按照你的方案和计划落地所有phase阶段的需求"
+user instruction: "implement all phase requirements according to your plan"
 """
 
 from __future__ import annotations

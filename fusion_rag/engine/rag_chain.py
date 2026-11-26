@@ -3,7 +3,7 @@
 callers: routes.py ask endpoint, KnowledgeBase RAG pipeline
 API: MultiTurnRAG.ask(question, context, session_id), .clear_history(), .token_count()
 schema: history list[dict], token_budget int, sessions dict
-user instruction: "按照你的方案和计划落地所有phase阶段的需求"
+user instruction: "implement all phase requirements according to your plan"
 """
 
 from __future__ import annotations
