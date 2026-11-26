@@ -250,6 +250,10 @@ Qdrant 不可达时的预期表现：**写入（ingest）响亮失败** —— u
 
 ## 更新日志
 
+### v0.8.47
+
+- **控制台问答页新增检索管线区（issue #163）** —— 按已定稿原型 04-knowledge-qa 落地"检索管线"区：问答页在回答卡片下方展示分阶段管线（`查询改写 (HyDE/扩展) → 向量+BM25+稀疏三路 → RRF → cross-encoder 重排 → 权限/状态过滤过采样 → 答案生成`），带 per-KB 实时计数（文档 / 分块 / 查询）与已埋点阶段的调用次数 + 平均延迟。后端新增只读接口 `GET /kb/bases/{kb_id}/pipeline`，全部数据取自 RED 指标注册表；未埋点阶段返回 `null`，绝不编造数字。同 PR 修复该接口暴露出的 RED 指标潜伏 bug：中间件在路由发生前提取标签，计数器一直按原始路径 + 空 kb_id 记账而非低基数路由模板 —— 现改为 `call_next` 之后重新提取。
+
 ### v0.8.46
 
 - **结构化 XLSX 查询 —— 基于 sheet schema 的 text-to-SQL（issue #161）** —— 表格类聚合问题（"Q3 华东区销售额合计"）现在由**计算出的数据行**带引用回答，而非 LLM 对线性化 chunk 做算术。ingest 时，XLSX 文档的每个 sheet 额外落成 per-KB `sheets.db` 里的真实 SQLite 表（推断 INTEGER/REAL/TEXT 列类型、表头映射、全量行，行数上限 100k 且 `row_count` 恒报真实总数）。`POST /kb/bases/{kb_id}/xlsx/query` 把 schema DDL + 问题交给 LLM planner（短别名 `sheet_N`，绝不要求模型转写长随机表名）；生成的 SQL 经确定性守卫（单语句、仅 SELECT/WITH、危险关键字黑名单、前导散文/围栏剥离、双引号坍缩）后在**只读** SQLite 连接上执行并强制行数上限（截断可观测）。引用解析 SQL 实际触碰的 sheet；`answer=true` 由计算行组装答案（LLM 只排版，绝不重算）；`GET .../xlsx/sheets` 为无 LLM 的 schema 内省。Markdown chunk 原样保留 —— 结构化层是增量；SQL 被拒返回 400、planner 不可用返回 502，调用方可回退 `/search`。
